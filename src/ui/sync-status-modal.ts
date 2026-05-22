@@ -4,7 +4,7 @@ import type { SyncStatus } from "./status-bar";
 export interface SyncStatusInfo {
   status: SyncStatus;
   detail?: string;
-  syncEnabled: boolean;
+  backgroundSyncEnabled: boolean;
   lastSyncTime: number | null;
   lastSyncSummary?: string | null;
   deviceId: string;
@@ -17,7 +17,7 @@ export class SyncStatusModal extends Modal {
     private info: SyncStatusInfo,
     private actions: {
       onSyncNow: () => void;
-      onToggleSync: () => void;
+      onToggleBackgroundSync: () => void;
       onOpenSettings: () => void;
       onViewLogs: () => void;
       checkRemote?: () => Promise<{ pendingChanges: number } | null>;
@@ -70,10 +70,10 @@ export class SyncStatusModal extends Modal {
       )
       .addButton((btn) =>
         btn
-          .setButtonText(info.syncEnabled ? "Stop Sync" : "Start Sync")
+          .setButtonText(info.backgroundSyncEnabled ? "Auto-sync off" : "Auto-sync on")
           .onClick(() => {
             this.close();
-            this.actions.onToggleSync();
+            this.actions.onToggleBackgroundSync();
           }),
       )
       .addButton((btn) =>

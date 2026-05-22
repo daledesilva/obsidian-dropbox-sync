@@ -307,3 +307,37 @@
 .dbx-sync-settings-exclude-textarea {
   width: 100%;
 }
+
+/* ── Sync scope modal ── */
+
+.dbx-sync-scope-modal {
+  max-width: 420px;
+}
+
+.dbx-sync-scope-modal-mobile {
+  max-width: 95vw;
+}
+
+.dbx-sync-scope-rows {
+  margin: 12px 0 8px;
+}
+
+.dbx-sync-scope-rows .setting-item {
+  border: none;
+  padding: 6px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dbx-sync-scope-rows .setting-item-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dbx-sync-scope-rows .setting-item-control {
+  flex: 0 0 auto;
+  padding-top: 0;
+}
+

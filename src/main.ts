@@ -3,6 +3,7 @@ import {
   DEFAULT_SETTINGS,
   generateDeviceId,
   getDefaultExcludePatterns,
+  mergeBuiltInExcludePatterns,
   getEffectiveAppKey,
   getEffectiveRemotePath,
   type PluginSettings,
@@ -43,6 +44,8 @@ import {
   type SyncReportInput,
 } from "./ui/sync-feedback";
 import { SyncLiveReport } from "./ui/sync-live-report";
+import { SyncScopeModal } from "./ui/sync-scope-modal";
+import { resolveSyncScope, SYNC_SCOPE_LABELS, type SyncScope } from "./sync/sync-scope";
 import type { SyncPlan } from "./types";
 
 const DEBOUNCE_DELAY_MS = 5000;
@@ -67,6 +70,13 @@ export default class DropboxSyncPlugin extends Plugin {
   private incompatiblePathsModal: IncompatiblePathsModal | null = null;
   /** applyPathRenames 중 vault rename → trackDelete 억제 */
   private suppressRenameDeleteTracking = false;
+  private lastSyncScope: SyncScope = "everything";
+  /** Scope modal open — ribbon stays idle until user picks an option. */
+  private scopeModalOpen = false;
+
+  get isSyncing(): boolean {
+    return this.syncing;
+  }
 
   // ── 모듈 ──
   private auth: DesktopAuth | null = null;
@@ -91,8 +101,18 @@ export default class DropboxSyncPlugin extends Plugin {
       this.settings.deviceId = generateDeviceId();
       needsSave = true;
     }
-    if (this.settings.excludePatterns.length === 0) {
-      this.settings.excludePatterns = getDefaultExcludePatterns(this.app.vault.configDir);
+    const configDir = this.app.vault.configDir;
+    const mergedExcludes = mergeBuiltInExcludePatterns(
+      this.settings.excludePatterns.length === 0
+        ? getDefaultExcludePatterns(configDir)
+        : this.settings.excludePatterns,
+      configDir,
+    );
+    if (
+      mergedExcludes.length !== this.settings.excludePatterns.length
+      || mergedExcludes.some((p, i) => p !== this.settings.excludePatterns[i])
+    ) {
+      this.settings.excludePatterns = mergedExcludes;
       needsSave = true;
     }
     if (needsSave) {
@@ -108,12 +128,15 @@ export default class DropboxSyncPlugin extends Plugin {
     this.statusBar = new StatusBar(this.addStatusBarItem());
 
     // 커맨드 등록
-    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => { void this.syncNow({ manual: true }); } });
+    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.openSyncScopeModal() });
     this.addCommand({ id: "view-logs", name: "View sync logs", callback: () => this.showLogs() });
     this.addCommand({
       id: "toggle-sync",
-      name: "Toggle sync on/off",
-      callback: () => this.settings.syncEnabled ? this.stopSync() : this.startSync(),
+      name: "Toggle automatic background sync",
+      callback: () =>
+        this.settings.backgroundSyncEnabled
+          ? void this.disableBackgroundSync()
+          : void this.enableBackgroundSync(),
     });
 
     registerDemoCommands(this);
@@ -133,8 +156,10 @@ export default class DropboxSyncPlugin extends Plugin {
       (params) => { void this.handleOpenFile(params); },
     );
 
-    // UI: 리본 + 상태 바
-    this.ribbonEl = this.addRibbonIcon("refresh-cw", "Dropbox sync", () => { void this.syncNow({ manual: true }); });
+    // UI: 리본 + 상태 바 (use addRibbonIcon callback — addEventListener is unreliable on mobile)
+    this.ribbonEl = this.addRibbonIcon("refresh-cw", "Dropbox sync", () => {
+      void this.handleRibbonClick();
+    });
     this.ribbonEl.addEventListener("contextmenu", (evt) => {
       evt.preventDefault();
       this.showContextMenu(evt);
@@ -162,7 +187,11 @@ export default class DropboxSyncPlugin extends Plugin {
   // ── Settings ──
 
   async loadSettings(): Promise<void> {
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData() as Partial<PluginSettings>);
+    const raw = await this.loadData() as Partial<PluginSettings> & { syncEnabled?: boolean };
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+    if (raw.syncEnabled !== undefined && raw.backgroundSyncEnabled === undefined) {
+      this.settings.backgroundSyncEnabled = raw.syncEnabled;
+    }
   }
 
   async saveSettings(): Promise<void> {
@@ -254,8 +283,49 @@ export default class DropboxSyncPlugin extends Plugin {
 
   // ── Sync ──
 
-  async syncNow(options?: { manual?: boolean }): Promise<void> {
+  private async handleRibbonClick(): Promise<void> {
+    if (this.syncing) {
+      this.cancelCurrentSync();
+      return;
+    }
+    if (this.scopeModalOpen) return;
+    await this.openSyncScopeModal();
+  }
+
+  async openSyncScopeModal(): Promise<void> {
+    if (!this.settings.refreshToken) {
+      new Notice("Dropbox sync: not connected. Open settings to connect.");
+      return;
+    }
+    if (!this.settings.syncName) {
+      new Notice("Dropbox sync: set a vault ID in settings first.");
+      return;
+    }
+    await this.initEngine();
+    this.scopeModalOpen = true;
+    setRibbonSyncing(this.ribbonEl, false);
+    new SyncScopeModal(this.app, this).open();
+  }
+
+  /** Called when the scope modal closes (including after a scope is chosen). */
+  onSyncScopeModalClosed(): void {
+    this.scopeModalOpen = false;
+  }
+
+  cancelCurrentSync(): void {
+    if (!this.syncing) return;
+    this.abortController?.abort();
+    this.syncing = false;
+    this.abortController = null;
+    setRibbonSyncing(this.ribbonEl, false);
+    this.statusBar?.update("idle", "stopping…");
+    new Notice("Dropbox Sync: stopping…", 2000);
+  }
+
+  async syncNow(options?: { manual?: boolean; scope?: SyncScope }): Promise<void> {
     const manual = options?.manual ?? false;
+    const { scope, lastUsedScope } = resolveSyncScope(options?.scope, this.lastSyncScope);
+    this.lastSyncScope = lastUsedScope;
     if (this.syncing) return;
     if (!this.settings.syncName) {
       new Notice("Dropbox sync: set a vault ID in settings first.");
@@ -274,7 +344,9 @@ export default class DropboxSyncPlugin extends Plugin {
     this.syncing = true;
     this.abortController = new AbortController();
     this.longpoll?.stop();
-    setRibbonSyncing(this.ribbonEl, true);
+    if (!this.scopeModalOpen) {
+      setRibbonSyncing(this.ribbonEl, true);
+    }
     this.statusBar?.update("syncing");
 
     let cursorUpdated = false;
@@ -295,6 +367,7 @@ export default class DropboxSyncPlugin extends Plugin {
         startedAt,
         deviceId: this.settings.deviceId,
         version: this.manifest.version,
+        scope: SYNC_SCOPE_LABELS[scope],
       });
     } catch (e) {
       console.error("[Dropbox Sync] _sync-log.md open failed", e);
@@ -302,11 +375,12 @@ export default class DropboxSyncPlugin extends Plugin {
     }
 
     if (manual) notifySyncStart();
-    void this.log(`sync started (v${this.manifest.version})`);
+    void this.log(`sync started (v${this.manifest.version}, scope: ${scope})`);
 
     try {
       const engine = this.getOrCreateEngine();
       engine.setLiveReport(liveReport);
+      engine.setSyncScope(scope, this.app.vault.configDir);
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
       if (prunedDeletes > 0) {
         liveReport?.line(`pruned ${prunedDeletes} stale delete-log entry/entries`);
@@ -406,27 +480,36 @@ export default class DropboxSyncPlugin extends Plugin {
       this.lastSyncTime = endedAt;
       await this.logger?.flush();
       // 미소비 삭제가 있으면 후속 싱크 스케줄 (싱크 중 사용자 삭제 처리)
-      if (this.engineMgr?.hasPendingDeletes() && this.settings.syncEnabled) {
+      if (this.engineMgr?.hasPendingDeletes() && this.settings.backgroundSyncEnabled) {
         this.scheduleDebouncedSync();
-      } else if (cursorUpdated && this.settings.syncEnabled) {
+      } else if (cursorUpdated && this.settings.backgroundSyncEnabled) {
         this.longpoll?.schedule();
-      } else if (needsResyncAfterRename && this.settings.syncEnabled) {
-        window.setTimeout(() => void this.syncNow(), 200);
+      } else if (needsResyncAfterRename) {
+        window.setTimeout(() => void this.syncNow({ scope: this.lastSyncScope }), 200);
       }
     }
   }
 
-  async startSync(): Promise<void> {
-    this.settings.syncEnabled = true;
+  async enableBackgroundSync(): Promise<void> {
+    this.settings.backgroundSyncEnabled = true;
     await this.saveSettings();
-    void this.syncNow();
   }
 
-  async stopSync(): Promise<void> {
-    this.abortController?.abort();
+  async disableBackgroundSync(): Promise<void> {
     this.longpoll?.stop();
-    this.settings.syncEnabled = false;
+    this.clearDebounceTimer();
+    this.settings.backgroundSyncEnabled = false;
     await this.saveSettings();
+  }
+
+  /** @deprecated Use enableBackgroundSync — does not run a sync cycle. */
+  async startSync(): Promise<void> {
+    await this.enableBackgroundSync();
+  }
+
+  /** @deprecated Use disableBackgroundSync — does not cancel manual sync. */
+  async stopSync(): Promise<void> {
+    await this.disableBackgroundSync();
   }
 
   // ── Engine 접근자 (demo-commands 등에서 사용) ──
@@ -484,7 +567,7 @@ export default class DropboxSyncPlugin extends Plugin {
         httpClient: obsidianHttpClient,
         getCursor: async () => this.engineMgr?.store?.getMeta("cursor") ?? null,
         isSyncing: () => this.syncing,
-        isEnabled: () => this.settings.syncEnabled && !!this.engineMgr?.store,
+        isEnabled: () => this.settings.backgroundSyncEnabled && !!this.engineMgr?.store,
         onChanges: () => { void this.syncNow(); },
         log: (msg, data) => this.log(msg, data),
       });
@@ -632,10 +715,13 @@ export default class DropboxSyncPlugin extends Plugin {
 
   applySyncState(): void {
     if (this.statusBar) {
-      this.statusBar.enabled = this.settings.syncEnabled;
+      this.statusBar.backgroundSyncEnabled = this.settings.backgroundSyncEnabled;
     }
 
-    const shouldRun = this.settings.syncEnabled && !!this.settings.refreshToken && !!this.settings.syncName;
+    const shouldRun =
+      this.settings.backgroundSyncEnabled
+      && !!this.settings.refreshToken
+      && !!this.settings.syncName;
     if (shouldRun) {
       this.clearSyncTimer();
       this.syncTimerId = window.setInterval(() => { void this.syncNow(); }, this.settings.syncInterval * 1000);
@@ -646,7 +732,7 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   private scheduleDebouncedSync(): void {
-    if (!this.settings.syncEnabled) return;
+    if (!this.settings.backgroundSyncEnabled) return;
     this.clearDebounceTimer();
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
@@ -676,15 +762,19 @@ export default class DropboxSyncPlugin extends Plugin {
       {
         status: this.statusBar?.lastStatus ?? "idle",
         detail: this.statusBar?.lastDetail,
-        syncEnabled: this.settings.syncEnabled,
+        backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
         lastSyncTime: this.lastSyncTime,
         lastSyncSummary: this.lastSyncSummary,
         deviceId: this.settings.deviceId,
         version: this.manifest.version,
       },
       {
-        onSyncNow: () => { void this.syncNow({ manual: true }); },
-        onToggleSync: () => { void (this.settings.syncEnabled ? this.stopSync() : this.startSync()); },
+        onSyncNow: () => this.openSyncScopeModal(),
+        onToggleBackgroundSync: () => {
+          void (this.settings.backgroundSyncEnabled
+            ? this.disableBackgroundSync()
+            : this.enableBackgroundSync());
+        },
         onOpenSettings: () => this.openSettings(),
         onViewLogs: () => { void this.showLogs(); },
         checkRemote: () => this.checkRemoteChanges(),
@@ -695,13 +785,21 @@ export default class DropboxSyncPlugin extends Plugin {
   private showContextMenu(evt: MouseEvent): void {
     const menu = new Menu();
     menu.addItem((item) =>
-      item.setTitle("Sync now").setIcon("refresh-cw").onClick(() => { void this.syncNow({ manual: true }); }),
+      item.setTitle("Sync now").setIcon("refresh-cw").onClick(() => this.openSyncScopeModal()),
     );
     menu.addItem((item) =>
       item
-        .setTitle(this.settings.syncEnabled ? "Stop Sync" : "Start Sync")
-        .setIcon(this.settings.syncEnabled ? "pause" : "play")
-        .onClick(() => this.settings.syncEnabled ? this.stopSync() : this.startSync()),
+        .setTitle(
+          this.settings.backgroundSyncEnabled
+            ? "Turn off automatic sync"
+            : "Turn on automatic sync",
+        )
+        .setIcon(this.settings.backgroundSyncEnabled ? "pause" : "play")
+        .onClick(() => {
+          void (this.settings.backgroundSyncEnabled
+            ? this.disableBackgroundSync()
+            : this.enableBackgroundSync());
+        }),
     );
     menu.addSeparator();
     menu.addItem((item) =>

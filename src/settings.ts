@@ -12,7 +12,8 @@ export interface PluginSettings {
   accessToken: string;
   tokenExpiry: number;
   syncInterval: number;
-  syncEnabled: boolean;
+  /** Interval, longpoll, and file-watch triggers. Manual “Sync now” works when false. */
+  backgroundSyncEnabled: boolean;
   conflictStrategy: ConflictStrategy;
   deleteProtection: boolean;
   deleteThreshold: number;
@@ -30,7 +31,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   accessToken: "",
   tokenExpiry: 0,
   syncInterval: 60,
-  syncEnabled: false,
+  backgroundSyncEnabled: false,
   conflictStrategy: "keep_both",
   deleteProtection: true,
   deleteThreshold: 5,
@@ -41,9 +42,44 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   onboardingDone: false,
 };
 
-/** configDir 기반 기본 exclude 패턴 (최초 설정 시 적용) */
+/**
+ * 플러그인이 권장하는 기본 제외 패턴 (설정 UI에 표시·편집 가능).
+ * 숨김 제외 없음 — 여기에 없으면 동기화 대상이 될 수 있음.
+ */
+export function getBuiltInExcludePatterns(configDir: string): string[] {
+  return [
+    ".git/",
+    ".trash/",
+    ".sync-state/",
+    ".sync-reports/",
+    "_sync-log.md",
+    "sync-debug-*.log",
+    ".DS_Store",
+    "Thumbs.db",
+    `${configDir}/workspace*`,
+  ];
+}
+
+/** 최초 설정용 — built-in 목록과 동일 */
 export function getDefaultExcludePatterns(configDir: string): string[] {
-  return [`${configDir}/workspace*`];
+  return [...getBuiltInExcludePatterns(configDir)];
+}
+
+/** 기존 설정에 누락된 built-in 패턴을追加 (업그레이드 시 UI에 보이도록) */
+export function mergeBuiltInExcludePatterns(
+  existing: string[],
+  configDir: string,
+): string[] {
+  const seen = new Set(existing.map((p) => p.toLowerCase()));
+  const merged = [...existing];
+  for (const pattern of getBuiltInExcludePatterns(configDir)) {
+    const key = pattern.toLowerCase();
+    if (!seen.has(key)) {
+      merged.push(pattern);
+      seen.add(key);
+    }
+  }
+  return merged;
 }
 
 export function generateDeviceId(): string {

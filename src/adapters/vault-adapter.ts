@@ -23,9 +23,14 @@ export type LocalFileScanCallback = (path: string, detail: "cached" | "hashed") 
 
 export class VaultAdapter implements FileSystem {
   private hashCache = new Map<string, HashCacheEntry>();
+  private abortSignal: AbortSignal | null = null;
   onLocalFileScanned: LocalFileScanCallback | null = null;
 
   constructor(private vault: Vault, private excludePatterns: string[] = [], private fileManager: FileManager) {}
+
+  setAbortSignal(signal: AbortSignal | null): void {
+    this.abortSignal = signal;
+  }
 
   async read(path: string): Promise<Uint8Array> {
     const file = this.getFile(path);
@@ -69,6 +74,7 @@ export class VaultAdapter implements FileSystem {
     const nextCache = new Map<string, HashCacheEntry>();
 
     for (const file of files) {
+      this.abortSignal?.throwIfAborted();
       if (this.shouldExclude(file.path)) continue;
 
       const pathLower = file.path.toLowerCase();
@@ -129,12 +135,7 @@ export class VaultAdapter implements FileSystem {
   }
 
   private shouldExclude(path: string): boolean {
-    if (path === "_sync-log.md" || path.endsWith("/_sync-log.md")) return true;
-    const systemExcludes = [".trash/", ".sync-state/", ".sync-reports/", ".DS_Store", "Thumbs.db"];
-    if (systemExcludes.some((ex) => path.startsWith(ex) || path.includes(`/${ex}`))) return true;
-    if (path.startsWith("sync-debug-") && path.endsWith(".log")) return true;
-    if (isExcluded(path, this.excludePatterns)) return true;
-    return false;
+    return isExcluded(path, this.excludePatterns);
   }
 
   private async ensureParentDir(path: string): Promise<void> {

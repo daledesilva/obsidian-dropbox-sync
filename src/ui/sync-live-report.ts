@@ -25,6 +25,7 @@ export interface SyncLiveReportMeta {
   startedAt: number;
   deviceId: string;
   version: string;
+  scope?: string;
 }
 
 export interface SyncLiveReportSink {
@@ -95,6 +96,7 @@ export class SyncLiveReport implements SyncLiveReportSink {
       "",
       `**Started:** ${formatTimestamp(this.meta.startedAt)}`,
       `**Device:** ${this.meta.deviceId || "unknown"} · v${this.meta.version}`,
+      this.meta.scope ? `**Scope:** ${this.meta.scope}` : "",
       "",
       "Per-file log (updates during sync):",
     ].join("\n") + "\n";

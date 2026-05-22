@@ -5,11 +5,12 @@ import { createPlan } from "./planner";
 import type { ConflictStrategy, ConflictResolver, DeleteGuardResult } from "../types";
 import { executePlan } from "./executor";
 import { checkDeleteGuard } from "./guards";
-import { DropboxCursorResetError } from "../adapters/dropbox-adapter";
+import { DropboxAdapter, DropboxCursorResetError } from "../adapters/dropbox-adapter";
 import { isExcluded } from "../exclude";
 import { CycleContext } from "./cycle-context";
 import type { SyncLiveReportSink } from "../ui/sync-live-report";
 import { VaultAdapter, type LocalFileScanCallback } from "../adapters/vault-adapter";
+import { isPathInScope, type SyncScope } from "./sync-scope";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -80,6 +81,8 @@ export interface CycleResult {
 export class SyncEngine {
   private deletedPaths = new Set<string>();
   private liveReport: SyncLiveReportSink | null = null;
+  private syncScope: SyncScope = "everything";
+  private configDir = ".obsidian";
 
   constructor(
     private deps: SyncEngineDeps,
@@ -89,6 +92,17 @@ export class SyncEngine {
   /** Per-sync live markdown report (set before each runCycle). */
   setLiveReport(report: SyncLiveReportSink | null): void {
     this.liveReport = report;
+  }
+
+  /** 동기화 범위 (set before each runCycle). */
+  setSyncScope(scope: SyncScope, configDir: string): void {
+    this.syncScope = scope;
+    this.configDir = configDir;
+  }
+
+  private pathInScope(path: string): boolean {
+    const patterns = this.options.excludePatterns ?? [];
+    return isPathInScope(path, this.syncScope, this.configDir, patterns);
   }
 
   /** 로컬 삭제 이벤트 기록 */
@@ -120,6 +134,25 @@ export class SyncEngine {
 
   async runCycle(signal?: AbortSignal): Promise<CycleResult> {
     const { fs, remote, store } = this.deps;
+    this.attachAbortSignal(signal);
+    try {
+      return await this.runCycleInner(signal);
+    } finally {
+      this.attachAbortSignal(undefined);
+    }
+  }
+
+  private attachAbortSignal(signal?: AbortSignal): void {
+    if (this.deps.fs instanceof VaultAdapter) {
+      this.deps.fs.setAbortSignal(signal ?? null);
+    }
+    if (this.deps.remote instanceof DropboxAdapter) {
+      this.deps.remote.setAbortSignal(signal);
+    }
+  }
+
+  private async runCycleInner(signal?: AbortSignal): Promise<CycleResult> {
+    const { fs, remote, store } = this.deps;
     const ctx = this.options.enableCycleReports ? new CycleContext() : undefined;
 
     // 0. 사이클 시작 이벤트
@@ -138,7 +171,9 @@ export class SyncEngine {
     this.attachLocalScanCallback(localScanCb);
     let localFiles: import("../types").FileInfo[];
     try {
-      localFiles = this.collectLocalFiles(await fs.list());
+      localFiles = this.collectLocalFiles(await fs.list()).filter((f) =>
+        this.pathInScope(f.path),
+      );
     } finally {
       this.attachLocalScanCallback(null);
     }
@@ -147,15 +182,25 @@ export class SyncEngine {
 
     // 2. 원격 변경 수집 (delta)
     await this.liveReport?.phaseStart(2);
-    const { deltaEntries, latestCursor } = await this.fetchRemoteDeltas(store, remote, signal, ctx);
-    await this.liveReport?.phaseEnd(`${deltaEntries.length} remote entry/entries`);
+    const { deltaEntries, latestCursor, inScopeDeltaCount } = await this.fetchRemoteDeltas(
+      store,
+      remote,
+      signal,
+      ctx,
+    );
+    await this.liveReport?.phaseEnd(
+      `${inScopeDeltaCount} in-scope remote entry/entries (${deltaEntries.length} delta total)`,
+    );
 
     // 3. 이전 상태 로드
     signal?.throwIfAborted();
-    const baseEntries = await store.getAllEntries();
+    const baseEntries = (await store.getAllEntries()).filter((e) =>
+      this.pathInScope(e.localPath),
+    );
 
     // 4. base + delta 병합 → 전체 원격 상태
     const fullRemoteMap = this.buildFullRemoteState(baseEntries, deltaEntries);
+    this.filterRemoteMapByScope(fullRemoteMap);
 
     // 5. catch-up: vault 이벤트 누락 보완
     this.inferMissingDeletes(localFiles, fullRemoteMap, baseEntries);
@@ -271,6 +316,16 @@ export class SyncEngine {
 
   // ── private helpers ──
 
+  private filterRemoteMapByScope(map: Map<string, RemoteEntry>): void {
+    for (const key of [...map.keys()]) {
+      const entry = map.get(key)!;
+      const path = entry.pathDisplay || entry.pathLower;
+      if (!this.pathInScope(path)) {
+        map.delete(key);
+      }
+    }
+  }
+
   private attachLocalScanCallback(cb: LocalFileScanCallback | null): void {
     if (this.deps.fs instanceof VaultAdapter) {
       this.deps.fs.onLocalFileScanned = cb;
@@ -288,7 +343,7 @@ export class SyncEngine {
     remote: import("../adapters/interfaces").RemoteStorage,
     signal?: AbortSignal,
     ctx?: CycleContext,
-  ): Promise<{ deltaEntries: RemoteEntry[]; latestCursor: string }> {
+  ): Promise<{ deltaEntries: RemoteEntry[]; latestCursor: string; inScopeDeltaCount: number }> {
     let cursor = await store.getMeta("cursor");
     const fetchStart = Date.now();
     let changes;
@@ -308,7 +363,11 @@ export class SyncEngine {
     let deltaEntries = [...changes.entries];
     let latestCursor = changes.cursor;
     let hasMore = changes.hasMore;
+    let loggedInScope = 0;
     for (const entry of changes.entries) {
+      const path = entry.pathDisplay || entry.pathLower;
+      if (!this.pathInScope(path)) continue;
+      loggedInScope++;
       const tag = entry.deleted ? "deleted" : "file";
       this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
     }
@@ -327,6 +386,9 @@ export class SyncEngine {
       const pageStart = Date.now();
       const more = await remote.listChanges(latestCursor);
       for (const entry of more.entries) {
+        const path = entry.pathDisplay || entry.pathLower;
+        if (!this.pathInScope(path)) continue;
+        loggedInScope++;
         const tag = entry.deleted ? "deleted" : "file";
         this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
       }
@@ -343,7 +405,7 @@ export class SyncEngine {
       });
     }
 
-    return { deltaEntries, latestCursor };
+    return { deltaEntries, latestCursor, inScopeDeltaCount: loggedInScope };
   }
 
   /** base + delta 병합 → 전체 원격 상태 맵 (제외 패턴 적용 포함) */

@@ -33,23 +33,26 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     const isConnected = !!this.plugin.settings.refreshToken;
     const hasSyncName = !!this.plugin.settings.syncName;
-    const syncRunning = this.plugin.settings.syncEnabled;
+    const autoSyncOn = this.plugin.settings.backgroundSyncEnabled;
 
     // ── Status bar ──
     const version = `v${this.plugin.manifest.version}`;
     const status = new Setting(containerEl);
     status.settingEl.addClass("dbx-sync-settings-status-bar");
-    if (syncRunning) {
+    if (autoSyncOn) {
       status
-        .setName(`Sync is running · ${version}`)
-        .setDesc("Your vault is being synced with Dropbox.")
+        .setName(`Automatic sync on · ${version}`)
+        .setDesc("Background sync is active. Use Sync now anytime for a manual run.")
         .addButton((btn) =>
-          btn.setButtonText("Sync now").onClick(() => this.plugin.syncNow()),
+          btn.setButtonText("Sync now").onClick(() => this.plugin.openSyncScopeModal()),
         );
     } else if (isConnected && hasSyncName) {
       status
-        .setName(`Sync is stopped · ${version}`)
-        .setDesc("Toggle sync on to start syncing.");
+        .setName(`Manual sync only · ${version}`)
+        .setDesc("Automatic sync is off. Use Sync now or enable background sync below.")
+        .addButton((btn) =>
+          btn.setButtonText("Sync now").onClick(() => this.plugin.openSyncScopeModal()),
+        );
     } else if (isConnected) {
       status
         .setName(`Not syncing · ${version}`)
@@ -66,7 +69,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setDesc("Connect to Dropbox to set up sync.");
     } else {
-      this.renderSyncSection(containerEl, hasSyncName, syncRunning);
+      this.renderSyncSection(containerEl, hasSyncName, autoSyncOn);
       if (hasSyncName) {
         this.renderSyncNameChange(containerEl, this.plugin.settings.syncName);
       }
@@ -112,7 +115,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
   private renderSyncSection(
     containerEl: HTMLElement,
     hasSyncName: boolean,
-    syncRunning: boolean,
+    autoSyncOn: boolean,
   ): void {
     if (!hasSyncName) {
       this.renderSyncNameSetup(containerEl);
@@ -120,13 +123,17 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     }
 
     new Setting(containerEl)
-      .setName("Enable sync")
+      .setName("Automatic background sync")
+      .setDesc(
+        "When on: sync on a timer, when files change, and when Dropbox reports changes. "
+        + "When off: only runs when you choose Sync now.",
+      )
       .addToggle((toggle) =>
-        toggle.setValue(syncRunning).onChange(async (value) => {
+        toggle.setValue(autoSyncOn).onChange(async (value) => {
           if (value) {
-            await this.plugin.startSync();
+            await this.plugin.enableBackgroundSync();
           } else {
-            await this.plugin.stopSync();
+            await this.plugin.disableBackgroundSync();
           }
           this.display();
         }),
@@ -262,7 +269,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.refreshToken = "";
             this.plugin.settings.accessToken = "";
             this.plugin.settings.tokenExpiry = 0;
-            this.plugin.settings.syncEnabled = false;
+            this.plugin.settings.backgroundSyncEnabled = false;
             await this.plugin.saveSettings();
             this.display();
           }),
@@ -398,7 +405,9 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     const excludeSetting = new Setting(containerEl)
       .setName("Exclude patterns")
-      .setDesc(`Files matching these patterns won't sync. One per line. Examples: *.pdf, attachments/, ${this.app.vault.configDir}/workspace*`)
+      .setDesc(
+        "Files matching these patterns won't sync (one per line). Defaults include .git/, plugin state, and sync logs — remove a line to allow that path to sync.",
+      )
       .addTextArea((text) => {
         text
           .setValue(this.plugin.settings.excludePatterns.join("\n"))
@@ -533,12 +542,14 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
   private updateExcludeCount(setting: Setting): void {
     const patterns = this.plugin.settings.excludePatterns;
-    if (patterns.length === 0) {
-      setting.setDesc(`Files matching these patterns won't sync. One per line. Examples: *.pdf, attachments/, ${this.app.vault.configDir}/workspace*`);
-      return;
-    }
     const allFiles = this.app.vault.getFiles();
     const excluded = allFiles.filter((f: TFile) => isExcluded(f.path, patterns));
-    setting.setDesc(`${excluded.length} file(s) excluded out of ${allFiles.length} total.`);
+    const base =
+      "Files matching these patterns won't sync (one per line). Defaults include .git/, plugin state, and sync logs — remove a line to allow that path to sync.";
+    if (patterns.length === 0) {
+      setting.setDesc(base);
+      return;
+    }
+    setting.setDesc(`${base} Currently: ${excluded.length} of ${allFiles.length} local file(s) excluded.`);
   }
 }

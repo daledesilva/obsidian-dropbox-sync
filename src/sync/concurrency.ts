@@ -34,6 +34,7 @@ export async function runWithConcurrency<T>(
         results[i] = { status: "fulfilled", value: await tasks[i]() };
       } catch (reason) {
         results[i] = { status: "rejected", reason };
+        if (options?.signal?.aborted) break;
       }
       options?.onTaskComplete?.();
     }

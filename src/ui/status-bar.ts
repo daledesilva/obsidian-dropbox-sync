@@ -5,7 +5,7 @@ export class StatusBar {
   private timerId: ReturnType<typeof setTimeout> | null = null;
   private _lastStatus: SyncStatus = "idle";
   private _lastDetail: string | undefined;
-  private _enabled = false;
+  private _backgroundSyncEnabled = false;
 
   constructor(statusBarEl: HTMLElement) {
     this.el = statusBarEl;
@@ -14,8 +14,8 @@ export class StatusBar {
   get lastStatus(): SyncStatus { return this._lastStatus; }
   get lastDetail(): string | undefined { return this._lastDetail; }
 
-  set enabled(value: boolean) {
-    this._enabled = value;
+  set backgroundSyncEnabled(value: boolean) {
+    this._backgroundSyncEnabled = value;
     if (this._lastStatus === "idle") {
       this.render();
     }
@@ -58,11 +58,10 @@ export class StatusBar {
 
     switch (this._lastStatus) {
       case "idle":
-        if (this._enabled) {
+        if (this._backgroundSyncEnabled) {
           this.el.setText("Dropbox: idle");
         } else {
-          this.el.setText("Dropbox: off");
-          this.el.addClass("dbx-sync-statusbar-muted");
+          this.el.setText("Dropbox: manual");
         }
         break;
       case "syncing":

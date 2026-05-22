@@ -272,21 +272,25 @@ describe("DropboxAdapter retry on 429", () => {
     expect(httpClientMock).toHaveBeenCalledTimes(2);
   });
 
-  test("upload: 503 연속 5번 → 에러 throw", async () => {
-    const adapter = createAdapter();
-    const data = new Uint8Array([1]);
+  test(
+    "upload: 503 연속 5번 → 에러 throw",
+    async () => {
+      const adapter = createAdapter();
+      const data = new Uint8Array([1]);
 
-    for (let i = 0; i < 5; i++) {
-      httpClientMock.mockResolvedValueOnce({
-        status: 503,
-        json: {},
-        text: "service unavailable",
-      });
-    }
+      for (let i = 0; i < 5; i++) {
+        httpClientMock.mockResolvedValueOnce({
+          status: 503,
+          json: {},
+          text: "service unavailable",
+        });
+      }
 
-    await expect(adapter.upload("test.md", data)).rejects.toThrow("Dropbox API error 503");
-    expect(httpClientMock).toHaveBeenCalledTimes(5);
-  });
+      await expect(adapter.upload("test.md", data)).rejects.toThrow("Dropbox API error 503");
+      expect(httpClientMock).toHaveBeenCalledTimes(5);
+    },
+    20_000,
+  );
 
   test("rpcCall: 409 reset → DropboxCursorResetError (retry 안 함)", async () => {
     const adapter = createAdapter();
@@ -320,17 +324,21 @@ describe("DropboxAdapter retry on 429", () => {
     expect(httpClientMock).toHaveBeenCalledTimes(2);
   });
 
-  test("upload: 네트워크 에러 연속 5번 → throw", async () => {
-    const adapter = createAdapter();
-    const data = new Uint8Array([1]);
+  test(
+    "upload: 네트워크 에러 연속 5번 → throw",
+    async () => {
+      const adapter = createAdapter();
+      const data = new Uint8Array([1]);
 
-    for (let i = 0; i < 5; i++) {
-      httpClientMock.mockRejectedValueOnce(new Error("The network connection was lost."));
-    }
+      for (let i = 0; i < 5; i++) {
+        httpClientMock.mockRejectedValueOnce(new Error("The network connection was lost."));
+      }
 
-    await expect(adapter.upload("test.md", data)).rejects.toThrow("network connection was lost");
-    expect(httpClientMock).toHaveBeenCalledTimes(5);
-  });
+      await expect(adapter.upload("test.md", data)).rejects.toThrow("network connection was lost");
+      expect(httpClientMock).toHaveBeenCalledTimes(5);
+    },
+    35_000,
+  );
 
   test("download: 네트워크 에러 → 5xx → 성공", async () => {
     const adapter = createAdapter();

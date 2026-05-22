@@ -3,8 +3,7 @@ import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import { summarizeActions } from "../sync/sync-reporter";
 
-const RIBBON_ICON_IDLE = "refresh-cw";
-const RIBBON_ICON_SYNCING = "loader-2";
+const RIBBON_ICON = "refresh-cw";
 const RIBBON_CLASS_SYNCING = "dbx-sync-ribbon-syncing";
 const REPORTS_DIR = ".sync-reports";
 
@@ -34,9 +33,12 @@ export interface SyncReportInput {
 
 export function setRibbonSyncing(ribbonEl: HTMLElement | null, syncing: boolean): void {
   if (!ribbonEl) return;
-  setIcon(ribbonEl, syncing ? RIBBON_ICON_SYNCING : RIBBON_ICON_IDLE);
+  const wasSyncing = ribbonEl.hasClass(RIBBON_CLASS_SYNCING);
   ribbonEl.toggleClass(RIBBON_CLASS_SYNCING, syncing);
-  ribbonEl.setAttr("aria-label", syncing ? "Dropbox sync (syncing…)" : "Dropbox sync");
+  if (wasSyncing !== syncing) {
+    setIcon(ribbonEl, RIBBON_ICON);
+  }
+  ribbonEl.setAttr("aria-label", syncing ? "Stop sync" : "Dropbox sync");
 }
 
 export function notifySyncStart(): void {
