@@ -36,8 +36,8 @@ export interface SyncEngineOptions {
   excludePatterns?: string[];
   /** 병렬 실행 동시성. 기본값 1 (순차) */
   concurrency?: number;
-  /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수) */
-  onProgress?: (completed: number, total: number) => void;
+  /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수, 실패 수) */
+  onProgress?: (completed: number, total: number, failed: number) => void;
   /** conflict 직렬 실행 전 호출. conflict 총 수 전달. */
   onConflictCount?: (count: number) => void;
   /** 사이클 리포트 활성화 */
@@ -209,13 +209,20 @@ export class SyncEngine {
     signal?.throwIfAborted();
     const fullRemoteEntries = Array.from(fullRemoteMap.values());
     await this.liveReport?.phaseStart(3);
+    let planItemsLogged = 0;
     const plan = createPlan(localFiles, fullRemoteEntries, baseEntries, {
       localDeletedPaths: this.deletedPaths,
       ctx,
       onPlanItem: (pathLower, localPath, actionType, reason) => {
-        this.liveReport?.line(`\`${localPath}\` → **${actionType}** (${reason})`);
+        if (planItemsLogged < 15) {
+          this.liveReport?.line(`\`${localPath}\` → **${actionType}** (${reason})`);
+          planItemsLogged++;
+        }
       },
     });
+    if (plan.items.length > planItemsLogged) {
+      this.liveReport?.line(`… and ${plan.items.length - planItemsLogged} more planned`);
+    }
     await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
 
     // 7. 삭제 가드 적용
@@ -265,22 +272,27 @@ export class SyncEngine {
     // 8. 계획 실행
     signal?.throwIfAborted();
     await this.liveReport?.phaseStart(5);
+    let execFailed = 0;
     const result = await executePlan(planToRun, { fs, remote, store }, {
       conflictStrategy: this.options.conflictStrategy,
       conflictResolver: this.options.conflictResolver,
       isFileActive: this.options.isFileActive,
       signal,
       concurrency: this.options.concurrency,
-      onProgress: this.options.onProgress,
+      onProgress: (completed, total) => {
+        if (completed % 10 === 0 || completed === total) {
+          this.liveReport?.progressLine(
+            `${completed} / ${total} (${execFailed} failed)`,
+          );
+        }
+        this.options.onProgress?.(completed, total, execFailed);
+      },
       onConflictCount: this.options.onConflictCount,
       strictLocalPaths: this.options.strictLocalPaths,
       ctx,
       onExecItem: (localPath, actionType, event, ok, error) => {
-        if (event === "start") {
-          this.liveReport?.line(`\`${localPath}\` — ${actionType}…`);
-        } else if (ok) {
-          this.liveReport?.line(`\`${localPath}\` — ${actionType} ✓`);
-        } else {
+        if (event === "end" && !ok) {
+          execFailed++;
           this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
         }
       },

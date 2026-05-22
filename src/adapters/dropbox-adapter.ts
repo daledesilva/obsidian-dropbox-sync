@@ -102,9 +102,28 @@ export class DropboxAdapter implements RemoteStorage {
       },
     });
 
-    const metadata = JSON.parse(
-      resp.headers["dropbox-api-result"] ?? "{}",
-    ) as DropboxFileMetadata;
+    const apiResult = resp.headers["dropbox-api-result"];
+    if (!apiResult?.trim()) {
+      throw new Error(
+        "Dropbox download metadata missing (dropbox-api-result header). "
+        + `status=${resp.status}, headerKeys=${Object.keys(resp.headers).join(",")}`,
+      );
+    }
+
+    let metadata: DropboxFileMetadata;
+    try {
+      metadata = JSON.parse(apiResult) as DropboxFileMetadata;
+    } catch {
+      throw new Error(
+        "Dropbox download metadata invalid (dropbox-api-result is not JSON)",
+      );
+    }
+
+    if (!metadata.rev || !metadata.path_display) {
+      throw new Error(
+        "Dropbox download metadata incomplete (missing rev or path_display)",
+      );
+    }
 
     return {
       data: new Uint8Array(resp.arrayBuffer),

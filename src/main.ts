@@ -646,9 +646,13 @@ export default class DropboxSyncPlugin extends Plugin {
       },
       strictLocalPaths: Platform.isIosApp || Platform.isMobile,
       onPathIssues: (issues: PathGuardIssue[]) => this.handlePathIssues(issues),
-      onProgress: (completed: number, total: number) => {
+      onProgress: (completed: number, total: number, failed: number) => {
         const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-        this.statusBar?.update("syncing", `${pct}% · ${completed}/${total}`);
+        const failHint = failed > 0 ? ` · ${failed} failed` : "";
+        this.statusBar?.update("syncing", `${pct}% · ${completed}/${total}${failHint}`);
+        if (completed % 25 === 0 || completed === total) {
+          void this.log(`execute: ${completed}/${total} (${failed} failed)`);
+        }
       },
     };
   }

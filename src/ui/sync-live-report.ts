@@ -4,6 +4,7 @@ import { buildSyncSummaryMarkdown, type SyncReportInput } from "./sync-feedback"
 /** Vault root — visible during sync for debugging. Excluded from Dropbox sync. */
 export const SYNC_LOG_PATH = "_sync-log.md";
 const FLUSH_LINE_COUNT = 25;
+const PROGRESS_LINE_RE = /^\*Progress:.*\*$/m;
 
 export type LiveReportPhase = 1 | 2 | 3 | 4 | 5;
 
@@ -31,6 +32,8 @@ export interface SyncLiveReportMeta {
 export interface SyncLiveReportSink {
   phaseStart(phase: LiveReportPhase): Promise<void>;
   line(text: string): void;
+  /** Single updating progress line (execute phase). */
+  progressLine(summary: string): void;
   phaseEnd(summary: string): Promise<void>;
 }
 
@@ -73,6 +76,11 @@ export class SyncLiveReport implements SyncLiveReportSink {
     if (this.lineCount >= FLUSH_LINE_COUNT) {
       void this.flush();
     }
+  }
+
+  /** Replace the single *Progress: …* line in the report (throttle callers). */
+  progressLine(summary: string): void {
+    void this.writeProgressLine(`*Progress: ${summary}*`);
   }
 
   async phaseEnd(summary: string): Promise<void> {
@@ -133,5 +141,16 @@ export class SyncLiveReport implements SyncLiveReportSink {
     this.buffer = "";
     this.lineCount = 0;
     await this.appendRaw(chunk);
+  }
+
+  private async writeProgressLine(line: string): Promise<void> {
+    if (!this.path) return;
+    const file = this.app.vault.getAbstractFileByPath(this.path);
+    if (!(file instanceof TFile)) return;
+    let content = await this.app.vault.read(file);
+    content = content.replace(PROGRESS_LINE_RE, "").replace(/\n{3,}/g, "\n\n");
+    if (!content.endsWith("\n")) content += "\n";
+    content += `${line}\n`;
+    await this.app.vault.modify(file, content);
   }
 }
