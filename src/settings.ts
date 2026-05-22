@@ -4,6 +4,25 @@ export const DEFAULT_APP_KEY: string =
   typeof __DROPBOX_APP_KEY__ !== "undefined" ? __DROPBOX_APP_KEY__ : "";
 
 import type { ConflictStrategy } from "./types";
+import type { VaultSection } from "./sync/sync-scope";
+import { SYNC_SCOPE_LABELS } from "./sync/sync-scope";
+
+export const VAULT_EVENT_DEBOUNCE_OPTIONS = [2, 5, 10, 30, 60] as const;
+export type VaultEventDebounceSec = (typeof VAULT_EVENT_DEBOUNCE_OPTIONS)[number];
+
+export interface BackgroundSyncSections {
+  notes: boolean;
+  settings: boolean;
+  plugins: boolean;
+  workspaces: boolean;
+}
+
+export const DEFAULT_BACKGROUND_SYNC_SECTIONS: BackgroundSyncSections = {
+  notes: true,
+  settings: false,
+  plugins: false,
+  workspaces: false,
+};
 
 export interface PluginSettings {
   appKey: string;
@@ -14,6 +33,10 @@ export interface PluginSettings {
   syncInterval: number;
   /** Interval, longpoll, and file-watch triggers. Manual “Sync now” works when false. */
   backgroundSyncEnabled: boolean;
+  /** Sections included in automatic background sync cycles. */
+  backgroundSyncSections: BackgroundSyncSections;
+  /** Debounce before syncing after vault file change events (seconds). */
+  vaultEventDebounceSec: VaultEventDebounceSec;
   conflictStrategy: ConflictStrategy;
   deleteProtection: boolean;
   deleteThreshold: number;
@@ -32,6 +55,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   tokenExpiry: 0,
   syncInterval: 60,
   backgroundSyncEnabled: false,
+  backgroundSyncSections: { ...DEFAULT_BACKGROUND_SYNC_SECTIONS },
+  vaultEventDebounceSec: 2,
   conflictStrategy: "keep_both",
   deleteProtection: true,
   deleteThreshold: 5,
@@ -80,6 +105,66 @@ export function mergeBuiltInExcludePatterns(
     }
   }
   return merged;
+}
+
+export function snapVaultEventDebounceSec(value: number): VaultEventDebounceSec {
+  let best: VaultEventDebounceSec = VAULT_EVENT_DEBOUNCE_OPTIONS[0];
+  let bestDist = Math.abs(value - best);
+  for (const opt of VAULT_EVENT_DEBOUNCE_OPTIONS) {
+    const dist = Math.abs(value - opt);
+    if (dist < bestDist) {
+      best = opt;
+      bestDist = dist;
+    }
+  }
+  return best;
+}
+
+export function debounceSecToSliderIndex(sec: VaultEventDebounceSec): number {
+  const idx = VAULT_EVENT_DEBOUNCE_OPTIONS.indexOf(sec);
+  return idx >= 0 ? idx : 0;
+}
+
+export function getEnabledBackgroundSections(settings: PluginSettings): VaultSection[] {
+  const s = settings.backgroundSyncSections ?? DEFAULT_BACKGROUND_SYNC_SECTIONS;
+  const sections: VaultSection[] = [];
+  if (s.notes) sections.push("notes");
+  if (s.settings) sections.push("settings");
+  if (s.plugins) sections.push("plugins");
+  if (s.workspaces) sections.push("workspaces");
+  return sections.length > 0 ? sections : ["notes"];
+}
+
+const SECTION_LABELS: Record<VaultSection, string> = {
+  notes: SYNC_SCOPE_LABELS.notes,
+  settings: SYNC_SCOPE_LABELS.settings,
+  plugins: SYNC_SCOPE_LABELS.plugins,
+  workspaces: SYNC_SCOPE_LABELS.workspaces,
+};
+
+export function formatBackgroundSectionsLabel(sections: VaultSection[]): string {
+  if (sections.length === 0) return SECTION_LABELS.notes;
+  return sections.map((s) => SECTION_LABELS[s]).join(", ");
+}
+
+export function countEnabledBackgroundSections(sections: BackgroundSyncSections): number {
+  return (["notes", "settings", "plugins", "workspaces"] as const).filter((k) => sections[k]).length;
+}
+
+export function migrateSettings(raw: Partial<PluginSettings>): Partial<PluginSettings> {
+  const migrated = { ...raw };
+  if (!migrated.backgroundSyncSections) {
+    migrated.backgroundSyncSections = { ...DEFAULT_BACKGROUND_SYNC_SECTIONS };
+  }
+  if (
+    migrated.vaultEventDebounceSec === undefined
+    || !VAULT_EVENT_DEBOUNCE_OPTIONS.includes(migrated.vaultEventDebounceSec as VaultEventDebounceSec)
+  ) {
+    migrated.vaultEventDebounceSec = snapVaultEventDebounceSec(
+      typeof migrated.vaultEventDebounceSec === "number" ? migrated.vaultEventDebounceSec : 2,
+    );
+  }
+  return migrated;
 }
 
 export function generateDeviceId(): string {

@@ -86,6 +86,19 @@ export function isPathInScope(
   }
 }
 
+/** 여러 섹션 중 하나에 해당하면 포함 (background multi-select). */
+export function isPathInSections(
+  path: string,
+  sections: VaultSection[],
+  configDir: string,
+  excludePatterns: string[],
+): boolean {
+  if (sections.length === 0) return false;
+  if (isSyncExcluded(path, excludePatterns)) return false;
+  const section = classifyVaultPath(path, configDir);
+  return sections.includes(section);
+}
+
 export function emptyScopeCounts(): ScopeCounts {
   return {
     notes: 0,

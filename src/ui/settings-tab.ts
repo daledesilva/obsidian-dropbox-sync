@@ -2,7 +2,15 @@ import { App, Platform, PluginSettingTab, Setting, Notice, TFile } from "obsidia
 import type { ConflictStrategy } from "../types";
 import type DropboxSyncPlugin from "../main";
 import { ConfirmModal } from "./confirm-modal";
-import { DEFAULT_APP_KEY, getEffectiveAppKey, isValidSyncName } from "../settings";
+import {
+  countEnabledBackgroundSections,
+  debounceSecToSliderIndex,
+  DEFAULT_APP_KEY,
+  getEffectiveAppKey,
+  isValidSyncName,
+  VAULT_EVENT_DEBOUNCE_OPTIONS,
+} from "../settings";
+import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 import { obsidianHttpClient } from "../http-client.plugin";
 import {
   generateCodeVerifier,
@@ -69,8 +77,9 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setDesc("Connect to Dropbox to set up sync.");
     } else {
-      this.renderSyncSection(containerEl, hasSyncName, autoSyncOn);
+      this.renderSyncSection(containerEl, hasSyncName);
       if (hasSyncName) {
+        this.renderBackgroundSyncSection(containerEl, autoSyncOn);
         this.renderSyncNameChange(containerEl, this.plugin.settings.syncName);
       }
       if (hasSyncName) {
@@ -112,18 +121,17 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     }
   }
 
-  private renderSyncSection(
-    containerEl: HTMLElement,
-    hasSyncName: boolean,
-    autoSyncOn: boolean,
-  ): void {
+  private renderSyncSection(containerEl: HTMLElement, hasSyncName: boolean): void {
     if (!hasSyncName) {
       this.renderSyncNameSetup(containerEl);
-      return;
     }
+  }
+
+  private renderBackgroundSyncSection(containerEl: HTMLElement, autoSyncOn: boolean): void {
+    new Setting(containerEl).setName("Automatic background sync").setHeading();
 
     new Setting(containerEl)
-      .setName("Automatic background sync")
+      .setName("Enable automatic background sync")
       .setDesc(
         "When on: sync on a timer, when files change, and when Dropbox reports changes. "
         + "When off: only runs when you choose Sync now.",
@@ -139,6 +147,69 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
         }),
       );
 
+    const sectionKeys: VaultSection[] = ["notes", "settings", "plugins", "workspaces"];
+    const sectionLabels: Record<VaultSection, string> = {
+      notes: SYNC_SCOPE_LABELS.notes,
+      settings: SYNC_SCOPE_LABELS.settings,
+      plugins: SYNC_SCOPE_LABELS.plugins,
+      workspaces: SYNC_SCOPE_LABELS.workspaces,
+    };
+
+    new Setting(containerEl)
+      .setName("Sections to sync")
+      .setDesc("Which parts of the vault automatic sync includes. At least one must be enabled.");
+
+    for (const key of sectionKeys) {
+      new Setting(containerEl)
+        .setName(sectionLabels[key])
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.backgroundSyncSections[key]).onChange(async (value) => {
+            const sections = { ...this.plugin.settings.backgroundSyncSections };
+            if (!value && countEnabledBackgroundSections(sections) <= 1 && sections[key]) {
+              new Notice("At least one section must be enabled for background sync.");
+              toggle.setValue(true);
+              return;
+            }
+            sections[key] = value;
+            this.plugin.settings.backgroundSyncSections = sections;
+            await this.plugin.saveSettings();
+          });
+        });
+    }
+
+    new Setting(containerEl)
+      .setName("Sync interval (seconds)")
+      .setDesc("Fallback interval when no file changes are detected.")
+      .addSlider((slider) =>
+        slider
+          .setLimits(30, 600, 30)
+          .setValue(this.plugin.settings.syncInterval)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.syncInterval = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    const debounceIdx = debounceSecToSliderIndex(this.plugin.settings.vaultEventDebounceSec);
+    const debounceSetting = new Setting(containerEl)
+      .setName("File change debounce")
+      .setDesc(this.debounceDesc(this.plugin.settings.vaultEventDebounceSec))
+      .addSlider((slider) => {
+        slider
+          .setLimits(0, VAULT_EVENT_DEBOUNCE_OPTIONS.length - 1, 1)
+          .setValue(debounceIdx)
+          .onChange(async (value) => {
+            const sec = VAULT_EVENT_DEBOUNCE_OPTIONS[value] ?? VAULT_EVENT_DEBOUNCE_OPTIONS[0];
+            this.plugin.settings.vaultEventDebounceSec = sec;
+            debounceSetting.setDesc(this.debounceDesc(sec));
+            await this.plugin.saveSettings();
+          });
+      });
+  }
+
+  private debounceDesc(sec: number): string {
+    return `Wait ${sec}s after a file edit, delete, or rename before starting a sync.`;
   }
 
   // 최초 설정: 이름 입력 + Set
@@ -436,20 +507,6 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.syncOnCreateDeleteRename)
           .onChange(async (value) => {
             this.plugin.settings.syncOnCreateDeleteRename = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Sync interval (seconds)")
-      .setDesc("Fallback interval when no file changes are detected.")
-      .addSlider((slider) =>
-        slider
-          .setLimits(30, 600, 30)
-          .setValue(this.plugin.settings.syncInterval)
-          .setDynamicTooltip()
-          .onChange(async (value) => {
-            this.plugin.settings.syncInterval = value;
             await this.plugin.saveSettings();
           }),
       );

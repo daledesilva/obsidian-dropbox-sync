@@ -6,6 +6,7 @@ import {
   countForScope,
   emptyScopeCounts,
   isPathInScope,
+  isPathInSections,
   isSyncExcluded,
   resolveSyncScope,
 } from "@/sync/sync-scope";
@@ -77,6 +78,23 @@ describe("isPathInScope", () => {
   });
 });
 
+describe("isPathInSections", () => {
+  test("union of notes and plugins", () => {
+    const sections = ["notes", "plugins"] as const;
+    expect(isPathInSections("a.md", [...sections], CONFIG, BUILT_IN)).toBe(true);
+    expect(isPathInSections(".obsidian/plugins/p/main.js", [...sections], CONFIG, BUILT_IN)).toBe(true);
+    expect(isPathInSections(".obsidian/app.json", [...sections], CONFIG, BUILT_IN)).toBe(false);
+  });
+
+  test("excluded paths are out of scope", () => {
+    expect(isPathInSections(".git/HEAD", ["notes"], CONFIG, BUILT_IN)).toBe(false);
+  });
+
+  test("empty sections returns false", () => {
+    expect(isPathInSections("a.md", [], CONFIG, BUILT_IN)).toBe(false);
+  });
+});
+
 describe("countEntry and assessRemoteFiles", () => {
   test("countEntry buckets paths with built-in excludes", () => {
     const counts = emptyScopeCounts();
@@ -119,7 +137,7 @@ describe("countEntry and assessRemoteFiles", () => {
     });
   });
 
-  test("resolveSyncScope: background sync keeps last user choice", () => {
+  test("resolveSyncScope: manual sync without explicit scope reuses last choice", () => {
     expect(resolveSyncScope(undefined, "notes")).toEqual({
       scope: "notes",
       lastUsedScope: "notes",

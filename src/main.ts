@@ -47,8 +47,11 @@ import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
 import { resolveSyncScope, SYNC_SCOPE_LABELS, type SyncScope } from "./sync/sync-scope";
 import type { SyncPlan } from "./types";
-
-const DEBOUNCE_DELAY_MS = 5000;
+import {
+  formatBackgroundSectionsLabel,
+  getEnabledBackgroundSections,
+  migrateSettings,
+} from "./settings";
 
 export default class DropboxSyncPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
@@ -188,7 +191,8 @@ export default class DropboxSyncPlugin extends Plugin {
 
   async loadSettings(): Promise<void> {
     const raw = await this.loadData() as Partial<PluginSettings> & { syncEnabled?: boolean };
-    this.settings = Object.assign({}, DEFAULT_SETTINGS, raw);
+    const migrated = migrateSettings(raw);
+    this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
     if (raw.syncEnabled !== undefined && raw.backgroundSyncEnabled === undefined) {
       this.settings.backgroundSyncEnabled = raw.syncEnabled;
     }
@@ -324,8 +328,17 @@ export default class DropboxSyncPlugin extends Plugin {
 
   async syncNow(options?: { manual?: boolean; scope?: SyncScope }): Promise<void> {
     const manual = options?.manual ?? false;
-    const { scope, lastUsedScope } = resolveSyncScope(options?.scope, this.lastSyncScope);
-    this.lastSyncScope = lastUsedScope;
+    let scopeLabel: string;
+    let manualScope: SyncScope | undefined;
+    if (manual) {
+      const resolved = resolveSyncScope(options?.scope, this.lastSyncScope);
+      this.lastSyncScope = resolved.lastUsedScope;
+      manualScope = resolved.scope;
+      scopeLabel = SYNC_SCOPE_LABELS[manualScope];
+    } else {
+      const sections = getEnabledBackgroundSections(this.settings);
+      scopeLabel = formatBackgroundSectionsLabel(sections);
+    }
     if (this.syncing) return;
     if (!this.settings.syncName) {
       new Notice("Dropbox sync: set a vault ID in settings first.");
@@ -367,7 +380,7 @@ export default class DropboxSyncPlugin extends Plugin {
         startedAt,
         deviceId: this.settings.deviceId,
         version: this.manifest.version,
-        scope: SYNC_SCOPE_LABELS[scope],
+        scope: scopeLabel,
       });
     } catch (e) {
       console.error("[Dropbox Sync] _sync-log.md open failed", e);
@@ -375,12 +388,17 @@ export default class DropboxSyncPlugin extends Plugin {
     }
 
     if (manual) notifySyncStart();
-    void this.log(`sync started (v${this.manifest.version}, scope: ${scope})`);
+    void this.log(`sync started (v${this.manifest.version}, scope: ${scopeLabel})`);
 
     try {
       const engine = this.getOrCreateEngine();
       engine.setLiveReport(liveReport);
-      engine.setSyncScope(scope, this.app.vault.configDir);
+      const configDir = this.app.vault.configDir;
+      if (manual && manualScope) {
+        engine.setSyncScope(manualScope, configDir);
+      } else {
+        engine.setSyncSections(getEnabledBackgroundSections(this.settings), configDir);
+      }
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
       if (prunedDeletes > 0) {
         liveReport?.line(`pruned ${prunedDeletes} stale delete-log entry/entries`);
@@ -485,7 +503,10 @@ export default class DropboxSyncPlugin extends Plugin {
       } else if (cursorUpdated && this.settings.backgroundSyncEnabled) {
         this.longpoll?.schedule();
       } else if (needsResyncAfterRename) {
-        window.setTimeout(() => void this.syncNow({ scope: this.lastSyncScope }), 200);
+        window.setTimeout(
+          () => void this.syncNow({ manual: true, scope: this.lastSyncScope }),
+          200,
+        );
       }
     }
   }
@@ -741,7 +762,7 @@ export default class DropboxSyncPlugin extends Plugin {
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
       void this.syncNow();
-    }, DEBOUNCE_DELAY_MS);
+    }, this.settings.vaultEventDebounceSec * 1000);
   }
 
   private clearDebounceTimer(): void {

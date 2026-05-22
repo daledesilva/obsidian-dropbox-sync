@@ -10,7 +10,7 @@ import { isExcluded } from "../exclude";
 import { CycleContext } from "./cycle-context";
 import type { SyncLiveReportSink } from "../ui/sync-live-report";
 import { VaultAdapter, type LocalFileScanCallback } from "../adapters/vault-adapter";
-import { isPathInScope, type SyncScope } from "./sync-scope";
+import { isPathInScope, isPathInSections, type SyncScope, type VaultSection } from "./sync-scope";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -82,6 +82,7 @@ export class SyncEngine {
   private deletedPaths = new Set<string>();
   private liveReport: SyncLiveReportSink | null = null;
   private syncScope: SyncScope = "everything";
+  private sectionFilter: VaultSection[] | null = null;
   private configDir = ".obsidian";
 
   constructor(
@@ -94,14 +95,24 @@ export class SyncEngine {
     this.liveReport = report;
   }
 
-  /** 동기화 범위 (set before each runCycle). */
+  /** 동기화 범위 — manual single scope (set before each runCycle). */
   setSyncScope(scope: SyncScope, configDir: string): void {
     this.syncScope = scope;
+    this.sectionFilter = null;
+    this.configDir = configDir;
+  }
+
+  /** Background sync — multiple vault sections (set before each runCycle). */
+  setSyncSections(sections: VaultSection[], configDir: string): void {
+    this.sectionFilter = sections;
     this.configDir = configDir;
   }
 
   private pathInScope(path: string): boolean {
     const patterns = this.options.excludePatterns ?? [];
+    if (this.sectionFilter) {
+      return isPathInSections(path, this.sectionFilter, this.configDir, patterns);
+    }
     return isPathInScope(path, this.syncScope, this.configDir, patterns);
   }
 
