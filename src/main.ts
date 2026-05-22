@@ -20,7 +20,6 @@ import { DropboxAdapter, DropboxAuthError } from "./adapters/dropbox-adapter";
 import { IndexedDBStore } from "./adapters/indexeddb-store";
 import { VaultFileStore } from "./adapters/vault-file-store";
 import type { ConflictContext, DeleteGuardResult, PathGuardIssue, PathIssueResolution, SyncResult } from "./types";
-import { PathValidationError, LocalPathError } from "./types";
 import { applyPathRenames } from "./sync/path-rename";
 import type { RemoteStorage, SyncStateStore } from "./adapters/interfaces";
 import { obsidianHttpClient } from "./http-client.plugin";
@@ -31,8 +30,19 @@ import { LogManager } from "./log-manager";
 import { registerDemoCommands } from "./debug/demo-commands";
 import type { SyncEngine } from "./sync/engine";
 
-import { summarizeActions } from "./sync/sync-reporter";
 import { fetchFileFromRemote } from "./deep-link";
+import {
+  buildSyncResultFeedback,
+  buildSyncSummaryMarkdown,
+  notifySyncEnd,
+  notifySyncStart,
+  setRibbonSyncing,
+  shouldWriteSyncReport,
+  writeSyncReport,
+  type SyncOutcome,
+  type SyncReportInput,
+} from "./ui/sync-feedback";
+import type { SyncPlan } from "./types";
 
 const DEBOUNCE_DELAY_MS = 5000;
 
@@ -95,7 +105,7 @@ export default class DropboxSyncPlugin extends Plugin {
     this.statusBar = new StatusBar(this.addStatusBarItem());
 
     // 커맨드 등록
-    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.syncNow() });
+    this.addCommand({ id: "sync-now", name: "Sync now", callback: () => { void this.syncNow({ manual: true }); } });
     this.addCommand({ id: "view-logs", name: "View sync logs", callback: () => this.showLogs() });
     this.addCommand({
       id: "toggle-sync",
@@ -121,7 +131,7 @@ export default class DropboxSyncPlugin extends Plugin {
     );
 
     // UI: 리본 + 상태 바
-    this.ribbonEl = this.addRibbonIcon("refresh-cw", "Dropbox sync", () => this.syncNow());
+    this.ribbonEl = this.addRibbonIcon("refresh-cw", "Dropbox sync", () => { void this.syncNow({ manual: true }); });
     this.ribbonEl.addEventListener("contextmenu", (evt) => {
       evt.preventDefault();
       this.showContextMenu(evt);
@@ -241,7 +251,8 @@ export default class DropboxSyncPlugin extends Plugin {
 
   // ── Sync ──
 
-  async syncNow(): Promise<void> {
+  async syncNow(options?: { manual?: boolean }): Promise<void> {
+    const manual = options?.manual ?? false;
     if (this.syncing) return;
     if (!this.settings.syncName) {
       new Notice("Dropbox sync: set a vault ID in settings first.");
@@ -256,40 +267,56 @@ export default class DropboxSyncPlugin extends Plugin {
       return;
     }
 
+    const startedAt = Date.now();
     this.syncing = true;
     this.abortController = new AbortController();
     this.longpoll?.stop();
+    setRibbonSyncing(this.ribbonEl, true);
     this.statusBar?.update("syncing");
+    if (manual) notifySyncStart();
     await this.log(`sync started (v${this.manifest.version})`);
 
     let cursorUpdated = false;
     let needsResyncAfterRename = false;
+    let outcome: SyncOutcome = "up_to_date";
+    let endMessage = "Dropbox Sync: up to date";
+    let noticeDuration = 4000;
+    let plan: SyncPlan | undefined;
+    let result: SyncResult | undefined;
+    let deletesSkipped: number | undefined;
+    let deferredCount: number | undefined;
+    let pathsSkipped: number | undefined;
+    let errorMessage: string | undefined;
 
     try {
       const engine = this.getOrCreateEngine();
       this.conflictIndex = 0;
       this.conflictTotal = 0;
-      const {
-        plan,
-        result,
-        deletesSkipped,
-        deferredCount,
-        pathRenamesApplied,
-        pathsSkipped,
-      } = await engine.runCycle(this.abortController.signal);
+      const cycleResult = await engine.runCycle(this.abortController.signal);
+      plan = cycleResult.plan;
+      result = cycleResult.result;
+      deletesSkipped = cycleResult.deletesSkipped;
+      deferredCount = cycleResult.deferredCount;
+      pathsSkipped = cycleResult.pathsSkipped;
 
       await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}, pathsSkipped: ${pathsSkipped ?? 0}`);
 
-      if (pathRenamesApplied) {
+      if (cycleResult.pathRenamesApplied) {
         needsResyncAfterRename = true;
-        new Notice("Dropbox Sync: files renamed. Syncing again…");
+        outcome = "renamed_resync";
+        endMessage = "Dropbox Sync: files renamed. Syncing again…";
+        noticeDuration = 5000;
+        this.lastSyncSummary = "renamed — resyncing";
         this.statusBar?.update("success", "renamed — resyncing");
         return;
       }
 
       this.engineMgr?.persistDeleteLog();
 
-      this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+      const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+      outcome = feedback.outcome;
+      endMessage = feedback.endMessage;
+      noticeDuration = feedback.noticeDuration;
 
       if (result.failed.length === 0 && !deletesSkipped && !deferredCount) {
         cursorUpdated = true;
@@ -297,6 +324,9 @@ export default class DropboxSyncPlugin extends Plugin {
     } catch (e) {
       if (e instanceof Error && e.name === "AbortError") {
         await this.log("sync aborted");
+        outcome = "aborted";
+        endMessage = "Dropbox Sync: cancelled";
+        noticeDuration = 3000;
         this.statusBar?.update("idle");
         return;
       }
@@ -305,18 +335,48 @@ export default class DropboxSyncPlugin extends Plugin {
         this.settings.accessToken = "";
         this.settings.tokenExpiry = 0;
         await this.saveSettings();
+        outcome = "auth_error";
+        errorMessage = "Token expired";
+        endMessage = "Dropbox sync: token expired. Please reconnect in settings.";
+        noticeDuration = 8000;
+        this.lastSyncSummary = "auth expired";
         this.statusBar?.update("error", "auth expired");
-        new Notice("Dropbox sync: token expired. Please reconnect in settings.");
         return;
       }
       await this.log("sync error", e);
+      outcome = "error";
+      errorMessage = (e as Error).message;
+      endMessage = `Dropbox Sync error: ${errorMessage}`;
+      noticeDuration = 8000;
+      this.lastSyncSummary = "sync failed";
       this.statusBar?.update("error", "sync failed");
-      new Notice(`Dropbox Sync error: ${(e as Error).message}`);
     } finally {
+      const endedAt = Date.now();
+      setRibbonSyncing(this.ribbonEl, false);
+      if (manual) notifySyncEnd(endMessage, noticeDuration);
+
+      const reportInput: SyncReportInput = {
+        startedAt,
+        endedAt,
+        outcome,
+        plan,
+        result,
+        deletesSkipped,
+        deferredCount,
+        pathsSkipped,
+        errorMessage,
+        deviceId: this.settings.deviceId,
+        version: this.manifest.version,
+      };
+      if (shouldWriteSyncReport(manual, reportInput)) {
+        const markdown = buildSyncSummaryMarkdown(reportInput);
+        void writeSyncReport(this.app, markdown, this.settings.deviceId, endedAt);
+      }
+
       this.syncing = false;
       this.syncDeletedByEngine.clear();
       this.abortController = null;
-      this.lastSyncTime = Date.now();
+      this.lastSyncTime = endedAt;
       await this.logger?.flush();
       // 미소비 삭제가 있으면 후속 싱크 스케줄 (싱크 중 사용자 삭제 처리)
       if (this.engineMgr?.hasPendingDeletes() && this.settings.syncEnabled) {
@@ -594,7 +654,7 @@ export default class DropboxSyncPlugin extends Plugin {
         version: this.manifest.version,
       },
       {
-        onSyncNow: () => { void this.syncNow(); },
+        onSyncNow: () => { void this.syncNow({ manual: true }); },
         onToggleSync: () => { void (this.settings.syncEnabled ? this.stopSync() : this.startSync()); },
         onOpenSettings: () => this.openSettings(),
         onViewLogs: () => { void this.showLogs(); },
@@ -606,7 +666,7 @@ export default class DropboxSyncPlugin extends Plugin {
   private showContextMenu(evt: MouseEvent): void {
     const menu = new Menu();
     menu.addItem((item) =>
-      item.setTitle("Sync now").setIcon("refresh-cw").onClick(() => this.syncNow()),
+      item.setTitle("Sync now").setIcon("refresh-cw").onClick(() => { void this.syncNow({ manual: true }); }),
     );
     menu.addItem((item) =>
       item
@@ -652,47 +712,34 @@ export default class DropboxSyncPlugin extends Plugin {
     }
   }
 
-  private reportSyncResult(result: SyncResult, deletesSkipped?: number, pathsSkipped?: number): void {
+  private reportSyncResult(
+    result: SyncResult,
+    deletesSkipped?: number,
+    pathsSkipped?: number,
+  ): { outcome: SyncOutcome; endMessage: string; noticeDuration: number } {
     if (result.failed.length > 0) {
       for (const f of result.failed) {
         const err = f.error;
         const detail = err ? { message: err.message, name: err.name, stack: err.stack?.split("\n").slice(0, 3).join(" | ") } : err;
         void this.log(`FAIL ${f.item.action.type} ${f.item.localPath}`, detail);
       }
-      this.lastSyncSummary = `${result.failed.length} failed, ${result.succeeded.length} ok`;
       this.statusBar?.update("error", `${result.failed.length} failed`);
-      const first = result.failed[0];
-      const detail = first.error?.message?.slice(0, 100) ?? "";
-      const pathHint =
-        first.error instanceof PathValidationError || first.error instanceof LocalPathError
-          ? "\nFix names via the incompatible-files prompt on next sync."
-          : "";
-      new Notice(
-        `Dropbox Sync: ${result.failed.length} failed (${result.succeeded.length} ok)\n${first.item.localPath}: ${detail}${pathHint}`,
-        8000,
-      );
-    } else if (pathsSkipped && pathsSkipped > 0) {
-      const summary = summarizeActions(result.succeeded);
-      this.lastSyncSummary = `${summary}, ${pathsSkipped} paths skipped`;
-      this.statusBar?.update("success", `${summary}, ${pathsSkipped} paths skipped`);
-      new Notice(
-        `Dropbox Sync: ${pathsSkipped} file(s) skipped (incompatible names). Other changes synced.`,
-        6000,
-      );
-    } else if (deletesSkipped && deletesSkipped > 0) {
-      const summary = summarizeActions(result.succeeded);
-      this.lastSyncSummary = `${summary}, ${deletesSkipped} deletes skipped`;
-      this.statusBar?.update("success", `${summary}, ${deletesSkipped} deletes skipped`);
-      new Notice(`Dropbox Sync: ${summary}, ${deletesSkipped} deletions skipped by protection.`);
-    } else if (result.succeeded.length > 0) {
-      const summary = summarizeActions(result.succeeded);
-      this.lastSyncSummary = summary;
-      this.statusBar?.update("success", summary);
-      new Notice(`Dropbox Sync: ${summary}`);
     } else {
-      this.lastSyncSummary = "up to date";
-      this.statusBar?.update("success", "up to date");
+      const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
+      if (pathsSkipped && pathsSkipped > 0) {
+        this.statusBar?.update("success", feedback.summary);
+      } else if (deletesSkipped && deletesSkipped > 0) {
+        this.statusBar?.update("success", feedback.summary);
+      } else if (result.succeeded.length > 0) {
+        this.statusBar?.update("success", feedback.summary);
+      } else {
+        this.statusBar?.update("success", "up to date");
+      }
     }
+
+    const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
+    this.lastSyncSummary = feedback.summary;
+    return feedback;
   }
 
   private async checkRemoteChanges(): Promise<{ pendingChanges: number } | null> {

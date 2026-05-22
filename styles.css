@@ -1,5 +1,14 @@
 /* Dropbox Sync plugin styles */
 
+@keyframes dbx-sync-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.dbx-sync-ribbon-syncing svg {
+  animation: dbx-sync-spin 1s linear infinite;
+}
+
 .sync-progress-bar-container {
   width: 200px;
   height: 4px;

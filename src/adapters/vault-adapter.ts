@@ -124,7 +124,7 @@ export class VaultAdapter implements FileSystem {
   }
 
   private shouldExclude(path: string): boolean {
-    const systemExcludes = [".trash/", ".sync-state/", ".DS_Store", "Thumbs.db"];
+    const systemExcludes = [".trash/", ".sync-state/", ".sync-reports/", ".DS_Store", "Thumbs.db"];
     if (systemExcludes.some((ex) => path.startsWith(ex) || path.includes(`/${ex}`))) return true;
     if (path.startsWith("sync-debug-") && path.endsWith(".log")) return true;
     if (isExcluded(path, this.excludePatterns)) return true;
