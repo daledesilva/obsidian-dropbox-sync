@@ -22,6 +22,16 @@ A few things to check:
 <!-- TODO: 스크린샷 — 우클릭 메뉴 (Sync Now / Start Sync / Settings) -->
 <!-- 파일: docs/images/context-menu.png -->
 
+## "Fix incompatible file names" (especially on iPad)
+
+Some filenames work on Windows or in Dropbox but cannot be created on iOS (for example names with `:` or `*`, or reserved names like `CON`).
+
+When sync detects these files, a modal lists every affected file in one place. You can:
+
+1. Edit each new name manually, or tap **Apply recommended to all** to auto-fill safe names
+2. Tap **Apply renames & sync** — the plugin renames on Dropbox and in your vault, then syncs again
+3. Tap **Skip these files** to sync everything else and deal with the names later (on a desktop, or on [dropbox.com](https://www.dropbox.com))
+
 ## Some files aren't syncing
 
 This usually means they match an **exclude pattern**. Check in **Settings > Exclude patterns** — the panel shows how many files are currently excluded.

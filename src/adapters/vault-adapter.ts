@@ -49,6 +49,17 @@ export class VaultAdapter implements FileSystem {
     }
   }
 
+  async rename(from: string, to: string): Promise<void> {
+    const file = this.vault.getAbstractFileByPath(from);
+    if (!file || !this.isTFile(file)) {
+      throw new Error(`File not found: ${from}`);
+    }
+    await this.ensureParentDir(to);
+    await this.fileManager.renameFile(file, to);
+    this.hashCache.delete(from.toLowerCase());
+    this.hashCache.delete(to.toLowerCase());
+  }
+
   async list(): Promise<FileInfo[]> {
     const files = this.vault.getFiles();
     const result: FileInfo[] = [];

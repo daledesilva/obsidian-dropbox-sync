@@ -149,6 +149,18 @@ export class DropboxAdapter implements RemoteStorage {
     });
   }
 
+  async move(from: string, to: string): Promise<RemoteEntry> {
+    const result = await this.rpcCall<{ metadata: DropboxFileMetadata }>(
+      "/files/move_v2",
+      {
+        from_path: this.toRemotePath(from),
+        to_path: this.toRemotePath(to),
+        autorename: false,
+      },
+    );
+    return this.fileMetadataToEntry(result.metadata);
+  }
+
   // ── private ──
 
   private async rpcCall<T>(endpoint: string, body: object): Promise<T> {

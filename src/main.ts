@@ -11,6 +11,7 @@ import { DropboxSyncSettingTab } from "./ui/settings-tab";
 import { StatusBar } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
 import { DeleteConfirmModal } from "./ui/delete-confirm-modal";
+import { IncompatiblePathsModal } from "./ui/incompatible-paths-modal";
 import { LogViewerModal } from "./ui/log-viewer-modal";
 import { SyncStatusModal } from "./ui/sync-status-modal";
 import { OnboardingModal } from "./ui/onboarding-modal";
@@ -18,7 +19,9 @@ import { VaultAdapter } from "./adapters/vault-adapter";
 import { DropboxAdapter, DropboxAuthError } from "./adapters/dropbox-adapter";
 import { IndexedDBStore } from "./adapters/indexeddb-store";
 import { VaultFileStore } from "./adapters/vault-file-store";
-import type { ConflictContext, DeleteGuardResult, SyncResult } from "./types";
+import type { ConflictContext, DeleteGuardResult, PathGuardIssue, PathIssueResolution, SyncResult } from "./types";
+import { PathValidationError, LocalPathError } from "./types";
+import { applyPathRenames } from "./sync/path-rename";
 import type { RemoteStorage, SyncStateStore } from "./adapters/interfaces";
 import { obsidianHttpClient } from "./http-client.plugin";
 import { DesktopAuth } from "./auth/desktop-auth";
@@ -50,6 +53,7 @@ export default class DropboxSyncPlugin extends Plugin {
   private syncDeletedByEngine = new Set<string>();
   private deleteGuardApproved = false;
   private deleteConfirmModal: DeleteConfirmModal | null = null;
+  private incompatiblePathsModal: IncompatiblePathsModal | null = null;
 
   // ── 모듈 ──
   private auth: DesktopAuth | null = null;
@@ -259,17 +263,33 @@ export default class DropboxSyncPlugin extends Plugin {
     await this.log(`sync started (v${this.manifest.version})`);
 
     let cursorUpdated = false;
+    let needsResyncAfterRename = false;
 
     try {
       const engine = this.getOrCreateEngine();
       this.conflictIndex = 0;
       this.conflictTotal = 0;
-      const { plan, result, deletesSkipped, deferredCount } = await engine.runCycle(this.abortController.signal);
+      const {
+        plan,
+        result,
+        deletesSkipped,
+        deferredCount,
+        pathRenamesApplied,
+        pathsSkipped,
+      } = await engine.runCycle(this.abortController.signal);
 
-      await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}`);
+      await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}, pathsSkipped: ${pathsSkipped ?? 0}`);
+
+      if (pathRenamesApplied) {
+        needsResyncAfterRename = true;
+        new Notice("Dropbox Sync: files renamed. Syncing again…");
+        this.statusBar?.update("success", "renamed — resyncing");
+        return;
+      }
+
       this.engineMgr?.persistDeleteLog();
 
-      this.reportSyncResult(result, deletesSkipped);
+      this.reportSyncResult(result, deletesSkipped, pathsSkipped);
 
       if (result.failed.length === 0 && !deletesSkipped && !deferredCount) {
         cursorUpdated = true;
@@ -303,6 +323,8 @@ export default class DropboxSyncPlugin extends Plugin {
         this.scheduleDebouncedSync();
       } else if (cursorUpdated && this.settings.syncEnabled) {
         this.longpoll?.schedule();
+      } else if (needsResyncAfterRename && this.settings.syncEnabled) {
+        window.setTimeout(() => void this.syncNow(), 200);
       }
     }
   }
@@ -452,6 +474,8 @@ export default class DropboxSyncPlugin extends Plugin {
       onBeforeDeleteLocal: (pathLower: string) => {
         this.syncDeletedByEngine.add(pathLower);
       },
+      strictLocalPaths: Platform.isIosApp || Platform.isMobile,
+      onPathIssues: (issues: PathGuardIssue[]) => this.handlePathIssues(issues),
       onProgress: (completed: number, total: number) => {
         const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
         this.statusBar?.update("syncing", `${pct}% · ${completed}/${total}`);
@@ -607,7 +631,28 @@ export default class DropboxSyncPlugin extends Plugin {
     this.app.setting?.openTabById(this.manifest.id);
   }
 
-  private reportSyncResult(result: SyncResult, deletesSkipped?: number): void {
+  private async handlePathIssues(issues: PathGuardIssue[]): Promise<PathIssueResolution> {
+    if (this.incompatiblePathsModal) {
+      return { action: "skip" };
+    }
+    const modal = new IncompatiblePathsModal(this.app, issues, {
+      strictLocal: Platform.isIosApp || Platform.isMobile,
+    });
+    this.incompatiblePathsModal = modal;
+    try {
+      const resolution = await modal.waitForResolution();
+      if (resolution.action === "renamed") {
+        const deps = this.createEngineDeps();
+        await applyPathRenames(deps.fs, deps.remote, deps.store, resolution.renames);
+        await this.log("path renames applied", resolution.renames);
+      }
+      return resolution;
+    } finally {
+      this.incompatiblePathsModal = null;
+    }
+  }
+
+  private reportSyncResult(result: SyncResult, deletesSkipped?: number, pathsSkipped?: number): void {
     if (result.failed.length > 0) {
       for (const f of result.failed) {
         const err = f.error;
@@ -618,9 +663,21 @@ export default class DropboxSyncPlugin extends Plugin {
       this.statusBar?.update("error", `${result.failed.length} failed`);
       const first = result.failed[0];
       const detail = first.error?.message?.slice(0, 100) ?? "";
+      const pathHint =
+        first.error instanceof PathValidationError || first.error instanceof LocalPathError
+          ? "\nFix names via the incompatible-files prompt on next sync."
+          : "";
       new Notice(
-        `Dropbox Sync: ${result.failed.length} failed (${result.succeeded.length} ok)\n${first.item.localPath}: ${detail}`,
+        `Dropbox Sync: ${result.failed.length} failed (${result.succeeded.length} ok)\n${first.item.localPath}: ${detail}${pathHint}`,
         8000,
+      );
+    } else if (pathsSkipped && pathsSkipped > 0) {
+      const summary = summarizeActions(result.succeeded);
+      this.lastSyncSummary = `${summary}, ${pathsSkipped} paths skipped`;
+      this.statusBar?.update("success", `${summary}, ${pathsSkipped} paths skipped`);
+      new Notice(
+        `Dropbox Sync: ${pathsSkipped} file(s) skipped (incompatible names). Other changes synced.`,
+        6000,
       );
     } else if (deletesSkipped && deletesSkipped > 0) {
       const summary = summarizeActions(result.succeeded);

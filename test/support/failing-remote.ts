@@ -72,4 +72,9 @@ export class FailingRemoteStorage implements RemoteStorage {
     this.checkFail("delete");
     return this.inner.delete(path);
   }
+
+  async move(from: string, to: string): Promise<RemoteEntry> {
+    this.checkFail("move");
+    return this.inner.move(from, to);
+  }
 }

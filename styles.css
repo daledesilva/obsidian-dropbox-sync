@@ -218,6 +218,69 @@
   color: var(--text-error);
 }
 
+/* ── Incompatible Paths Modal ── */
+
+.dbx-sync-path-modal-wide {
+  max-width: 90vw;
+  width: 90vw;
+}
+
+.dbx-sync-path-modal-wide-mobile {
+  max-width: 95vw;
+  width: 95vw;
+}
+
+.dbx-sync-path-list {
+  max-height: 55vh;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.dbx-sync-path-list-mobile {
+  max-height: 45vh;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.dbx-sync-path-row {
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dbx-sync-path-row:last-child {
+  border-bottom: none;
+}
+
+.dbx-sync-path-original {
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+
+.dbx-sync-path-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+}
+
+.dbx-sync-path-error {
+  margin-top: 4px;
+  font-size: 0.85em;
+}
+
+.dbx-sync-path-actions {
+  margin-top: 8px;
+}
+
 /* ── Onboarding Modal ── */
 
 .dbx-sync-onboard-steps {

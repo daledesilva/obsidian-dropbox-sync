@@ -11,6 +11,7 @@ export interface FileSystem {
   read(path: string): Promise<Uint8Array>;
   write(path: string, data: Uint8Array, mtime?: number): Promise<void>;
   delete(path: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
   list(): Promise<FileInfo[]>;
   stat(path: string): Promise<{ mtime: number; size: number }>;
   computeHash(path: string): Promise<string>;
@@ -26,6 +27,7 @@ export interface RemoteStorage {
     rev?: string,
   ): Promise<RemoteEntry>;
   delete(path: string): Promise<void>;
+  move(from: string, to: string): Promise<RemoteEntry>;
 }
 
 /** 동기화 상태 저장소 추상화 */

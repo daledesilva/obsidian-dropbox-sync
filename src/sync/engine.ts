@@ -1,5 +1,6 @@
 import type { FileSystem, RemoteStorage, SyncStateStore } from "../adapters/interfaces";
-import type { RemoteEntry, SyncPlan, SyncResult } from "../types";
+import type { PathGuardIssue, PathIssueResolution, RemoteEntry, SyncPlan, SyncResult } from "../types";
+import { checkPathGuard } from "./path-guard";
 import { createPlan } from "./planner";
 import type { ConflictStrategy, ConflictResolver, DeleteGuardResult } from "../types";
 import { executePlan } from "./executor";
@@ -40,6 +41,10 @@ export interface SyncEngineOptions {
   enableCycleReports?: boolean;
   /** 사이클 리포트 저장 콜백 */
   onCycleReport?: (report: string, cycleId: string) => Promise<void>;
+  /** iOS/모바일에서 로컬 경로 규칙 적용 */
+  strictLocalPaths?: boolean;
+  /** 호환되지 않는 경로 감지 시 모달 등 처리 */
+  onPathIssues?: (issues: PathGuardIssue[]) => Promise<PathIssueResolution>;
 }
 
 export interface CycleResult {
@@ -49,6 +54,10 @@ export interface CycleResult {
   deletesSkipped?: number;
   /** 활성 파일 보호로 건너뛴 항목 수 */
   deferredCount?: number;
+  /** 경로 rename 적용됨 — 재동기화 필요 */
+  pathRenamesApplied?: boolean;
+  /** 경로 문제로 스킵한 항목 수 */
+  pathsSkipped?: number;
   /** 사이클 리포트 (JSONL) */
   cycleReport?: string;
 }
@@ -136,9 +145,32 @@ export class SyncEngine {
     // 7. 삭제 가드 적용
     const { planToExecute, deletesSkipped } = await this.applyDeleteGuard(plan, ctx);
 
+    // 7b. 경로 호환성 가드
+    let planToRun = planToExecute;
+    let pathsSkipped = 0;
+    const pathGuard = checkPathGuard(planToRun, this.options.strictLocalPaths ?? false);
+    if (!pathGuard.passed) {
+      if (this.options.onPathIssues) {
+        const resolution = await this.options.onPathIssues(pathGuard.issues);
+        if (resolution.action === "renamed") {
+          return {
+            plan,
+            result: { succeeded: [], failed: [], deferred: [] },
+            deletesSkipped,
+            pathRenamesApplied: true,
+          };
+        }
+        planToRun = pathGuard.filteredPlan;
+        pathsSkipped = pathGuard.issues.length;
+      } else {
+        planToRun = pathGuard.filteredPlan;
+        pathsSkipped = pathGuard.issues.length;
+      }
+    }
+
     // 8. 계획 실행
     signal?.throwIfAborted();
-    const result = await executePlan(planToExecute, { fs, remote, store }, {
+    const result = await executePlan(planToRun, { fs, remote, store }, {
       conflictStrategy: this.options.conflictStrategy,
       conflictResolver: this.options.conflictResolver,
       isFileActive: this.options.isFileActive,
@@ -146,6 +178,7 @@ export class SyncEngine {
       concurrency: this.options.concurrency,
       onProgress: this.options.onProgress,
       onConflictCount: this.options.onConflictCount,
+      strictLocalPaths: this.options.strictLocalPaths,
       ctx,
     });
 
@@ -168,10 +201,10 @@ export class SyncEngine {
       const report = ctx.toJsonl();
       await this.options.onCycleReport?.(report, ctx.cycleId);
 
-      return { plan, result, deletesSkipped, deferredCount, cycleReport: report };
+      return { plan, result, deletesSkipped, deferredCount, pathsSkipped: pathsSkipped || undefined, cycleReport: report };
     }
 
-    return { plan, result, deletesSkipped, deferredCount };
+    return { plan, result, deletesSkipped, deferredCount, pathsSkipped: pathsSkipped || undefined };
   }
 
   // ── private helpers ──
