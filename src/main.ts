@@ -42,6 +42,7 @@ import {
   type SyncOutcome,
   type SyncReportInput,
 } from "./ui/sync-feedback";
+import { SyncLiveReport } from "./ui/sync-live-report";
 import type { SyncPlan } from "./types";
 
 const DEBOUNCE_DELAY_MS = 5000;
@@ -64,6 +65,8 @@ export default class DropboxSyncPlugin extends Plugin {
   private deleteGuardApproved = false;
   private deleteConfirmModal: DeleteConfirmModal | null = null;
   private incompatiblePathsModal: IncompatiblePathsModal | null = null;
+  /** applyPathRenames 중 vault rename → trackDelete 억제 */
+  private suppressRenameDeleteTracking = false;
 
   // ── 모듈 ──
   private auth: DesktopAuth | null = null;
@@ -273,8 +276,6 @@ export default class DropboxSyncPlugin extends Plugin {
     this.longpoll?.stop();
     setRibbonSyncing(this.ribbonEl, true);
     this.statusBar?.update("syncing");
-    if (manual) notifySyncStart();
-    await this.log(`sync started (v${this.manifest.version})`);
 
     let cursorUpdated = false;
     let needsResyncAfterRename = false;
@@ -287,9 +288,30 @@ export default class DropboxSyncPlugin extends Plugin {
     let deferredCount: number | undefined;
     let pathsSkipped: number | undefined;
     let errorMessage: string | undefined;
+    let liveReport: SyncLiveReport | null = null;
+
+    try {
+      liveReport = await SyncLiveReport.open(this.app, {
+        startedAt,
+        deviceId: this.settings.deviceId,
+        version: this.manifest.version,
+      });
+    } catch (e) {
+      console.error("[Dropbox Sync] _sync-log.md open failed", e);
+      void this.log("live sync report open failed", e);
+    }
+
+    if (manual) notifySyncStart();
+    void this.log(`sync started (v${this.manifest.version})`);
 
     try {
       const engine = this.getOrCreateEngine();
+      engine.setLiveReport(liveReport);
+      const prunedDeletes = await this.pruneStaleDeleteLog(engine);
+      if (prunedDeletes > 0) {
+        liveReport?.line(`pruned ${prunedDeletes} stale delete-log entry/entries`);
+        this.engineMgr?.persistDeleteLog();
+      }
       this.conflictIndex = 0;
       this.conflictTotal = 0;
       const cycleResult = await engine.runCycle(this.abortController.signal);
@@ -368,7 +390,12 @@ export default class DropboxSyncPlugin extends Plugin {
         deviceId: this.settings.deviceId,
         version: this.manifest.version,
       };
-      if (shouldWriteSyncReport(manual, reportInput)) {
+
+      const engine = this.getOrCreateEngine();
+      engine.setLiveReport(null);
+      if (liveReport) {
+        await liveReport.finalize(reportInput);
+      } else if (shouldWriteSyncReport(manual, reportInput)) {
         const markdown = buildSyncSummaryMarkdown(reportInput);
         void writeSyncReport(this.app, markdown, this.settings.deviceId, endedAt);
       }
@@ -574,8 +601,10 @@ export default class DropboxSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (!(file instanceof TFile)) return;
-        engine.trackDelete(oldPath.toLowerCase());
-        this.engineMgr?.persistDeleteLog();
+        if (!this.suppressRenameDeleteTracking) {
+          engine.trackDelete(oldPath.toLowerCase());
+          this.engineMgr?.persistDeleteLog();
+        }
         if (!this.syncing) this.scheduleDebouncedSync();
       }),
     );
@@ -691,6 +720,22 @@ export default class DropboxSyncPlugin extends Plugin {
     this.app.setting?.openTabById(this.manifest.id);
   }
 
+  /** deleteLog에만 남은 고아 경로 제거 (rename 후 무한 재싱크 방지) */
+  private async pruneStaleDeleteLog(engine: SyncEngine): Promise<number> {
+    const store = this.engineMgr?.store;
+    if (!store) return 0;
+    let pruned = 0;
+    for (const pathLower of engine.getDeleteLog()) {
+      const entry = await store.getEntry(pathLower);
+      const hasLocal = this.app.vault.getFiles().some((f) => f.path.toLowerCase() === pathLower);
+      if (!entry && !hasLocal) {
+        engine.clearDeleteIntent(pathLower);
+        pruned++;
+      }
+    }
+    return pruned;
+  }
+
   private async handlePathIssues(issues: PathGuardIssue[]): Promise<PathIssueResolution> {
     if (this.incompatiblePathsModal) {
       return { action: "skip" };
@@ -703,7 +748,17 @@ export default class DropboxSyncPlugin extends Plugin {
       const resolution = await modal.waitForResolution();
       if (resolution.action === "renamed") {
         const deps = this.createEngineDeps();
-        await applyPathRenames(deps.fs, deps.remote, deps.store, resolution.renames);
+        const engine = this.getOrCreateEngine();
+        this.suppressRenameDeleteTracking = true;
+        try {
+          await applyPathRenames(deps.fs, deps.remote, deps.store, resolution.renames);
+        } finally {
+          this.suppressRenameDeleteTracking = false;
+        }
+        for (const { from } of resolution.renames) {
+          engine.clearDeleteIntent(from.toLowerCase());
+        }
+        this.engineMgr?.persistDeleteLog();
         await this.log("path renames applied", resolution.renames);
       }
       return resolution;

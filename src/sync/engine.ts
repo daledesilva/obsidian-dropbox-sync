@@ -8,6 +8,8 @@ import { checkDeleteGuard } from "./guards";
 import { DropboxCursorResetError } from "../adapters/dropbox-adapter";
 import { isExcluded } from "../exclude";
 import { CycleContext } from "./cycle-context";
+import type { SyncLiveReportSink } from "../ui/sync-live-report";
+import { VaultAdapter, type LocalFileScanCallback } from "../adapters/vault-adapter";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -77,15 +79,26 @@ export interface CycleResult {
  */
 export class SyncEngine {
   private deletedPaths = new Set<string>();
+  private liveReport: SyncLiveReportSink | null = null;
 
   constructor(
     private deps: SyncEngineDeps,
     private options: SyncEngineOptions = {},
   ) {}
 
+  /** Per-sync live markdown report (set before each runCycle). */
+  setLiveReport(report: SyncLiveReportSink | null): void {
+    this.liveReport = report;
+  }
+
   /** 로컬 삭제 이벤트 기록 */
   trackDelete(pathLower: string): void {
     this.deletedPaths.add(pathLower);
+  }
+
+  /** 잘못 기록된 삭제 의도 제거 (경로 rename 등) */
+  clearDeleteIntent(pathLower: string): void {
+    this.deletedPaths.delete(pathLower);
   }
 
   /** 저장된 삭제 로그에서 복원 */
@@ -118,11 +131,24 @@ export class SyncEngine {
     // 1. 로컬 파일 수집
     signal?.throwIfAborted();
     const localScanStart = Date.now();
-    const localFiles = this.collectLocalFiles(await fs.list());
+    await this.liveReport?.phaseStart(1);
+    const localScanCb: LocalFileScanCallback = (path, detail) => {
+      this.liveReport?.line(`\`${path}\` (${detail})`);
+    };
+    this.attachLocalScanCallback(localScanCb);
+    let localFiles: import("../types").FileInfo[];
+    try {
+      localFiles = this.collectLocalFiles(await fs.list());
+    } finally {
+      this.attachLocalScanCallback(null);
+    }
+    await this.liveReport?.phaseEnd(`${localFiles.length} file(s) scanned`);
     ctx?.emit({ type: "local_scan", ts: Date.now(), fileCount: localFiles.length, duration: Date.now() - localScanStart });
 
     // 2. 원격 변경 수집 (delta)
+    await this.liveReport?.phaseStart(2);
     const { deltaEntries, latestCursor } = await this.fetchRemoteDeltas(store, remote, signal, ctx);
+    await this.liveReport?.phaseEnd(`${deltaEntries.length} remote entry/entries`);
 
     // 3. 이전 상태 로드
     signal?.throwIfAborted();
@@ -137,10 +163,15 @@ export class SyncEngine {
     // 6. 동기화 계획 생성
     signal?.throwIfAborted();
     const fullRemoteEntries = Array.from(fullRemoteMap.values());
+    await this.liveReport?.phaseStart(3);
     const plan = createPlan(localFiles, fullRemoteEntries, baseEntries, {
       localDeletedPaths: this.deletedPaths,
       ctx,
+      onPlanItem: (pathLower, localPath, actionType, reason) => {
+        this.liveReport?.line(`\`${localPath}\` → **${actionType}** (${reason})`);
+      },
     });
+    await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
 
     // 7. 삭제 가드 적용
     const { planToExecute, deletesSkipped } = await this.applyDeleteGuard(plan, ctx);
@@ -148,17 +179,30 @@ export class SyncEngine {
     // 7b. 경로 호환성 가드
     let planToRun = planToExecute;
     let pathsSkipped = 0;
+    await this.liveReport?.phaseStart(4);
     const pathGuard = checkPathGuard(planToRun, this.options.strictLocalPaths ?? false);
     if (!pathGuard.passed) {
+      for (const issue of pathGuard.issues) {
+        const types = issue.issues.map((i) => i.message).join("; ");
+        this.liveReport?.line(
+          `blocked \`${issue.item.localPath}\` (${issue.item.action.type}): ${types}`,
+        );
+      }
       if (this.options.onPathIssues) {
         const resolution = await this.options.onPathIssues(pathGuard.issues);
         if (resolution.action === "renamed") {
+          const pairs = resolution.renames.map((r) => `\`${r.from}\` → \`${r.to}\``).join(", ");
+          this.liveReport?.line(`resolution: **renamed** (${pairs})`);
+          await this.liveReport?.phaseEnd("renames applied — execution deferred to next sync");
           return {
             plan,
             result: { succeeded: [], failed: [], deferred: [] },
             deletesSkipped,
             pathRenamesApplied: true,
           };
+        }
+        if (resolution.action === "skip") {
+          this.liveReport?.line("resolution: **skip** incompatible paths");
         }
         planToRun = pathGuard.filteredPlan;
         pathsSkipped = pathGuard.issues.length;
@@ -167,9 +211,15 @@ export class SyncEngine {
         pathsSkipped = pathGuard.issues.length;
       }
     }
+    await this.liveReport?.phaseEnd(
+      pathGuard.passed
+        ? "all paths compatible"
+        : `${pathsSkipped} blocked, ${planToRun.items.length} remaining in plan`,
+    );
 
     // 8. 계획 실행
     signal?.throwIfAborted();
+    await this.liveReport?.phaseStart(5);
     const result = await executePlan(planToRun, { fs, remote, store }, {
       conflictStrategy: this.options.conflictStrategy,
       conflictResolver: this.options.conflictResolver,
@@ -180,7 +230,19 @@ export class SyncEngine {
       onConflictCount: this.options.onConflictCount,
       strictLocalPaths: this.options.strictLocalPaths,
       ctx,
+      onExecItem: (localPath, actionType, event, ok, error) => {
+        if (event === "start") {
+          this.liveReport?.line(`\`${localPath}\` — ${actionType}…`);
+        } else if (ok) {
+          this.liveReport?.line(`\`${localPath}\` — ${actionType} ✓`);
+        } else {
+          this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
+        }
+      },
     });
+    await this.liveReport?.phaseEnd(
+      `${result.succeeded.length} ok, ${result.failed.length} failed, ${result.deferred.length} deferred`,
+    );
 
     // 9. 상태 갱신
     await this.finalizeState(store, result, latestCursor, deletesSkipped);
@@ -208,6 +270,12 @@ export class SyncEngine {
   }
 
   // ── private helpers ──
+
+  private attachLocalScanCallback(cb: LocalFileScanCallback | null): void {
+    if (this.deps.fs instanceof VaultAdapter) {
+      this.deps.fs.onLocalFileScanned = cb;
+    }
+  }
 
   /** conflict 파일을 제외한 로컬 파일 목록 */
   private collectLocalFiles(files: import("../types").FileInfo[]): import("../types").FileInfo[] {
@@ -240,6 +308,10 @@ export class SyncEngine {
     let deltaEntries = [...changes.entries];
     let latestCursor = changes.cursor;
     let hasMore = changes.hasMore;
+    for (const entry of changes.entries) {
+      const tag = entry.deleted ? "deleted" : "file";
+      this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
+    }
 
     ctx?.emit({
       type: "remote_fetch",
@@ -254,6 +326,10 @@ export class SyncEngine {
       signal?.throwIfAborted();
       const pageStart = Date.now();
       const more = await remote.listChanges(latestCursor);
+      for (const entry of more.entries) {
+        const tag = entry.deleted ? "deleted" : "file";
+        this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
+      }
       deltaEntries = deltaEntries.concat(more.entries);
       latestCursor = more.cursor;
       hasMore = more.hasMore;

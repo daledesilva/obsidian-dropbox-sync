@@ -122,6 +122,8 @@ export interface PlanOptions {
   localDeletedPaths?: Set<string>;
   /** 사이클 컨텍스트 (decision trace) */
   ctx?: CycleContext;
+  /** 플랜 결정 시마다 호출 (라이브 리포트용) */
+  onPlanItem?: (pathLower: string, localPath: string, actionType: string, reason: string) => void;
 }
 
 /**
@@ -205,13 +207,21 @@ export function createPlan(
       });
     }
 
+    const localPath =
+      localFile?.path ?? remoteEntry?.pathDisplay ?? baseEntry?.localPath ?? pathLower;
+
+    const reasonStr =
+      action.type === "noop"
+        ? "noop"
+        : "reason" in action
+          ? String(action.reason)
+          : action.type;
+    options?.onPlanItem?.(pathLower, localPath, action.type, reasonStr);
+
     if (action.type === "noop") {
       stats.noop++;
       continue; // noop은 플랜에 포함하지 않음
     }
-
-    const localPath =
-      localFile?.path ?? remoteEntry?.pathDisplay ?? baseEntry?.localPath ?? pathLower;
 
     items.push({ pathLower, localPath, action });
     stats[action.type]++;

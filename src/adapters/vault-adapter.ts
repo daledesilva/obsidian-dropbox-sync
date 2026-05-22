@@ -19,8 +19,11 @@ interface HashCacheEntry {
  * list()는 mtime/size 기반 해시 캐시를 사용해서
  * 변경되지 않은 파일의 재해싱을 건너뛴다.
  */
+export type LocalFileScanCallback = (path: string, detail: "cached" | "hashed") => void;
+
 export class VaultAdapter implements FileSystem {
   private hashCache = new Map<string, HashCacheEntry>();
+  onLocalFileScanned: LocalFileScanCallback | null = null;
 
   constructor(private vault: Vault, private excludePatterns: string[] = [], private fileManager: FileManager) {}
 
@@ -74,9 +77,11 @@ export class VaultAdapter implements FileSystem {
       let hash: string;
       if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
         hash = cached.hash;
+        this.onLocalFileScanned?.(file.path, "cached");
       } else {
         const data = await this.vault.readBinary(file);
         hash = await dropboxContentHashBrowser(new Uint8Array(data));
+        this.onLocalFileScanned?.(file.path, "hashed");
       }
 
       nextCache.set(pathLower, { mtime: file.stat.mtime, size: file.stat.size, hash });
@@ -124,6 +129,7 @@ export class VaultAdapter implements FileSystem {
   }
 
   private shouldExclude(path: string): boolean {
+    if (path === "_sync-log.md" || path.endsWith("/_sync-log.md")) return true;
     const systemExcludes = [".trash/", ".sync-state/", ".sync-reports/", ".DS_Store", "Thumbs.db"];
     if (systemExcludes.some((ex) => path.startsWith(ex) || path.includes(`/${ex}`))) return true;
     if (path.startsWith("sync-debug-") && path.endsWith(".log")) return true;
