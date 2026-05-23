@@ -190,10 +190,10 @@ export default class DropboxSyncPlugin extends Plugin {
   // ── Settings ──
 
   async loadSettings(): Promise<void> {
-    const raw = await this.loadData() as Partial<PluginSettings> & { syncEnabled?: boolean };
+    const raw = await this.loadData() as (Partial<PluginSettings> & { syncEnabled?: boolean }) | null;
     const migrated = migrateSettings(raw);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
-    if (raw.syncEnabled !== undefined && raw.backgroundSyncEnabled === undefined) {
+    if (raw?.syncEnabled !== undefined && raw.backgroundSyncEnabled === undefined) {
       this.settings.backgroundSyncEnabled = raw.syncEnabled;
     }
   }
@@ -355,6 +355,7 @@ export default class DropboxSyncPlugin extends Plugin {
 
     const startedAt = Date.now();
     this.syncing = true;
+    this.clearSyncTimer();
     this.abortController = new AbortController();
     this.longpoll?.stop();
     if (!this.scopeModalOpen) {
@@ -508,6 +509,7 @@ export default class DropboxSyncPlugin extends Plugin {
           200,
         );
       }
+      this.rescheduleBackgroundSyncTimerIfEnabled();
     }
   }
 
@@ -743,17 +745,35 @@ export default class DropboxSyncPlugin extends Plugin {
       this.statusBar.backgroundSyncEnabled = this.settings.backgroundSyncEnabled;
     }
 
-    const shouldRun =
-      this.settings.backgroundSyncEnabled
-      && !!this.settings.refreshToken
-      && !!this.settings.syncName;
-    if (shouldRun) {
-      this.clearSyncTimer();
-      this.syncTimerId = window.setInterval(() => { void this.syncNow(); }, this.settings.syncInterval * 1000);
-      this.registerInterval(this.syncTimerId);
+    if (this.isBackgroundSyncTimerEligible()) {
+      if (!this.syncing) {
+        this.scheduleBackgroundSyncTimer();
+      }
     } else {
       this.clearSyncTimer();
     }
+  }
+
+  private isBackgroundSyncTimerEligible(): boolean {
+    return (
+      this.settings.backgroundSyncEnabled
+      && !!this.settings.refreshToken
+      && !!this.settings.syncName
+    );
+  }
+
+  private scheduleBackgroundSyncTimer(): void {
+    if (!this.isBackgroundSyncTimerEligible()) return;
+    this.clearSyncTimer();
+    this.syncTimerId = window.setTimeout(() => {
+      this.syncTimerId = null;
+      void this.syncNow();
+    }, this.settings.syncInterval * 1000);
+  }
+
+  private rescheduleBackgroundSyncTimerIfEnabled(): void {
+    if (!this.isBackgroundSyncTimerEligible()) return;
+    this.scheduleBackgroundSyncTimer();
   }
 
   private scheduleDebouncedSync(): void {
@@ -774,7 +794,7 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private clearSyncTimer(): void {
     if (this.syncTimerId !== null) {
-      window.clearInterval(this.syncTimerId);
+      window.clearTimeout(this.syncTimerId);
       this.syncTimerId = null;
     }
   }

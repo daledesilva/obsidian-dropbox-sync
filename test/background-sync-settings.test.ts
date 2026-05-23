@@ -69,6 +69,17 @@ describe("formatBackgroundSectionsLabel", () => {
 });
 
 describe("migrateSettings", () => {
+  test("handles null/undefined saved data (first enable)", () => {
+    expect(migrateSettings(null)).toEqual({
+      backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
+      vaultEventDebounceSec: 2,
+    });
+    expect(migrateSettings(undefined)).toEqual({
+      backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
+      vaultEventDebounceSec: 2,
+    });
+  });
+
   test("adds defaults for missing background fields", () => {
     const migrated = migrateSettings({});
     expect(migrated.backgroundSyncSections).toEqual(DEFAULT_BACKGROUND_SYNC_SECTIONS);

@@ -150,10 +150,20 @@ export class VaultAdapter implements FileSystem {
         try {
           await this.vault.createFolder(current);
         } catch (e) {
-          // 병렬 다운로드 시 다른 스레드가 먼저 생성할 수 있음 — 무시
-          if (!this.vault.getAbstractFileByPath(current)) throw e;
+          // Parallel downloads may create the same folder first. On mobile the
+          // vault index can lag behind createFolder, so also accept Obsidian's
+          // "Folder already exists" error when the folder is on disk.
+          if (this.vault.getAbstractFileByPath(current)) continue;
+          if (isFolderAlreadyExistsError(e)) continue;
+          throw e;
         }
       }
     }
   }
+}
+
+/** Obsidian throws this when createFolder races or the folder exists on disk but is not indexed yet. */
+export function isFolderAlreadyExistsError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /folder already exists/i.test(msg);
 }

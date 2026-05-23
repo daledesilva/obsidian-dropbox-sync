@@ -151,8 +151,10 @@ export function countEnabledBackgroundSections(sections: BackgroundSyncSections)
   return (["notes", "settings", "plugins", "workspaces"] as const).filter((k) => sections[k]).length;
 }
 
-export function migrateSettings(raw: Partial<PluginSettings>): Partial<PluginSettings> {
-  const migrated = { ...raw };
+export function migrateSettings(
+  raw: Partial<PluginSettings> | null | undefined,
+): Partial<PluginSettings> {
+  const migrated = { ...(raw ?? {}) };
   if (!migrated.backgroundSyncSections) {
     migrated.backgroundSyncSections = { ...DEFAULT_BACKGROUND_SYNC_SECTIONS };
   }
