@@ -45,12 +45,14 @@ import {
 } from "./ui/sync-feedback";
 import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
-import { resolveSyncScope, SYNC_SCOPE_LABELS, type SyncScope } from "./sync/sync-scope";
+import type { VaultSection } from "./sync/sync-scope";
 import type { SyncPlan } from "./types";
 import {
   formatBackgroundSectionsLabel,
   getEnabledBackgroundSections,
+  getManualSyncToggleDefaults,
   migrateSettings,
+  sectionsFromToggles,
 } from "./settings";
 
 export default class DropboxSyncPlugin extends Plugin {
@@ -73,7 +75,9 @@ export default class DropboxSyncPlugin extends Plugin {
   private incompatiblePathsModal: IncompatiblePathsModal | null = null;
   /** applyPathRenames 중 vault rename → trackDelete 억제 */
   private suppressRenameDeleteTracking = false;
-  private lastSyncScope: SyncScope = "everything";
+  private lastManualSyncSections: VaultSection[] = sectionsFromToggles(
+    getManualSyncToggleDefaults(DEFAULT_SETTINGS),
+  );
   /** Scope modal open — ribbon stays idle until user picks an option. */
   private scopeModalOpen = false;
 
@@ -305,7 +309,6 @@ export default class DropboxSyncPlugin extends Plugin {
       new Notice("Dropbox sync: set a vault ID in settings first.");
       return;
     }
-    await this.initEngine();
     this.scopeModalOpen = true;
     setRibbonSyncing(this.ribbonEl, false);
     new SyncScopeModal(this.app, this).open();
@@ -326,15 +329,19 @@ export default class DropboxSyncPlugin extends Plugin {
     new Notice("Dropbox Sync: stopping…", 2000);
   }
 
-  async syncNow(options?: { manual?: boolean; scope?: SyncScope }): Promise<void> {
+  async syncNow(options?: { manual?: boolean; sections?: VaultSection[] }): Promise<void> {
     const manual = options?.manual ?? false;
     let scopeLabel: string;
-    let manualScope: SyncScope | undefined;
+    let manualSections: VaultSection[] | undefined;
     if (manual) {
-      const resolved = resolveSyncScope(options?.scope, this.lastSyncScope);
-      this.lastSyncScope = resolved.lastUsedScope;
-      manualScope = resolved.scope;
-      scopeLabel = SYNC_SCOPE_LABELS[manualScope];
+      const sections = options?.sections ?? this.lastManualSyncSections;
+      if (sections.length === 0) {
+        new Notice("Dropbox sync: at least one section must be enabled.");
+        return;
+      }
+      this.lastManualSyncSections = sections;
+      manualSections = sections;
+      scopeLabel = formatBackgroundSectionsLabel(sections);
     } else {
       const sections = getEnabledBackgroundSections(this.settings);
       scopeLabel = formatBackgroundSectionsLabel(sections);
@@ -395,8 +402,8 @@ export default class DropboxSyncPlugin extends Plugin {
       const engine = this.getOrCreateEngine();
       engine.setLiveReport(liveReport);
       const configDir = this.app.vault.configDir;
-      if (manual && manualScope) {
-        engine.setSyncScope(manualScope, configDir);
+      if (manual && manualSections) {
+        engine.setSyncSections(manualSections, configDir);
       } else {
         engine.setSyncSections(getEnabledBackgroundSections(this.settings), configDir);
       }
@@ -505,7 +512,7 @@ export default class DropboxSyncPlugin extends Plugin {
         this.longpoll?.schedule();
       } else if (needsResyncAfterRename) {
         window.setTimeout(
-          () => void this.syncNow({ manual: true, scope: this.lastSyncScope }),
+          () => void this.syncNow({ manual: true, sections: this.lastManualSyncSections }),
           200,
         );
       }

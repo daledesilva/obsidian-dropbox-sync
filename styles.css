@@ -341,3 +341,15 @@
   padding-top: 0;
 }
 
+.dbx-sync-scope-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.dbx-sync-scope-footer button {
+  min-width: 100px;
+}
+

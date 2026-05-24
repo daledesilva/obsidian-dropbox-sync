@@ -1,28 +1,26 @@
-import { App, Modal, Platform, Setting } from "obsidian";
+import { App, Modal, Notice, Platform, Setting } from "obsidian";
 import type DropboxSyncPlugin from "../main";
 import {
-  assessRemoteFiles,
-  countForScope,
-  emptyScopeCounts,
-  SYNC_SCOPE_LABELS,
-  type ScopeCounts,
-  type SyncScope,
-} from "../sync/sync-scope";
+  countEnabledBackgroundSections,
+  getManualSyncToggleDefaults,
+  sectionsFromToggles,
+  type BackgroundSyncSections,
+} from "../settings";
+import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 
-const SCOPES: SyncScope[] = ["everything", "notes", "settings", "plugins", "workspaces"];
+const SECTION_KEYS: VaultSection[] = ["notes", "settings", "plugins", "workspaces"];
 
 export class SyncScopeModal extends Modal {
-  private counts: ScopeCounts = emptyScopeCounts();
-  private scanDone = false;
-  private aborted = false;
-  private statusEl: HTMLElement | null = null;
+  private toggles: BackgroundSyncSections;
   private rowsEl: HTMLElement | null = null;
+  private syncBtn: HTMLButtonElement | null = null;
 
   constructor(
     app: App,
     private plugin: DropboxSyncPlugin,
   ) {
     super(app);
+    this.toggles = getManualSyncToggleDefaults(plugin.settings);
   }
 
   onOpen(): void {
@@ -32,86 +30,62 @@ export class SyncScopeModal extends Modal {
       mobile ? "dbx-sync-scope-modal-mobile" : "dbx-sync-scope-modal",
     );
 
-    contentEl.createEl("h3", { text: "Choose what to sync" });
-    this.statusEl = contentEl.createEl("p", {
+    contentEl.createEl("h3", { text: "Manual sync" });
+    contentEl.createEl("p", {
       cls: "setting-item-description",
-      text: "Scanning Dropbox…",
+      text: "Choose which sections to sync. Background-synced sections are off by default.",
     });
     this.rowsEl = contentEl.createEl("div", { cls: "dbx-sync-scope-rows" });
-    this.renderScopeRows(true);
-    void this.runAssessment();
+    this.renderScopeRows();
+
+    const footer = contentEl.createEl("div", { cls: "dbx-sync-scope-footer" });
+    this.syncBtn = footer.createEl("button", {
+      cls: "mod-cta",
+      text: "Sync",
+    });
+    this.syncBtn.addEventListener("click", () => this.startSync());
+    this.updateSyncButton();
   }
 
   onClose(): void {
-    this.aborted = true;
     this.plugin.onSyncScopeModalClosed();
     this.contentEl.empty();
   }
 
-  private async runAssessment(): Promise<void> {
-    const remote = this.plugin.getRemoteAdapter();
-    if (!remote) {
-      this.setStatus("Not connected to Dropbox. Open settings to connect.");
-      this.scanDone = true;
-      this.renderScopeRows(false);
-      return;
-    }
-
-    try {
-      this.counts = await assessRemoteFiles(
-        remote,
-        this.app.vault.configDir,
-        this.plugin.settings.excludePatterns,
-        {
-          onProgress: (c) => {
-            if (this.aborted) return;
-            this.counts = { ...c };
-            this.setStatus(`Scanning Dropbox… ${c.totalListed} files listed`);
-            this.renderScopeRows(true);
-          },
-        },
-      );
-      if (this.aborted) return;
-      this.scanDone = true;
-      this.setStatus(
-        `Found ${this.counts.totalListed} files on Dropbox (${this.counts.excluded} excluded by your patterns).`,
-      );
-      this.renderScopeRows(false);
-    } catch (e) {
-      if (this.aborted) return;
-      const msg = e instanceof Error ? e.message : String(e);
-      this.setStatus(`Scan failed: ${msg}`);
-      this.scanDone = true;
-      this.renderScopeRows(false);
-    }
-  }
-
-  private setStatus(text: string): void {
-    if (this.statusEl) this.statusEl.setText(text);
-  }
-
-  private renderScopeRows(disabled: boolean): void {
+  private renderScopeRows(): void {
     if (!this.rowsEl) return;
     this.rowsEl.empty();
 
-    for (const scope of SCOPES) {
-      const n = countForScope(this.counts, scope);
-      const btnText = this.scanDone ? `Sync (${n})` : "Sync (…)";
-
+    for (const key of SECTION_KEYS) {
       new Setting(this.rowsEl)
-        .setName(SYNC_SCOPE_LABELS[scope])
-        .addButton((btn) => {
-          btn
-            .setButtonText(btnText)
-            .setDisabled(disabled || (this.scanDone && n === 0 && scope !== "everything"))
-            .onClick(() => this.startSync(scope));
-          if (scope === "everything") btn.setCta();
+        .setName(SYNC_SCOPE_LABELS[key])
+        .addToggle((toggle) => {
+          toggle.setValue(this.toggles[key]).onChange((value) => {
+            if (!value && countEnabledBackgroundSections(this.toggles) <= 1 && this.toggles[key]) {
+              new Notice("At least one section must be enabled.");
+              toggle.setValue(true);
+              return;
+            }
+            this.toggles = { ...this.toggles, [key]: value };
+            this.updateSyncButton();
+          });
         });
     }
   }
 
-  private startSync(scope: SyncScope): void {
+  private updateSyncButton(): void {
+    if (!this.syncBtn) return;
+    const enabled = sectionsFromToggles(this.toggles).length > 0;
+    this.syncBtn.disabled = !enabled;
+  }
+
+  private startSync(): void {
+    const sections = sectionsFromToggles(this.toggles);
+    if (sections.length === 0) {
+      new Notice("At least one section must be enabled.");
+      return;
+    }
     this.close();
-    void this.plugin.syncNow({ manual: true, scope });
+    void this.plugin.syncNow({ manual: true, sections });
   }
 }

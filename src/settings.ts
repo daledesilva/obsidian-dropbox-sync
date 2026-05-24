@@ -126,13 +126,34 @@ export function debounceSecToSliderIndex(sec: VaultEventDebounceSec): number {
 }
 
 export function getEnabledBackgroundSections(settings: PluginSettings): VaultSection[] {
-  const s = settings.backgroundSyncSections ?? DEFAULT_BACKGROUND_SYNC_SECTIONS;
+  return sectionsFromToggles(settings.backgroundSyncSections ?? DEFAULT_BACKGROUND_SYNC_SECTIONS, {
+    fallbackToNotes: true,
+  });
+}
+
+/** Manual sync modal defaults: off for background-synced sections and workspaces. */
+export function getManualSyncToggleDefaults(settings: PluginSettings): BackgroundSyncSections {
+  const auto = settings.backgroundSyncEnabled;
+  const bg = settings.backgroundSyncSections ?? DEFAULT_BACKGROUND_SYNC_SECTIONS;
+  return {
+    notes: !(auto && bg.notes),
+    settings: !(auto && bg.settings),
+    plugins: !(auto && bg.plugins),
+    workspaces: false,
+  };
+}
+
+export function sectionsFromToggles(
+  toggles: BackgroundSyncSections,
+  options?: { fallbackToNotes?: boolean },
+): VaultSection[] {
   const sections: VaultSection[] = [];
-  if (s.notes) sections.push("notes");
-  if (s.settings) sections.push("settings");
-  if (s.plugins) sections.push("plugins");
-  if (s.workspaces) sections.push("workspaces");
-  return sections.length > 0 ? sections : ["notes"];
+  if (toggles.notes) sections.push("notes");
+  if (toggles.settings) sections.push("settings");
+  if (toggles.plugins) sections.push("plugins");
+  if (toggles.workspaces) sections.push("workspaces");
+  if (sections.length > 0) return sections;
+  return options?.fallbackToNotes ? ["notes"] : [];
 }
 
 const SECTION_LABELS: Record<VaultSection, string> = {

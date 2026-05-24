@@ -5,7 +5,9 @@ import {
   DEFAULT_SETTINGS,
   formatBackgroundSectionsLabel,
   getEnabledBackgroundSections,
+  getManualSyncToggleDefaults,
   migrateSettings,
+  sectionsFromToggles,
   snapVaultEventDebounceSec,
   VAULT_EVENT_DEBOUNCE_OPTIONS,
 } from "@/settings";
@@ -57,6 +59,74 @@ describe("getEnabledBackgroundSections", () => {
       },
     };
     expect(getEnabledBackgroundSections(settings)).toEqual(["notes"]);
+  });
+});
+
+describe("getManualSyncToggleDefaults", () => {
+  test("background off: notes, settings, plugins on; workspaces off", () => {
+    expect(getManualSyncToggleDefaults(DEFAULT_SETTINGS)).toEqual({
+      notes: true,
+      settings: true,
+      plugins: true,
+      workspaces: false,
+    });
+  });
+
+  test("background on with notes only: notes off, others on except workspaces", () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      backgroundSyncEnabled: true,
+      backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
+    };
+    expect(getManualSyncToggleDefaults(settings)).toEqual({
+      notes: false,
+      settings: true,
+      plugins: true,
+      workspaces: false,
+    });
+  });
+
+  test("background on with all sections: all off", () => {
+    const settings = {
+      ...DEFAULT_SETTINGS,
+      backgroundSyncEnabled: true,
+      backgroundSyncSections: {
+        notes: true,
+        settings: true,
+        plugins: true,
+        workspaces: true,
+      },
+    };
+    expect(getManualSyncToggleDefaults(settings)).toEqual({
+      notes: false,
+      settings: false,
+      plugins: false,
+      workspaces: false,
+    });
+  });
+});
+
+describe("sectionsFromToggles", () => {
+  test("returns enabled sections", () => {
+    expect(
+      sectionsFromToggles({
+        notes: true,
+        settings: false,
+        plugins: true,
+        workspaces: false,
+      }),
+    ).toEqual(["notes", "plugins"]);
+  });
+
+  test("returns empty when none enabled without fallback", () => {
+    expect(
+      sectionsFromToggles({
+        notes: false,
+        settings: false,
+        plugins: false,
+        workspaces: false,
+      }),
+    ).toEqual([]);
   });
 });
 
