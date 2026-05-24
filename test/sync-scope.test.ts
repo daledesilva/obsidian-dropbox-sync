@@ -41,10 +41,13 @@ describe("classifyVaultPath", () => {
 describe("isSyncExcluded via built-in patterns", () => {
   test(".git excluded when pattern list includes .git/", () => {
     expect(isSyncExcluded(".git/objects/ab/cd", BUILT_IN)).toBe(true);
-    expect(isSyncExcluded("_sync-log.md", BUILT_IN)).toBe(true);
-    expect(isSyncExcluded("sync-logs/_sync-log_2025-01-01-120000.md", BUILT_IN)).toBe(true);
-    expect(isSyncExcluded("_sync-log_2025-01-01-120000.md", BUILT_IN)).toBe(true);
-    expect(isSyncExcluded("sync-debug-abc.log", BUILT_IN)).toBe(true);
+    expect(isSyncExcluded(".sync-state/entries.json", BUILT_IN)).toBe(true);
+  });
+
+  test("sync logs and debug logs are not excluded by built-ins", () => {
+    expect(isSyncExcluded("_sync-log.md", BUILT_IN)).toBe(false);
+    expect(isSyncExcluded("sync-logs/_sync-log_2025-01-01-120000_desktop_abcd.md", BUILT_IN)).toBe(false);
+    expect(isSyncExcluded("sync-debug-abc.log", BUILT_IN)).toBe(false);
   });
 
   test("normal note is not excluded", () => {
@@ -53,9 +56,9 @@ describe("isSyncExcluded via built-in patterns", () => {
 });
 
 describe("vaultEventShouldTriggerSync", () => {
-  test("excluded plugin paths do not trigger", () => {
-    expect(vaultEventShouldTriggerSync("sync-debug-abc.log", BUILT_IN)).toBe(false);
-    expect(vaultEventShouldTriggerSync("sync-logs/_sync-log_2025.md", BUILT_IN)).toBe(false);
+  test("sync-state excluded; sync logs trigger", () => {
+    expect(vaultEventShouldTriggerSync("sync-debug-abc.log", BUILT_IN)).toBe(true);
+    expect(vaultEventShouldTriggerSync("sync-logs/_sync-log_2025.md", BUILT_IN)).toBe(true);
     expect(vaultEventShouldTriggerSync(".sync-state/entries.json", BUILT_IN)).toBe(false);
   });
 
@@ -65,13 +68,16 @@ describe("vaultEventShouldTriggerSync", () => {
 });
 
 describe("vaultRenameShouldTriggerSync", () => {
-  test("rename involving excluded path does not trigger", () => {
+  test("rename involving sync-state does not trigger", () => {
     expect(
-      vaultRenameShouldTriggerSync("notes/a.md", "sync-debug-x.log", BUILT_IN),
+      vaultRenameShouldTriggerSync("notes/a.md", ".sync-state/entries.json", BUILT_IN),
     ).toBe(false);
+  });
+
+  test("rename between sync logs triggers", () => {
     expect(
       vaultRenameShouldTriggerSync("sync-debug-a.log", "sync-debug-b.log", BUILT_IN),
-    ).toBe(false);
+    ).toBe(true);
   });
 
   test("rename between syncable paths triggers", () => {

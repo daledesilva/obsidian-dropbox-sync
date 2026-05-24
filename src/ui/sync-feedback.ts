@@ -1,4 +1,4 @@
-import { Notice, setIcon, type App } from "obsidian";
+import { Notice, Platform, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import { summarizeActions } from "../sync/sync-reporter";
@@ -124,9 +124,25 @@ export function formatFileTimestamp(ms: number): string {
 /** Visible folder at vault root for manual sync logs. */
 export const SYNC_LOGS_DIR = "sync-logs";
 
+/** Platform label for sync log filenames (desktop, ios, android, mobile). */
+export function getSyncDeviceTypeLabel(): string {
+  if (Platform.isIosApp) return "ios";
+  if (Platform.isAndroidApp) return "android";
+  if (Platform.isMobile) return "mobile";
+  if (Platform.isDesktop) return "desktop";
+  return "unknown";
+}
+
+/** Safe slug for sync log filenames: `{type}_{deviceId}`. */
+export function formatSyncLogDeviceSlug(deviceId: string, deviceType?: string): string {
+  const sanitize = (s: string) => s.replace(/[^a-zA-Z0-9_-]/g, "").toLowerCase() || "unknown";
+  return `${sanitize(deviceType ?? "unknown")}_${sanitize(deviceId)}`;
+}
+
 /** Sync log path for a manual sync run. */
-export function buildSyncLogPath(startedAt: number): string {
-  return `${SYNC_LOGS_DIR}/_sync-log_${formatFileTimestamp(startedAt)}.md`;
+export function buildSyncLogPath(startedAt: number, deviceId: string, deviceType?: string): string {
+  const slug = formatSyncLogDeviceSlug(deviceId, deviceType);
+  return `${SYNC_LOGS_DIR}/_sync-log_${formatFileTimestamp(startedAt)}_${slug}.md`;
 }
 
 export async function ensureSyncLogsFolder(app: App): Promise<void> {

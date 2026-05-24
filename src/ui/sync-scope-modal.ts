@@ -12,6 +12,7 @@ const SECTION_KEYS: VaultSection[] = ["notes", "settings", "plugins", "workspace
 
 export class SyncScopeModal extends Modal {
   private toggles: BackgroundSyncSections;
+  private createReport = false;
   private rowsEl: HTMLElement | null = null;
   private syncBtn: HTMLButtonElement | null = null;
 
@@ -37,6 +38,15 @@ export class SyncScopeModal extends Modal {
     });
     this.rowsEl = contentEl.createEl("div", { cls: "dbx-sync-scope-rows" });
     this.renderScopeRows();
+
+    new Setting(contentEl)
+      .setName("Create sync report")
+      .setDesc("Writes a detailed log under sync-logs/ for this run.")
+      .addToggle((toggle) => {
+        toggle.setValue(this.createReport).onChange((value) => {
+          this.createReport = value;
+        });
+      });
 
     const footer = contentEl.createEl("div", { cls: "dbx-sync-scope-footer" });
     this.syncBtn = footer.createEl("button", {
@@ -86,6 +96,6 @@ export class SyncScopeModal extends Modal {
       return;
     }
     this.close();
-    void this.plugin.syncNow({ manual: true, sections });
+    void this.plugin.syncNow({ manual: true, sections, createReport: this.createReport });
   }
 }

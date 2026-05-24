@@ -34,6 +34,7 @@ import type { SyncEngine } from "./sync/engine";
 import { fetchFileFromRemote } from "./deep-link";
 import {
   buildSyncLogPath,
+  getSyncDeviceTypeLabel,
   buildSyncResultFeedback,
   buildSyncSummaryMarkdown,
   notifySyncEnd,
@@ -83,6 +84,7 @@ export default class DropboxSyncPlugin extends Plugin {
   private lastManualSyncSections: VaultSection[] = sectionsFromToggles(
     getManualSyncToggleDefaults(DEFAULT_SETTINGS),
   );
+  private lastManualCreateReport = false;
   /** Scope modal open — ribbon stays idle until user picks an option. */
   private scopeModalOpen = false;
 
@@ -334,10 +336,15 @@ export default class DropboxSyncPlugin extends Plugin {
     new Notice("Dropbox Sync: stopping…", 2000);
   }
 
-  async syncNow(options?: { manual?: boolean; sections?: VaultSection[] }): Promise<void> {
+  async syncNow(options?: {
+    manual?: boolean;
+    sections?: VaultSection[];
+    createReport?: boolean;
+  }): Promise<void> {
     const manual = options?.manual ?? false;
     let scopeLabel: string;
     let manualSections: VaultSection[] | undefined;
+    let createReport = false;
     if (manual) {
       const sections = options?.sections ?? this.lastManualSyncSections;
       if (sections.length === 0) {
@@ -345,6 +352,8 @@ export default class DropboxSyncPlugin extends Plugin {
         return;
       }
       this.lastManualSyncSections = sections;
+      createReport = options?.createReport ?? this.lastManualCreateReport;
+      this.lastManualCreateReport = createReport;
       manualSections = sections;
       scopeLabel = formatBackgroundSectionsLabel(sections);
     } else {
@@ -389,11 +398,12 @@ export default class DropboxSyncPlugin extends Plugin {
     let diagnostics: import("./sync/sync-diagnostics").SyncCycleDiagnostics | undefined;
     let liveReport: SyncLiveReport | null = null;
 
-    if (manual) {
+    if (manual && createReport) {
       try {
         liveReport = await SyncLiveReport.open(this.app, {
           startedAt,
           deviceId: this.settings.deviceId,
+          deviceType: getSyncDeviceTypeLabel(),
           version: this.manifest.version,
           scope: scopeLabel,
         });
@@ -508,9 +518,13 @@ export default class DropboxSyncPlugin extends Plugin {
       engine.setLiveReport(null);
       if (liveReport) {
         await liveReport.finalize(reportInput);
-      } else if (manual) {
+      } else if (manual && createReport) {
         const markdown = buildSyncSummaryMarkdown(reportInput);
-        await writeSyncLogFallback(this.app, buildSyncLogPath(startedAt), markdown);
+        await writeSyncLogFallback(
+          this.app,
+          buildSyncLogPath(startedAt, this.settings.deviceId, getSyncDeviceTypeLabel()),
+          markdown,
+        );
       }
 
       this.syncing = false;
@@ -525,7 +539,11 @@ export default class DropboxSyncPlugin extends Plugin {
         this.longpoll?.schedule();
       } else if (needsResyncAfterRename) {
         window.setTimeout(
-          () => void this.syncNow({ manual: true, sections: this.lastManualSyncSections }),
+          () => void this.syncNow({
+            manual: true,
+            sections: this.lastManualSyncSections,
+            createReport: this.lastManualCreateReport,
+          }),
           200,
         );
       }

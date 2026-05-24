@@ -52,9 +52,11 @@ describe("buildSyncResultFeedback", () => {
 });
 
 describe("buildSyncLogPath", () => {
-  test("returns timestamped path under sync-logs/", () => {
+  test("returns timestamped path with device type and id under sync-logs/", () => {
     const startedAt = new Date("2025-05-24T14:30:52").getTime();
-    expect(buildSyncLogPath(startedAt)).toBe("sync-logs/_sync-log_2025-05-24-143052.md");
+    expect(buildSyncLogPath(startedAt, "abcd", "desktop")).toBe(
+      "sync-logs/_sync-log_2025-05-24-143052_desktop_abcd.md",
+    );
   });
 });
 

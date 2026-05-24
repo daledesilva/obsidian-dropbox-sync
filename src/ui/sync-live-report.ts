@@ -27,6 +27,7 @@ function formatTimestamp(ms: number): string {
 export interface SyncLiveReportMeta {
   startedAt: number;
   deviceId: string;
+  deviceType?: string;
   version: string;
   scope?: string;
 }
@@ -99,7 +100,7 @@ export class SyncLiveReport implements SyncLiveReportSink {
 
   private async createFile(): Promise<void> {
     const vault = this.app.vault;
-    this.path = buildSyncLogPath(this.meta.startedAt);
+    this.path = buildSyncLogPath(this.meta.startedAt, this.meta.deviceId, this.meta.deviceType);
 
     const header = [
       `# Dropbox Sync — ${formatTimestamp(this.meta.startedAt)}`,

@@ -7,13 +7,13 @@ import {
 import { isExcluded } from "@/exclude";
 
 describe("getBuiltInExcludePatterns", () => {
-  test("includes .git and sync metadata paths", () => {
+  test("includes .git and sync metadata paths but not sync logs", () => {
     const patterns = getBuiltInExcludePatterns(".obsidian");
     expect(patterns).toContain(".git/");
     expect(patterns).toContain(".sync-state/");
-    expect(patterns).toContain("sync-logs/");
-    expect(patterns).toContain("_sync-log.md");
-    expect(patterns).toContain("_sync-log_*.md");
+    expect(patterns).not.toContain("sync-logs/");
+    expect(patterns).not.toContain("_sync-log.md");
+    expect(patterns).not.toContain("sync-debug-*.log");
     expect(patterns).toContain(".obsidian/workspace*");
   });
 
