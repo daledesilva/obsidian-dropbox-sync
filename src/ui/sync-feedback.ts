@@ -2,6 +2,10 @@ import { Notice, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import { summarizeActions } from "../sync/sync-reporter";
+import {
+  formatDiagnosticsMarkdown,
+  type SyncCycleDiagnostics,
+} from "../sync/sync-diagnostics";
 
 const RIBBON_ICON = "refresh-cw";
 const RIBBON_CLASS_SYNCING = "dbx-sync-ribbon-syncing";
@@ -28,6 +32,7 @@ export interface SyncReportInput {
   errorMessage?: string;
   deviceId: string;
   version: string;
+  diagnostics?: SyncCycleDiagnostics;
 }
 
 export function setRibbonSyncing(ribbonEl: HTMLElement | null, syncing: boolean): void {
@@ -207,6 +212,10 @@ export function buildSyncSummaryMarkdown(input: SyncReportInput): string {
 
   if (input.errorMessage && input.outcome !== "failed") {
     lines.push("", "## Error", "", input.errorMessage);
+  }
+
+  if (input.diagnostics) {
+    lines.push(...formatDiagnosticsMarkdown(input.diagnostics));
   }
 
   return lines.join("\n") + "\n";

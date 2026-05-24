@@ -46,6 +46,7 @@ import {
 import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
 import type { VaultSection } from "./sync/sync-scope";
+import { formatDiagnosticsForLog } from "./sync/sync-diagnostics";
 import type { SyncPlan } from "./types";
 import {
   formatBackgroundSectionsLabel,
@@ -381,6 +382,7 @@ export default class DropboxSyncPlugin extends Plugin {
     let deferredCount: number | undefined;
     let pathsSkipped: number | undefined;
     let errorMessage: string | undefined;
+    let diagnostics: import("./sync/sync-diagnostics").SyncCycleDiagnostics | undefined;
     let liveReport: SyncLiveReport | null = null;
 
     if (manual) {
@@ -422,8 +424,12 @@ export default class DropboxSyncPlugin extends Plugin {
       deletesSkipped = cycleResult.deletesSkipped;
       deferredCount = cycleResult.deferredCount;
       pathsSkipped = cycleResult.pathsSkipped;
+      diagnostics = cycleResult.diagnostics;
 
       await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}, pathsSkipped: ${pathsSkipped ?? 0}`);
+      if (diagnostics) {
+        await this.log("sync diagnostics", formatDiagnosticsForLog(diagnostics));
+      }
 
       if (cycleResult.pathRenamesApplied) {
         needsResyncAfterRename = true;
@@ -491,6 +497,7 @@ export default class DropboxSyncPlugin extends Plugin {
         errorMessage,
         deviceId: this.settings.deviceId,
         version: this.manifest.version,
+        diagnostics,
       };
 
       const engine = this.getOrCreateEngine();
@@ -659,6 +666,14 @@ export default class DropboxSyncPlugin extends Plugin {
         this.deleteConfirmModal = modal;
         void modal.waitForConfirmation().then((approved) => {
           this.deleteConfirmModal = null;
+          const remote = guard.deleteItems.filter((i) => i.action.type === "deleteRemote").length;
+          const local = guard.deleteItems.filter((i) => i.action.type === "deleteLocal").length;
+          void this.log(
+            approved
+              ? `delete guard: user approved ${guard.deleteItems.length} deletions`
+              : `delete guard: user skipped ${guard.deleteItems.length} deletions`,
+            { remote, local, threshold: this.settings.deleteThreshold },
+          );
           if (approved) {
             this.deleteGuardApproved = true;
             this.scheduleDebouncedSync();
