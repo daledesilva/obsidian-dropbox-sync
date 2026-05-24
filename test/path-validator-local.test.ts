@@ -27,6 +27,11 @@ describe("suggestFixedPath", () => {
     expect(suggestFixedPath("file:name.md")).toBe("file-name.md");
   });
 
+  test("replaces all forbidden chars in a segment", () => {
+    expect(suggestFixedPath("file:a:b.md")).toBe("file-a-b.md");
+    expect(suggestFixedPath("a*b*c.md")).toBe("a-b-c.md");
+  });
+
   test("fixes reserved name", () => {
     expect(suggestFixedPath("CON.md").toLowerCase()).toBe("_con.md");
   });

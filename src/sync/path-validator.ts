@@ -4,10 +4,10 @@
 
 /** 금지 문자 (Dropbox API: NUL, 제어문자) */
 // eslint-disable-next-line no-control-regex -- 제어문자 감지가 이 함수의 목적
-const FORBIDDEN_CHARS = /[\x00-\x1f\x7f]/;
+const FORBIDDEN_CHARS = /[\x00-\x1f\x7f]/g;
 
 /** Windows / iOS에서 문제되는 경로 문자 (세그먼트 단위) */
-const LOCAL_FORBIDDEN_IN_SEGMENT = /[\\/:*?"<>|]/;
+const LOCAL_FORBIDDEN_IN_SEGMENT = /[\\/:*?"<>|]/g;
 
 const WINDOWS_RESERVED = new Set([
   "con", "prn", "aux", "nul",
