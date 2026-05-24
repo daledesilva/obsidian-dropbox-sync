@@ -40,6 +40,8 @@ describe("isSyncExcluded via built-in patterns", () => {
   test(".git excluded when pattern list includes .git/", () => {
     expect(isSyncExcluded(".git/objects/ab/cd", BUILT_IN)).toBe(true);
     expect(isSyncExcluded("_sync-log.md", BUILT_IN)).toBe(true);
+    expect(isSyncExcluded("sync-logs/_sync-log_2025-01-01-120000.md", BUILT_IN)).toBe(true);
+    expect(isSyncExcluded("_sync-log_2025-01-01-120000.md", BUILT_IN)).toBe(true);
     expect(isSyncExcluded("sync-debug-abc.log", BUILT_IN)).toBe(true);
   });
 

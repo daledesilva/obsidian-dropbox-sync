@@ -1,11 +1,10 @@
-import { Notice, setIcon, type App, type Vault } from "obsidian";
+import { Notice, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import { summarizeActions } from "../sync/sync-reporter";
 
 const RIBBON_ICON = "refresh-cw";
 const RIBBON_CLASS_SYNCING = "dbx-sync-ribbon-syncing";
-const REPORTS_DIR = ".sync-reports";
 
 export type SyncOutcome =
   | "success"
@@ -105,36 +104,34 @@ export function buildSyncResultFeedback(
   };
 }
 
-export function shouldWriteSyncReport(
-  manual: boolean,
-  input: Pick<SyncReportInput, "outcome" | "result" | "deletesSkipped" | "pathsSkipped" | "deferredCount">,
-): boolean {
-  if (manual) return true;
-  if (input.outcome === "aborted" || input.outcome === "auth_error" || input.outcome === "renamed_resync") {
-    return false;
-  }
-  if (input.outcome !== "up_to_date") return true;
-  const result = input.result;
-  if (!result) return false;
-  return (
-    result.succeeded.length > 0
-    || result.failed.length > 0
-    || result.deferred.length > 0
-    || (input.deletesSkipped ?? 0) > 0
-    || (input.pathsSkipped ?? 0) > 0
-  );
-}
-
 function formatTimestamp(ms: number): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
 }
 
-function formatFileTimestamp(ms: number): string {
+export function formatFileTimestamp(ms: number): string {
   const d = new Date(ms);
   const pad = (n: number) => String(n).padStart(2, "0");
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+}
+
+/** Visible folder at vault root for manual sync logs. */
+export const SYNC_LOGS_DIR = "sync-logs";
+
+/** Sync log path for a manual sync run. */
+export function buildSyncLogPath(startedAt: number): string {
+  return `${SYNC_LOGS_DIR}/_sync-log_${formatFileTimestamp(startedAt)}.md`;
+}
+
+export async function ensureSyncLogsFolder(app: App): Promise<void> {
+  const vault = app.vault;
+  if (vault.getAbstractFileByPath(SYNC_LOGS_DIR)) return;
+  try {
+    await vault.createFolder(SYNC_LOGS_DIR);
+  } catch {
+    // folder may exist from a race
+  }
 }
 
 function outcomeLabel(outcome: SyncOutcome): string {
@@ -215,32 +212,18 @@ export function buildSyncSummaryMarkdown(input: SyncReportInput): string {
   return lines.join("\n") + "\n";
 }
 
-export async function writeSyncReport(
+/** Summary-only fallback when SyncLiveReport.open fails. */
+export async function writeSyncLogFallback(
   app: App,
+  path: string,
   markdown: string,
-  deviceId: string,
-  endedAt: number,
 ): Promise<string | null> {
-  const vault = app.vault;
-  const folder = REPORTS_DIR;
-  const existing = vault.getAbstractFileByPath(folder);
-  if (!existing) {
-    try {
-      await vault.createFolder(folder);
-    } catch {
-      // folder may exist from a race
-    }
-  }
-
-  const suffix = deviceId ? `-${deviceId}` : "";
-  const filename = `sync-${formatFileTimestamp(endedAt)}${suffix}.md`;
-  const path = `${folder}/${filename}`;
-
   try {
-    await vault.create(path, markdown);
+    await ensureSyncLogsFolder(app);
+    await app.vault.create(path, markdown);
     return path;
   } catch (e) {
-    console.error("[Dropbox Sync] failed to write sync report:", e);
+    console.error(`[Dropbox Sync] failed to write ${path}:`, e);
     return null;
   }
 }

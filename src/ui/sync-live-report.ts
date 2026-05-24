@@ -1,8 +1,10 @@
 import { TFile, normalizePath, type App } from "obsidian";
-import { buildSyncSummaryMarkdown, type SyncReportInput } from "./sync-feedback";
-
-/** Vault root — visible during sync for debugging. Excluded from Dropbox sync. */
-export const SYNC_LOG_PATH = "_sync-log.md";
+import {
+  buildSyncLogPath,
+  buildSyncSummaryMarkdown,
+  ensureSyncLogsFolder,
+  type SyncReportInput,
+} from "./sync-feedback";
 const FLUSH_LINE_COUNT = 25;
 const PROGRESS_LINE_RE = /^\*Progress:.*\*$/m;
 
@@ -97,7 +99,7 @@ export class SyncLiveReport implements SyncLiveReportSink {
 
   private async createFile(): Promise<void> {
     const vault = this.app.vault;
-    this.path = SYNC_LOG_PATH;
+    this.path = buildSyncLogPath(this.meta.startedAt);
 
     const header = [
       `# Dropbox Sync — ${formatTimestamp(this.meta.startedAt)}`,
@@ -109,15 +111,11 @@ export class SyncLiveReport implements SyncLiveReportSink {
       "Per-file log (updates during sync):",
     ].join("\n") + "\n";
 
-    const existing = vault.getAbstractFileByPath(this.path);
     try {
-      if (existing instanceof TFile) {
-        await vault.modify(existing, header);
-      } else {
-        await vault.create(this.path, header);
-      }
+      await ensureSyncLogsFolder(this.app);
+      await vault.create(this.path, header);
     } catch (e) {
-      console.error("[Dropbox Sync] failed to create _sync-log.md via vault API", e);
+      console.error(`[Dropbox Sync] failed to create ${this.path} via vault API`, e);
       try {
         await vault.adapter.write(normalizePath(this.path), header);
       } catch {

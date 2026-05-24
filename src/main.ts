@@ -33,13 +33,13 @@ import type { SyncEngine } from "./sync/engine";
 
 import { fetchFileFromRemote } from "./deep-link";
 import {
+  buildSyncLogPath,
   buildSyncResultFeedback,
   buildSyncSummaryMarkdown,
   notifySyncEnd,
   notifySyncStart,
   setRibbonSyncing,
-  shouldWriteSyncReport,
-  writeSyncReport,
+  writeSyncLogFallback,
   type SyncOutcome,
   type SyncReportInput,
 } from "./ui/sync-feedback";
@@ -383,16 +383,18 @@ export default class DropboxSyncPlugin extends Plugin {
     let errorMessage: string | undefined;
     let liveReport: SyncLiveReport | null = null;
 
-    try {
-      liveReport = await SyncLiveReport.open(this.app, {
-        startedAt,
-        deviceId: this.settings.deviceId,
-        version: this.manifest.version,
-        scope: scopeLabel,
-      });
-    } catch (e) {
-      console.error("[Dropbox Sync] _sync-log.md open failed", e);
-      void this.log("live sync report open failed", e);
+    if (manual) {
+      try {
+        liveReport = await SyncLiveReport.open(this.app, {
+          startedAt,
+          deviceId: this.settings.deviceId,
+          version: this.manifest.version,
+          scope: scopeLabel,
+        });
+      } catch (e) {
+        console.error("[Dropbox Sync] sync log open failed", e);
+        void this.log("live sync report open failed", e);
+      }
     }
 
     if (manual) notifySyncStart();
@@ -495,9 +497,9 @@ export default class DropboxSyncPlugin extends Plugin {
       engine.setLiveReport(null);
       if (liveReport) {
         await liveReport.finalize(reportInput);
-      } else if (shouldWriteSyncReport(manual, reportInput)) {
+      } else if (manual) {
         const markdown = buildSyncSummaryMarkdown(reportInput);
-        void writeSyncReport(this.app, markdown, this.settings.deviceId, endedAt);
+        await writeSyncLogFallback(this.app, buildSyncLogPath(startedAt), markdown);
       }
 
       this.syncing = false;

@@ -1,8 +1,8 @@
 import { describe, test, expect } from "bun:test";
 import {
+  buildSyncLogPath,
   buildSyncSummaryMarkdown,
   buildSyncResultFeedback,
-  shouldWriteSyncReport,
   type SyncReportInput,
 } from "@/ui/sync-feedback";
 import type { SyncPlan, SyncResult } from "@/types";
@@ -51,33 +51,10 @@ describe("buildSyncResultFeedback", () => {
   });
 });
 
-describe("shouldWriteSyncReport", () => {
-  test("manual sync always writes", () => {
-    expect(
-      shouldWriteSyncReport(true, { outcome: "up_to_date", result: makeResult() }),
-    ).toBe(true);
-  });
-
-  test("auto up-to-date skips write", () => {
-    expect(
-      shouldWriteSyncReport(false, { outcome: "up_to_date", result: makeResult() }),
-    ).toBe(false);
-  });
-
-  test("auto with failures writes", () => {
-    expect(
-      shouldWriteSyncReport(false, {
-        outcome: "failed",
-        result: makeResult({
-          failed: [
-            {
-              item: { pathLower: "x.md", localPath: "x.md", action: { type: "upload", reason: "r" } },
-              error: new Error("boom"),
-            },
-          ],
-        }),
-      }),
-    ).toBe(true);
+describe("buildSyncLogPath", () => {
+  test("returns timestamped path under sync-logs/", () => {
+    const startedAt = new Date("2025-05-24T14:30:52").getTime();
+    expect(buildSyncLogPath(startedAt)).toBe("sync-logs/_sync-log_2025-05-24-143052.md");
   });
 });
 

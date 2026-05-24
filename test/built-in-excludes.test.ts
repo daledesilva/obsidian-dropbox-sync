@@ -11,7 +11,9 @@ describe("getBuiltInExcludePatterns", () => {
     const patterns = getBuiltInExcludePatterns(".obsidian");
     expect(patterns).toContain(".git/");
     expect(patterns).toContain(".sync-state/");
+    expect(patterns).toContain("sync-logs/");
     expect(patterns).toContain("_sync-log.md");
+    expect(patterns).toContain("_sync-log_*.md");
     expect(patterns).toContain(".obsidian/workspace*");
   });
 
