@@ -9,6 +9,8 @@ import {
   isPathInSections,
   isSyncExcluded,
   resolveSyncScope,
+  vaultEventShouldTriggerSync,
+  vaultRenameShouldTriggerSync,
 } from "@/sync/sync-scope";
 import { getBuiltInExcludePatterns } from "@/settings";
 import { MemoryRemoteStorage } from "@/adapters/memory";
@@ -47,6 +49,33 @@ describe("isSyncExcluded via built-in patterns", () => {
 
   test("normal note is not excluded", () => {
     expect(isSyncExcluded("notes/foo.md", BUILT_IN)).toBe(false);
+  });
+});
+
+describe("vaultEventShouldTriggerSync", () => {
+  test("excluded plugin paths do not trigger", () => {
+    expect(vaultEventShouldTriggerSync("sync-debug-abc.log", BUILT_IN)).toBe(false);
+    expect(vaultEventShouldTriggerSync("sync-logs/_sync-log_2025.md", BUILT_IN)).toBe(false);
+    expect(vaultEventShouldTriggerSync(".sync-state/entries.json", BUILT_IN)).toBe(false);
+  });
+
+  test("normal notes trigger", () => {
+    expect(vaultEventShouldTriggerSync("notes/foo.md", BUILT_IN)).toBe(true);
+  });
+});
+
+describe("vaultRenameShouldTriggerSync", () => {
+  test("rename involving excluded path does not trigger", () => {
+    expect(
+      vaultRenameShouldTriggerSync("notes/a.md", "sync-debug-x.log", BUILT_IN),
+    ).toBe(false);
+    expect(
+      vaultRenameShouldTriggerSync("sync-debug-a.log", "sync-debug-b.log", BUILT_IN),
+    ).toBe(false);
+  });
+
+  test("rename between syncable paths triggers", () => {
+    expect(vaultRenameShouldTriggerSync("notes/a.md", "notes/b.md", BUILT_IN)).toBe(true);
   });
 });
 

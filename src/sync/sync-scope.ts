@@ -27,6 +27,23 @@ export function isSyncExcluded(path: string, excludePatterns: string[]): boolean
   return isExcluded(path, lowered);
 }
 
+/** Vault file events on this path should not schedule background sync. */
+export function vaultEventShouldTriggerSync(path: string, excludePatterns: string[]): boolean {
+  return !isSyncExcluded(path, excludePatterns);
+}
+
+/** Rename events: skip when either path is excluded (e.g. plugin log files). */
+export function vaultRenameShouldTriggerSync(
+  oldPath: string,
+  newPath: string,
+  excludePatterns: string[],
+): boolean {
+  return (
+    vaultEventShouldTriggerSync(oldPath, excludePatterns)
+    && vaultEventShouldTriggerSync(newPath, excludePatterns)
+  );
+}
+
 function isWorkspacePath(path: string, configDir: string): boolean {
   const obs = normalizeConfigDir(configDir);
   const lower = path.toLowerCase();

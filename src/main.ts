@@ -45,7 +45,11 @@ import {
 } from "./ui/sync-feedback";
 import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
-import type { VaultSection } from "./sync/sync-scope";
+import {
+  type VaultSection,
+  vaultEventShouldTriggerSync,
+  vaultRenameShouldTriggerSync,
+} from "./sync/sync-scope";
 import { formatDiagnosticsForLog } from "./sync/sync-diagnostics";
 import type { SyncPlan } from "./types";
 import {
@@ -714,10 +718,12 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private registerVaultEvents(): void {
     const engine = this.getOrCreateEngine();
+    const excludes = this.settings.excludePatterns;
 
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (this.syncing || !(file instanceof TFile)) return;
+        if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
         this.scheduleDebouncedSync();
       }),
     );
@@ -725,6 +731,7 @@ export default class DropboxSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("delete", (file) => {
         if (!(file instanceof TFile)) return;
+        if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
         const p = file.path.toLowerCase();
         if (this.syncDeletedByEngine.delete(p)) return; // 싱크 엔진이 지운 거면 무시
         engine.trackDelete(p);
@@ -736,17 +743,19 @@ export default class DropboxSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (!(file instanceof TFile)) return;
-        if (!this.suppressRenameDeleteTracking) {
+        const triggersSync = vaultRenameShouldTriggerSync(oldPath, file.path, excludes);
+        if (triggersSync && !this.suppressRenameDeleteTracking) {
           engine.trackDelete(oldPath.toLowerCase());
           this.engineMgr?.persistDeleteLog();
         }
-        if (!this.syncing) this.scheduleDebouncedSync();
+        if (!this.syncing && triggersSync) this.scheduleDebouncedSync();
       }),
     );
 
     this.registerEvent(
       this.app.vault.on("create", (file) => {
         if (this.syncing || !(file instanceof TFile)) return;
+        if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
         if (this.settings.syncOnCreateDeleteRename) this.scheduleDebouncedSync();
       }),
     );
