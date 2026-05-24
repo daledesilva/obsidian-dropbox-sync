@@ -17,10 +17,12 @@ import {
   countLocalBySection,
   countRemotePlugins,
   emitDiagnosticsPhaseLines,
+  shouldSkipPluginInfer,
   summarizeDeletePlan,
   type DeleteIntentSource,
   type SyncCycleDiagnostics,
 } from "./sync-diagnostics";
+import { classifyVaultPath } from "./sync-scope";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -58,6 +60,8 @@ export interface SyncEngineOptions {
   strictLocalPaths?: boolean;
   /** 호환되지 않는 경로 감지 시 모달 등 처리 */
   onPathIssues?: (issues: PathGuardIssue[]) => Promise<PathIssueResolution>;
+  /** Adapter-scan vault root for hidden/dot paths (user setting). */
+  includeHiddenFilesAndFolders?: boolean;
 }
 
 export interface CycleResult {
@@ -201,18 +205,37 @@ export class SyncEngine {
     this.attachLocalScanCallback(localScanCb);
     let localFiles: import("../types").FileInfo[];
     let allLocalFiles: import("../types").FileInfo[] = [];
+    const configDiskScan = this.sectionFilter?.some((s) => s !== "notes") ?? false;
+    const listOpts = {
+      configDir: this.configDir,
+      configDiskScan,
+      includeHiddenFilesAndFolders: this.options.includeHiddenFilesAndFolders ?? false,
+    };
     try {
-      allLocalFiles = this.collectLocalFiles(await fs.list());
+      allLocalFiles = this.collectLocalFiles(await fs.list(listOpts));
       localFiles = allLocalFiles.filter((f) => this.pathInScope(f.path));
     } finally {
       this.attachLocalScanCallback(null);
     }
+    const listStats =
+      fs instanceof VaultAdapter
+        ? fs.lastListStats
+        : {
+            vaultIndexed: allLocalFiles.length,
+            configDiskAdded: 0,
+            hiddenDiskAdded: 0,
+            mergedBeforeExclude: allLocalFiles.length,
+            mergedAfterExclude: allLocalFiles.length,
+          };
     const inScopeBySection = countLocalBySection(localFiles, this.configDir);
     this.lastDiagnostics = {
       local: {
-        vaultIndexed: allLocalFiles.length,
+        vaultIndexed: listStats.vaultIndexed,
+        configDiskAdded: listStats.configDiskAdded,
+        hiddenDiskAdded: listStats.hiddenDiskAdded,
+        mergedAfterExclude: listStats.mergedAfterExclude,
         inScope: localFiles.length,
-        outOfScope: allLocalFiles.length - localFiles.length,
+        outOfScope: listStats.mergedAfterExclude - localFiles.length,
         bySection: inScopeBySection,
       },
       syncState: {
@@ -228,6 +251,7 @@ export class SyncEngine {
         fromPersistedLog: 0,
         inferredThisCycle: 0,
         inferredSample: [],
+        inferredSkippedPlugin: 0,
       },
       deletePlan: {
         deleteRemote: 0,
@@ -282,6 +306,7 @@ export class SyncEngine {
         fromPersistedLog: intentSources.persisted,
         inferredThisCycle: inferred.count,
         inferredSample: inferred.sample,
+        inferredSkippedPlugin: inferred.skippedPluginInfer,
       };
       emitDiagnosticsPhaseLines(this.liveReport, "intent", this.lastDiagnostics);
     }
@@ -569,11 +594,35 @@ export class SyncEngine {
     localFiles: import("../types").FileInfo[],
     fullRemoteMap: Map<string, RemoteEntry>,
     baseEntries: import("../types").SyncEntry[],
-  ): { count: number; sample: string[] } {
+  ): { count: number; sample: string[]; skippedPluginInfer: number } {
     const localPathSet = new Set(localFiles.map((f) => f.pathLower));
     const sample: string[] = [];
     let count = 0;
+    let skippedPluginInfer = 0;
+
+    const pluginsSectionActive = this.sectionFilter?.includes("plugins") ?? false;
+    const localPlugins = countLocalBySection(localFiles, this.configDir).plugins;
+    const basePlugins = countBasePlugins(baseEntries, this.configDir);
+    const skipPluginInfer = shouldSkipPluginInfer(
+      pluginsSectionActive,
+      localPlugins,
+      basePlugins,
+    );
+
     for (const base of baseEntries) {
+      if (
+        skipPluginInfer &&
+        classifyVaultPath(base.localPath, this.configDir) === "plugins"
+      ) {
+        if (
+          !localPathSet.has(base.pathLower) &&
+          !this.deletedPaths.has(base.pathLower) &&
+          fullRemoteMap.has(base.pathLower)
+        ) {
+          skippedPluginInfer++;
+        }
+        continue;
+      }
       if (
         !localPathSet.has(base.pathLower) &&
         !this.deletedPaths.has(base.pathLower) &&
@@ -587,7 +636,7 @@ export class SyncEngine {
         }
       }
     }
-    return { count, sample };
+    return { count, sample, skippedPluginInfer };
   }
 
   /** 삭제 가드 적용 → 실행할 plan과 스킵 수 반환 */

@@ -143,10 +143,12 @@ describe("migrateSettings", () => {
     expect(migrateSettings(null)).toEqual({
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
       vaultEventDebounceSec: 2,
+      includeHiddenFilesAndFolders: false,
     });
     expect(migrateSettings(undefined)).toEqual({
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
       vaultEventDebounceSec: 2,
+      includeHiddenFilesAndFolders: false,
     });
   });
 

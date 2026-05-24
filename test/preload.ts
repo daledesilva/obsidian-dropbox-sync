@@ -1,7 +1,12 @@
 import { mock } from "bun:test";
 
+function normalizePath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/\/+/g, "/").replace(/^\//, "");
+}
+
 // obsidian 모듈 mock
 mock.module("obsidian", () => ({
+  normalizePath,
   requestUrl(): never {
     throw new Error("requestUrl is not available in tests");
   },

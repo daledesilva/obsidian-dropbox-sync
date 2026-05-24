@@ -6,8 +6,11 @@ export type DeleteIntentSource = "event" | "inferred" | "persisted";
 
 export interface SyncCycleDiagnostics {
   local: {
-    /** Files returned by vault.getFiles() (non-conflict, post-exclude in list()). */
+    /** Files from vault.getFiles() before disk merge. */
     vaultIndexed: number;
+    configDiskAdded: number;
+    hiddenDiskAdded: number;
+    mergedAfterExclude: number;
     inScope: number;
     outOfScope: number;
     bySection: Record<VaultSection, number>;
@@ -25,6 +28,7 @@ export interface SyncCycleDiagnostics {
     fromPersistedLog: number;
     inferredThisCycle: number;
     inferredSample: string[];
+    inferredSkippedPlugin: number;
   };
   deletePlan: {
     deleteRemote: number;
@@ -116,9 +120,12 @@ export function formatDiagnosticsMarkdown(d: SyncCycleDiagnostics): string[] {
   const lines: string[] = ["## Diagnostics", ""];
 
   lines.push("### Local scan");
-  lines.push(`- Vault indexed (non-conflict): **${d.local.vaultIndexed}**`);
+  lines.push(`- Vault indexed (getFiles): **${d.local.vaultIndexed}**`);
+  lines.push(`- Config disk added: **${d.local.configDiskAdded}**`);
+  lines.push(`- Hidden disk added: **${d.local.hiddenDiskAdded}**`);
+  lines.push(`- Merged after excludes: **${d.local.mergedAfterExclude}**`);
   lines.push(`- In current sync scope: **${d.local.inScope}**`);
-  lines.push(`- Out of scope (section/exclude): **${d.local.outOfScope}**`);
+  lines.push(`- Out of scope (section): **${d.local.outOfScope}**`);
   for (const s of SECTIONS) {
     if (d.local.bySection[s] > 0) {
       lines.push(`- In scope · ${s}: **${d.local.bySection[s]}**`);
@@ -141,6 +148,11 @@ export function formatDiagnosticsMarkdown(d: SyncCycleDiagnostics): string[] {
   lines.push(
     `- Inferred this cycle (in base+remote, missing from local scan): **${d.deleteIntent.inferredThisCycle}**`,
   );
+  if (d.deleteIntent.inferredSkippedPlugin > 0) {
+    lines.push(
+      `- Plugin infer skipped (incomplete scan guard): **${d.deleteIntent.inferredSkippedPlugin}**`,
+    );
+  }
   if (d.deleteIntent.inferredSample.length > 0) {
     lines.push("- Inferred sample:");
     for (const p of d.deleteIntent.inferredSample) {
@@ -192,7 +204,10 @@ export function emitDiagnosticsPhaseLines(
   switch (phase) {
     case "scan":
       report.line(
-        `vault indexed: **${d.local.vaultIndexed}**, in scope: **${d.local.inScope}**, out of scope: **${d.local.outOfScope}**`,
+        `vault indexed: **${d.local.vaultIndexed}**, config disk: **${d.local.configDiskAdded}**, hidden disk: **${d.local.hiddenDiskAdded}**, merged: **${d.local.mergedAfterExclude}**`,
+      );
+      report.line(
+        `in scope: **${d.local.inScope}**, out of scope: **${d.local.outOfScope}**`,
       );
       if (
         d.syncState.localPlugins > 0
@@ -213,6 +228,9 @@ export function emitDiagnosticsPhaseLines(
       report.line(
         `delete log: **${d.deleteIntent.totalInLog}** total (events: **${d.deleteIntent.fromVaultEvents}**, persisted: **${d.deleteIntent.fromPersistedLog}**, inferred now: **${d.deleteIntent.inferredThisCycle}**)`,
       );
+      if (d.deleteIntent.inferredSkippedPlugin > 0) {
+        report.line(`plugin infer skipped: **${d.deleteIntent.inferredSkippedPlugin}** paths`);
+      }
       for (const p of d.deleteIntent.inferredSample.slice(0, 5)) {
         report.line(`inferred sample: \`${p}\``);
       }
@@ -262,4 +280,13 @@ export function countBasePlugins(baseEntries: SyncEntry[], configDir: string): n
     if (classifyVaultPath(e.localPath, configDir) === "plugins") n++;
   }
   return n;
+}
+
+/** Skip inferring plugin deletes when local scan is far below base (incomplete index). */
+export function shouldSkipPluginInfer(
+  pluginsSectionActive: boolean,
+  localPlugins: number,
+  basePlugins: number,
+): boolean {
+  return pluginsSectionActive && basePlugins > 20 && localPlugins < basePlugins * 0.5;
 }

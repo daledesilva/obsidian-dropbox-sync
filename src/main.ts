@@ -683,6 +683,7 @@ export default class DropboxSyncPlugin extends Plugin {
       },
       isFileActive: (path: string) => this.app.workspace.getActiveFile()?.path === path,
       excludePatterns: this.settings.excludePatterns,
+      includeHiddenFilesAndFolders: this.settings.includeHiddenFilesAndFolders,
       concurrency: 3,
       onConflictCount: (count: number) => {
         this.conflictTotal = count;

@@ -496,6 +496,22 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       });
     this.updateExcludeCount(excludeSetting);
 
+    new Setting(containerEl)
+      .setName("Include hidden files and folders")
+      .setDesc(
+        "Deep-scan the vault on disk for dotfiles and folders Obsidian does not index. "
+        + "Slower on large vaults. Built-in excludes (e.g. .git/) still apply.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.includeHiddenFilesAndFolders)
+          .onChange(async (value) => {
+            this.plugin.settings.includeHiddenFilesAndFolders = value;
+            await this.plugin.saveSettings();
+            this.plugin.resetEngine();
+          }),
+      );
+
     // ── Advanced ──
     new Setting(containerEl).setName("Advanced").setHeading();
 

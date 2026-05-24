@@ -7,7 +7,7 @@ import {
   type ListChangesResult,
   type DownloadResult,
 } from "../types";
-import type { FileSystem, RemoteStorage, SyncStateStore } from "./interfaces";
+import type { FileListOptions, FileSystem, RemoteStorage, SyncStateStore } from "./interfaces";
 
 // re-export for backward compat
 export { RevConflictError };
@@ -48,7 +48,7 @@ export class MemoryFileSystem implements FileSystem {
     this.files.set(to, file);
   }
 
-  async list(): Promise<FileInfo[]> {
+  async list(_options?: FileListOptions): Promise<FileInfo[]> {
     const result: FileInfo[] = [];
     for (const [path, file] of this.files) {
       result.push({

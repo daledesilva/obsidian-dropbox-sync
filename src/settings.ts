@@ -44,6 +44,8 @@ export interface PluginSettings {
   excludePatterns: string[];
   deviceId: string;
   syncOnCreateDeleteRename: boolean;
+  /** Deep-scan dotfolders via adapter (whole vault). Off by default; slower. */
+  includeHiddenFilesAndFolders: boolean;
   onboardingDone: boolean;
 }
 
@@ -64,6 +66,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   excludePatterns: [],
   deviceId: "",
   syncOnCreateDeleteRename: false,
+  includeHiddenFilesAndFolders: false,
   onboardingDone: false,
 };
 
@@ -188,6 +191,9 @@ export function migrateSettings(
     migrated.vaultEventDebounceSec = snapVaultEventDebounceSec(
       typeof migrated.vaultEventDebounceSec === "number" ? migrated.vaultEventDebounceSec : 2,
     );
+  }
+  if (migrated.includeHiddenFilesAndFolders === undefined) {
+    migrated.includeHiddenFilesAndFolders = false;
   }
   return migrated;
 }
