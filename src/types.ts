@@ -1,3 +1,5 @@
+import type { PathIssue } from "./sync/path-validator";
+
 /** 로컬 파일 정보 (vault에서 수집) */
 export interface FileInfo {
   /** vault 내 경로 */
@@ -106,6 +108,36 @@ export class PathValidationError extends Error {
     this.name = "PathValidationError";
   }
 }
+
+/** 로컬(기기) 경로 검증 실패 에러 */
+export class LocalPathError extends Error {
+  constructor(
+    public readonly path: string,
+    public readonly reason: string,
+  ) {
+    super(`Path not supported on this device "${path}": ${reason}`);
+    this.name = "LocalPathError";
+  }
+}
+
+/** 경로 가드에서 감지된 항목 */
+export interface PathGuardIssue {
+  item: SyncPlanItem;
+  issues: PathIssue[];
+  suggestedPath: string;
+}
+
+/** 경로 가드 결과 */
+export interface PathGuardResult {
+  passed: boolean;
+  issues: PathGuardIssue[];
+  filteredPlan: SyncPlan;
+}
+
+/** 경로 모달 해결 결과 */
+export type PathIssueResolution =
+  | { action: "skip" }
+  | { action: "renamed"; renames: { from: string; to: string }[] };
 
 /** Conflict 시 사용자에게 전달할 컨텍스트 */
 export interface ConflictContext {

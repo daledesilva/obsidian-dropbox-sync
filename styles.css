@@ -1,5 +1,14 @@
 /* Dropbox Sync plugin styles */
 
+@keyframes dbx-sync-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(360deg); }
+}
+
+.dbx-sync-ribbon-syncing svg {
+  animation: dbx-sync-spin 1s linear infinite;
+}
+
 .sync-progress-bar-container {
   width: 200px;
   height: 4px;
@@ -218,6 +227,69 @@
   color: var(--text-error);
 }
 
+/* ── Incompatible Paths Modal ── */
+
+.dbx-sync-path-modal-wide {
+  max-width: 90vw;
+  width: 90vw;
+}
+
+.dbx-sync-path-modal-wide-mobile {
+  max-width: 95vw;
+  width: 95vw;
+}
+
+.dbx-sync-path-list {
+  max-height: 55vh;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.dbx-sync-path-list-mobile {
+  max-height: 45vh;
+  overflow: auto;
+  margin: 12px 0;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 4px;
+  padding: 8px;
+}
+
+.dbx-sync-path-row {
+  padding: 10px 4px;
+  border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.dbx-sync-path-row:last-child {
+  border-bottom: none;
+}
+
+.dbx-sync-path-original {
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+  word-break: break-all;
+  margin-bottom: 4px;
+}
+
+.dbx-sync-path-input {
+  width: 100%;
+  margin-top: 6px;
+  padding: 6px 8px;
+  font-family: var(--font-monospace);
+  font-size: 0.9em;
+}
+
+.dbx-sync-path-error {
+  margin-top: 4px;
+  font-size: 0.85em;
+}
+
+.dbx-sync-path-actions {
+  margin-top: 8px;
+}
+
 /* ── Onboarding Modal ── */
 
 .dbx-sync-onboard-steps {
@@ -235,3 +307,49 @@
 .dbx-sync-settings-exclude-textarea {
   width: 100%;
 }
+
+/* ── Sync scope modal ── */
+
+.dbx-sync-scope-modal {
+  max-width: 420px;
+}
+
+.dbx-sync-scope-modal-mobile {
+  max-width: 95vw;
+}
+
+.dbx-sync-scope-rows {
+  margin: 12px 0 8px;
+}
+
+.dbx-sync-scope-rows .setting-item {
+  border: none;
+  padding: 6px 0;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.dbx-sync-scope-rows .setting-item-info {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.dbx-sync-scope-rows .setting-item-control {
+  flex: 0 0 auto;
+  padding-top: 0;
+}
+
+.dbx-sync-scope-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 16px;
+  padding-top: 12px;
+  border-top: 1px solid var(--background-modifier-border);
+}
+
+.dbx-sync-scope-footer button {
+  min-width: 100px;
+}
+

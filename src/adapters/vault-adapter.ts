@@ -1,8 +1,9 @@
-import type { Vault, TFile, TAbstractFile, FileManager } from "obsidian";
-import type { FileSystem } from "./interfaces";
+import { normalizePath, type Vault, TFile, TAbstractFile, FileManager } from "obsidian";
+import type { FileListOptions, FileSystem } from "./interfaces";
 import type { FileInfo } from "../types";
 import { dropboxContentHashBrowser } from "../hash.browser";
 import { isExcluded } from "../exclude";
+import { listFilesRecursive } from "./vault-disk-list";
 
 interface HashCacheEntry {
   mtime: number;
@@ -10,24 +11,53 @@ interface HashCacheEntry {
   hash: string;
 }
 
+export interface VaultListStats {
+  vaultIndexed: number;
+  configDiskAdded: number;
+  hiddenDiskAdded: number;
+  mergedBeforeExclude: number;
+  mergedAfterExclude: number;
+}
+
 /**
- * Obsidian Vault API를 FileSystem 인터페이스로 래핑.
+ * Obsidian Vault API wrapper implementing FileSystem.
  *
- * 항상 Vault API를 사용한다 (adapter 직접 사용 X).
- * → 이벤트가 올바르게 발화되고, MetadataCache가 자동 업데이트됨.
- *
- * list()는 mtime/size 기반 해시 캐시를 사용해서
- * 변경되지 않은 파일의 재해싱을 건너뛴다.
+ * Discovery: vault.getFiles() plus optional vault.adapter disk scans for
+ * config and hidden paths (Vault API is incomplete inside dot-folders).
+ * Mutations: Vault API so events and MetadataCache stay correct.
  */
+export type LocalFileScanCallback = (path: string, detail: "cached" | "hashed" | "disk") => void;
+
 export class VaultAdapter implements FileSystem {
   private hashCache = new Map<string, HashCacheEntry>();
+  private diskOnlyPaths = new Set<string>();
+  private abortSignal: AbortSignal | null = null;
+  onLocalFileScanned: LocalFileScanCallback | null = null;
+  lastListStats: VaultListStats = {
+    vaultIndexed: 0,
+    configDiskAdded: 0,
+    hiddenDiskAdded: 0,
+    mergedBeforeExclude: 0,
+    mergedAfterExclude: 0,
+  };
 
   constructor(private vault: Vault, private excludePatterns: string[] = [], private fileManager: FileManager) {}
 
+  setAbortSignal(signal: AbortSignal | null): void {
+    this.abortSignal = signal;
+  }
+
   async read(path: string): Promise<Uint8Array> {
-    const file = this.getFile(path);
-    const buffer = await this.vault.readBinary(file);
-    return new Uint8Array(buffer);
+    const file = this.vault.getAbstractFileByPath(path);
+    if (file && this.isTFile(file)) {
+      const buffer = await this.vault.readBinary(file);
+      return new Uint8Array(buffer);
+    }
+    if (this.diskOnlyPaths.has(path.toLowerCase())) {
+      const buffer = await this.vault.adapter.readBinary(normalizePath(path));
+      return new Uint8Array(buffer);
+    }
+    return this.readViaIndexedFile(path);
   }
 
   async write(path: string, data: Uint8Array, mtime?: number): Promise<void> {
@@ -39,6 +69,7 @@ export class VaultAdapter implements FileSystem {
     } else {
       await this.ensureParentDir(path);
       await this.vault.createBinary(path, data.buffer as ArrayBuffer, options);
+      this.diskOnlyPaths.delete(path.toLowerCase());
     }
   }
 
@@ -47,51 +78,107 @@ export class VaultAdapter implements FileSystem {
     if (file) {
       await this.fileManager.trashFile(file);
     }
+    this.diskOnlyPaths.delete(path.toLowerCase());
+    this.hashCache.delete(path.toLowerCase());
   }
 
-  async list(): Promise<FileInfo[]> {
-    const files = this.vault.getFiles();
-    const result: FileInfo[] = [];
+  async rename(from: string, to: string): Promise<void> {
+    const file = this.vault.getAbstractFileByPath(from);
+    if (!file || !this.isTFile(file)) {
+      throw new Error(`File not found: ${from}`);
+    }
+    await this.ensureParentDir(to);
+    await this.fileManager.renameFile(file, to);
+    const fromLower = from.toLowerCase();
+    const toLower = to.toLowerCase();
+    if (this.diskOnlyPaths.has(fromLower)) {
+      this.diskOnlyPaths.delete(fromLower);
+      this.diskOnlyPaths.add(toLower);
+    }
+    this.hashCache.delete(fromLower);
+    this.hashCache.delete(toLower);
+  }
+
+  async list(options?: FileListOptions): Promise<FileInfo[]> {
+    this.diskOnlyPaths.clear();
+    const byPath = new Map<string, FileInfo>();
     const nextCache = new Map<string, HashCacheEntry>();
 
-    for (const file of files) {
-      if (this.shouldExclude(file.path)) continue;
-
-      const pathLower = file.path.toLowerCase();
-      const cached = this.hashCache.get(pathLower);
-
-      let hash: string;
-      if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
-        hash = cached.hash;
-      } else {
-        const data = await this.vault.readBinary(file);
-        hash = await dropboxContentHashBrowser(new Uint8Array(data));
+    // Pass 1 — indexed (vault.getFiles)
+    for (const file of this.vault.getFiles()) {
+      this.abortSignal?.throwIfAborted();
+      const info = await this.fileInfoFromIndexed(file, nextCache);
+      if (info) {
+        byPath.set(info.pathLower, info);
       }
+    }
+    const vaultIndexed = byPath.size;
 
-      nextCache.set(pathLower, { mtime: file.stat.mtime, size: file.stat.size, hash });
-      result.push({
-        path: file.path,
-        pathLower,
-        hash,
-        mtime: file.stat.mtime,
-        size: file.stat.size,
+    const adapter = this.vault.adapter;
+    const skipDirPrefixes = this.excludePatterns
+      .filter((p) => p.endsWith("/"))
+      .map((p) => p.replace(/\/+$/, ""));
+
+    let configDiskAdded = 0;
+    if (options?.configDiskScan && options.configDir) {
+      const diskFiles = await listFilesRecursive(adapter, options.configDir, {
+        signal: this.abortSignal,
+        skipDirPrefixes,
       });
+      configDiskAdded = await this.mergeDiskFiles(diskFiles, byPath, nextCache);
     }
 
+    let hiddenDiskAdded = 0;
+    if (options?.includeHiddenFilesAndFolders) {
+      const diskFiles = await listFilesRecursive(adapter, "", {
+        signal: this.abortSignal,
+        skipDirPrefixes,
+      });
+      const before = byPath.size;
+      await this.mergeDiskFiles(diskFiles, byPath, nextCache);
+      hiddenDiskAdded = byPath.size - before;
+    }
+
+    const mergedBeforeExclude = byPath.size;
+    const merged = [...byPath.values()].filter((f) => !this.shouldExclude(f.path));
+    const mergedAfterExclude = merged.length;
+
     this.hashCache = nextCache;
-    return result;
+    this.lastListStats = {
+      vaultIndexed,
+      configDiskAdded,
+      hiddenDiskAdded,
+      mergedBeforeExclude,
+      mergedAfterExclude,
+    };
+
+    return merged;
   }
 
-  // eslint-disable-next-line @typescript-eslint/require-await -- async wraps sync throw into rejection
   async stat(path: string): Promise<{ mtime: number; size: number }> {
-    const file = this.getFile(path);
-    return { mtime: file.stat.mtime, size: file.stat.size };
+    const file = this.vault.getAbstractFileByPath(path);
+    if (file && this.isTFile(file)) {
+      return { mtime: file.stat.mtime, size: file.stat.size };
+    }
+    const pathLower = path.toLowerCase();
+    if (this.diskOnlyPaths.has(pathLower)) {
+      const st = await this.vault.adapter.stat(normalizePath(path));
+      if (st) return { mtime: st.mtime, size: st.size };
+    }
+    return this.statViaIndexedFile(path);
   }
 
   async computeHash(path: string): Promise<string> {
-    const file = this.getFile(path);
-    const data = await this.vault.readBinary(file);
-    return dropboxContentHashBrowser(new Uint8Array(data));
+    const file = this.vault.getAbstractFileByPath(path);
+    if (file && this.isTFile(file)) {
+      const data = await this.vault.readBinary(file);
+      return dropboxContentHashBrowser(new Uint8Array(data));
+    }
+    if (this.diskOnlyPaths.has(path.toLowerCase())) {
+      const data = await this.vault.adapter.readBinary(normalizePath(path));
+      return dropboxContentHashBrowser(new Uint8Array(data));
+    }
+    return this.computeHashViaIndexedFile(path);
   }
 
   clearCache(): void {
@@ -99,6 +186,23 @@ export class VaultAdapter implements FileSystem {
   }
 
   // ── private ──
+
+  private async readViaIndexedFile(path: string): Promise<Uint8Array> {
+    const file = this.getFile(path);
+    const buffer = await this.vault.readBinary(file);
+    return new Uint8Array(buffer);
+  }
+
+  private async statViaIndexedFile(path: string): Promise<{ mtime: number; size: number }> {
+    const file = this.getFile(path);
+    return { mtime: file.stat.mtime, size: file.stat.size };
+  }
+
+  private async computeHashViaIndexedFile(path: string): Promise<string> {
+    const file = this.getFile(path);
+    const data = await this.vault.readBinary(file);
+    return dropboxContentHashBrowser(new Uint8Array(data));
+  }
 
   private getFile(path: string): TFile {
     const file = this.vault.getAbstractFileByPath(path);
@@ -113,11 +217,70 @@ export class VaultAdapter implements FileSystem {
   }
 
   private shouldExclude(path: string): boolean {
-    const systemExcludes = [".trash/", ".sync-state/", ".DS_Store", "Thumbs.db"];
-    if (systemExcludes.some((ex) => path.startsWith(ex) || path.includes(`/${ex}`))) return true;
-    if (path.startsWith("sync-debug-") && path.endsWith(".log")) return true;
-    if (isExcluded(path, this.excludePatterns)) return true;
-    return false;
+    return isExcluded(path, this.excludePatterns);
+  }
+
+  private async fileInfoFromIndexed(
+    file: TFile,
+    nextCache: Map<string, HashCacheEntry>,
+  ): Promise<FileInfo | null> {
+    const pathLower = file.path.toLowerCase();
+    const cached = this.hashCache.get(pathLower);
+
+    let hash: string;
+    if (cached && cached.mtime === file.stat.mtime && cached.size === file.stat.size) {
+      hash = cached.hash;
+      this.onLocalFileScanned?.(file.path, "cached");
+    } else {
+      const data = await this.vault.readBinary(file);
+      hash = await dropboxContentHashBrowser(new Uint8Array(data));
+      this.onLocalFileScanned?.(file.path, "hashed");
+    }
+
+    nextCache.set(pathLower, { mtime: file.stat.mtime, size: file.stat.size, hash });
+    return {
+      path: file.path,
+      pathLower,
+      hash,
+      mtime: file.stat.mtime,
+      size: file.stat.size,
+    };
+  }
+
+  private async mergeDiskFiles(
+    diskFiles: { path: string; mtime: number; size: number }[],
+    byPath: Map<string, FileInfo>,
+    nextCache: Map<string, HashCacheEntry>,
+  ): Promise<number> {
+    let added = 0;
+    for (const disk of diskFiles) {
+      this.abortSignal?.throwIfAborted();
+      const pathLower = disk.path.toLowerCase();
+      if (byPath.has(pathLower)) continue;
+
+      const cached = this.hashCache.get(pathLower);
+      let hash: string;
+      if (cached && cached.mtime === disk.mtime && cached.size === disk.size) {
+        hash = cached.hash;
+        this.onLocalFileScanned?.(disk.path, "cached");
+      } else {
+        const data = await this.vault.adapter.readBinary(normalizePath(disk.path));
+        hash = await dropboxContentHashBrowser(new Uint8Array(data));
+        this.onLocalFileScanned?.(disk.path, "disk");
+      }
+
+      nextCache.set(pathLower, { mtime: disk.mtime, size: disk.size, hash });
+      this.diskOnlyPaths.add(pathLower);
+      byPath.set(pathLower, {
+        path: disk.path,
+        pathLower,
+        hash,
+        mtime: disk.mtime,
+        size: disk.size,
+      });
+      added++;
+    }
+    return added;
   }
 
   private async ensureParentDir(path: string): Promise<void> {
@@ -132,10 +295,17 @@ export class VaultAdapter implements FileSystem {
         try {
           await this.vault.createFolder(current);
         } catch (e) {
-          // 병렬 다운로드 시 다른 스레드가 먼저 생성할 수 있음 — 무시
-          if (!this.vault.getAbstractFileByPath(current)) throw e;
+          if (this.vault.getAbstractFileByPath(current)) continue;
+          if (isFolderAlreadyExistsError(e)) continue;
+          throw e;
         }
       }
     }
   }
+}
+
+/** Obsidian throws this when createFolder races or the folder exists on disk but is not indexed yet. */
+export function isFolderAlreadyExistsError(e: unknown): boolean {
+  const msg = e instanceof Error ? e.message : String(e);
+  return /folder already exists/i.test(msg);
 }

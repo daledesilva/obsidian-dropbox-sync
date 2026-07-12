@@ -178,7 +178,7 @@ describe("VaultAdapter hash cache", () => {
       { path: "notes/a.md", stat: { mtime: 1000, size: 3 }, extension: "md", data: textToBuffer("aaa") },
       { path: ".trash/b.md", stat: { mtime: 2000, size: 3 }, extension: "md", data: textToBuffer("bbb") },
     ]);
-    adapter = new VaultAdapter(vault as never, [], {} as never);
+    adapter = new VaultAdapter(vault as never, [".trash/"], {} as never);
 
     const files = await adapter.list();
     expect(files).toHaveLength(1);

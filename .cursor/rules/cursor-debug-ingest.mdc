@@ -1,0 +1,41 @@
+---
+description: Cursor Debug NDJSON ingest — preferred logging for mobile and desktop plugin debugging
+alwaysApply: false
+---
+
+# Cursor Debug structured ingest (Obsidian plugin)
+
+Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or any target where a **Cursor Debug** agent session is active and you need **runtime evidence**.
+
+## Preferred logging method
+
+**Use structured NDJSON ingest** — not ad-hoc `fetch`, not `console.log` alone.
+
+| Do | Don't |
+|----|--------|
+| A shared `postCursorDebugIngest()` helper using Obsidian **`requestUrl`** | `fetch('http://127.0.0.1:7662/…')` inside the plugin |
+| Build-time env vars for session id + ingest path | Assume mobile Safari `console.debug` reaches the agent |
+| Read `.cursor/debug-<sessionId>.log` on the host after reproduction | Guess fixes from code alone |
+
+**Mobile + Wi‑Fi:** expose the host ingest port on the LAN (e.g. **`socat`** relay script). Document the relay command in project `docs/`.
+
+**Android + USB:** use **`adb reverse tcp:<ingest-port> tcp:<ingest-port>`** via the project's USB debug bootstrap script when one exists.
+
+## Deploy while debugging — agent must remind
+
+| Path | Includes uncommitted instrumentation? |
+|------|----------------------------------------|
+| Copy local **`dist/`** to device vault | **Yes** |
+| CI / tagged release build | **No** — builds **committed** code at the tag only |
+
+**Before asking the user to reproduce via a release build:** remind them to **commit + push** and wait for CI — **or** copy local **`dist/`** after **`npm run build`**.
+
+## Agent duties
+
+1. Confirm ingest relay (LAN) or **`adb reverse`** (USB) as appropriate.
+2. Ensure the build includes debug ingest configuration.
+3. **Remind deploy path** (local `dist/` copy vs release + commit).
+4. Clear **only** the session log file (`.cursor/debug-<sessionId>.log`) before each reproduction run.
+5. Read the log file after reproduction; cite line evidence before fixing.
+
+Remove temporary ingest call sites after verified fix. Keep the shared ingest helper module.

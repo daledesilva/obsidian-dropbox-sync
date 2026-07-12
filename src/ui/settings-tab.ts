@@ -2,7 +2,15 @@ import { App, Platform, PluginSettingTab, Setting, Notice, TFile } from "obsidia
 import type { ConflictStrategy } from "../types";
 import type DropboxSyncPlugin from "../main";
 import { ConfirmModal } from "./confirm-modal";
-import { DEFAULT_APP_KEY, getEffectiveAppKey, isValidSyncName } from "../settings";
+import {
+  countEnabledBackgroundSections,
+  debounceSecToSliderIndex,
+  DEFAULT_APP_KEY,
+  getEffectiveAppKey,
+  isValidSyncName,
+  VAULT_EVENT_DEBOUNCE_OPTIONS,
+} from "../settings";
+import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 import { obsidianHttpClient } from "../http-client.plugin";
 import {
   generateCodeVerifier,
@@ -33,23 +41,26 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     const isConnected = !!this.plugin.settings.refreshToken;
     const hasSyncName = !!this.plugin.settings.syncName;
-    const syncRunning = this.plugin.settings.syncEnabled;
+    const autoSyncOn = this.plugin.settings.backgroundSyncEnabled;
 
     // ── Status bar ──
     const version = `v${this.plugin.manifest.version}`;
     const status = new Setting(containerEl);
     status.settingEl.addClass("dbx-sync-settings-status-bar");
-    if (syncRunning) {
+    if (autoSyncOn) {
       status
-        .setName(`Sync is running · ${version}`)
-        .setDesc("Your vault is being synced with Dropbox.")
+        .setName(`Automatic sync on · ${version}`)
+        .setDesc("Background sync is active. Use Sync now anytime for a manual run.")
         .addButton((btn) =>
-          btn.setButtonText("Sync now").onClick(() => this.plugin.syncNow()),
+          btn.setButtonText("Sync now").onClick(() => this.plugin.openSyncScopeModal()),
         );
     } else if (isConnected && hasSyncName) {
       status
-        .setName(`Sync is stopped · ${version}`)
-        .setDesc("Toggle sync on to start syncing.");
+        .setName(`Manual sync only · ${version}`)
+        .setDesc("Automatic sync is off. Use Sync now or enable background sync below.")
+        .addButton((btn) =>
+          btn.setButtonText("Sync now").onClick(() => this.plugin.openSyncScopeModal()),
+        );
     } else if (isConnected) {
       status
         .setName(`Not syncing · ${version}`)
@@ -66,8 +77,9 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       new Setting(containerEl)
         .setDesc("Connect to Dropbox to set up sync.");
     } else {
-      this.renderSyncSection(containerEl, hasSyncName, syncRunning);
+      this.renderSyncSection(containerEl, hasSyncName);
       if (hasSyncName) {
+        this.renderBackgroundSyncSection(containerEl, autoSyncOn);
         this.renderSyncNameChange(containerEl, this.plugin.settings.syncName);
       }
       if (hasSyncName) {
@@ -109,29 +121,95 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     }
   }
 
-  private renderSyncSection(
-    containerEl: HTMLElement,
-    hasSyncName: boolean,
-    syncRunning: boolean,
-  ): void {
+  private renderSyncSection(containerEl: HTMLElement, hasSyncName: boolean): void {
     if (!hasSyncName) {
       this.renderSyncNameSetup(containerEl);
-      return;
     }
+  }
+
+  private renderBackgroundSyncSection(containerEl: HTMLElement, autoSyncOn: boolean): void {
+    new Setting(containerEl).setName("Automatic background sync").setHeading();
 
     new Setting(containerEl)
-      .setName("Enable sync")
+      .setName("Enable automatic background sync")
+      .setDesc(
+        "When on: sync on a timer, when files change, and when Dropbox reports changes. "
+        + "When off: only runs when you choose Sync now.",
+      )
       .addToggle((toggle) =>
-        toggle.setValue(syncRunning).onChange(async (value) => {
+        toggle.setValue(autoSyncOn).onChange(async (value) => {
           if (value) {
-            await this.plugin.startSync();
+            await this.plugin.enableBackgroundSync();
           } else {
-            await this.plugin.stopSync();
+            await this.plugin.disableBackgroundSync();
           }
           this.display();
         }),
       );
 
+    const sectionKeys: VaultSection[] = ["notes", "settings", "plugins", "workspaces"];
+    const sectionLabels: Record<VaultSection, string> = {
+      notes: SYNC_SCOPE_LABELS.notes,
+      settings: SYNC_SCOPE_LABELS.settings,
+      plugins: SYNC_SCOPE_LABELS.plugins,
+      workspaces: SYNC_SCOPE_LABELS.workspaces,
+    };
+
+    new Setting(containerEl)
+      .setName("Sections to sync")
+      .setDesc("Which parts of the vault automatic sync includes. At least one must be enabled.");
+
+    for (const key of sectionKeys) {
+      new Setting(containerEl)
+        .setName(sectionLabels[key])
+        .addToggle((toggle) => {
+          toggle.setValue(this.plugin.settings.backgroundSyncSections[key]).onChange(async (value) => {
+            const sections = { ...this.plugin.settings.backgroundSyncSections };
+            if (!value && countEnabledBackgroundSections(sections) <= 1 && sections[key]) {
+              new Notice("At least one section must be enabled for background sync.");
+              toggle.setValue(true);
+              return;
+            }
+            sections[key] = value;
+            this.plugin.settings.backgroundSyncSections = sections;
+            await this.plugin.saveSettings();
+          });
+        });
+    }
+
+    new Setting(containerEl)
+      .setName("Sync interval (seconds)")
+      .setDesc("Fallback interval when no file changes are detected.")
+      .addSlider((slider) =>
+        slider
+          .setLimits(30, 600, 30)
+          .setValue(this.plugin.settings.syncInterval)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.syncInterval = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+
+    const debounceIdx = debounceSecToSliderIndex(this.plugin.settings.vaultEventDebounceSec);
+    const debounceSetting = new Setting(containerEl)
+      .setName("File change debounce")
+      .setDesc(this.debounceDesc(this.plugin.settings.vaultEventDebounceSec))
+      .addSlider((slider) => {
+        slider
+          .setLimits(0, VAULT_EVENT_DEBOUNCE_OPTIONS.length - 1, 1)
+          .setValue(debounceIdx)
+          .onChange(async (value) => {
+            const sec = VAULT_EVENT_DEBOUNCE_OPTIONS[value] ?? VAULT_EVENT_DEBOUNCE_OPTIONS[0];
+            this.plugin.settings.vaultEventDebounceSec = sec;
+            debounceSetting.setDesc(this.debounceDesc(sec));
+            await this.plugin.saveSettings();
+          });
+      });
+  }
+
+  private debounceDesc(sec: number): string {
+    return `Wait ${sec}s after a file edit, delete, or rename before starting a sync.`;
   }
 
   // 최초 설정: 이름 입력 + Set
@@ -262,7 +340,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             this.plugin.settings.refreshToken = "";
             this.plugin.settings.accessToken = "";
             this.plugin.settings.tokenExpiry = 0;
-            this.plugin.settings.syncEnabled = false;
+            this.plugin.settings.backgroundSyncEnabled = false;
             await this.plugin.saveSettings();
             this.display();
           }),
@@ -398,7 +476,9 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     const excludeSetting = new Setting(containerEl)
       .setName("Exclude patterns")
-      .setDesc(`Files matching these patterns won't sync. One per line. Examples: *.pdf, attachments/, ${this.app.vault.configDir}/workspace*`)
+      .setDesc(
+        "Files matching these patterns won't sync (one per line). Defaults include .git/, plugin state, and sync logs — remove a line to allow that path to sync.",
+      )
       .addTextArea((text) => {
         text
           .setValue(this.plugin.settings.excludePatterns.join("\n"))
@@ -416,6 +496,22 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       });
     this.updateExcludeCount(excludeSetting);
 
+    new Setting(containerEl)
+      .setName("Include hidden files and folders")
+      .setDesc(
+        "Deep-scan the vault on disk for dotfiles and folders Obsidian does not index. "
+        + "Slower on large vaults. Built-in excludes (e.g. .git/) still apply.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.includeHiddenFilesAndFolders)
+          .onChange(async (value) => {
+            this.plugin.settings.includeHiddenFilesAndFolders = value;
+            await this.plugin.saveSettings();
+            this.plugin.resetEngine();
+          }),
+      );
+
     // ── Advanced ──
     new Setting(containerEl).setName("Advanced").setHeading();
 
@@ -427,20 +523,6 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.syncOnCreateDeleteRename)
           .onChange(async (value) => {
             this.plugin.settings.syncOnCreateDeleteRename = value;
-            await this.plugin.saveSettings();
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Sync interval (seconds)")
-      .setDesc("Fallback interval when no file changes are detected.")
-      .addSlider((slider) =>
-        slider
-          .setLimits(30, 600, 30)
-          .setValue(this.plugin.settings.syncInterval)
-          .setDynamicTooltip()
-          .onChange(async (value) => {
-            this.plugin.settings.syncInterval = value;
             await this.plugin.saveSettings();
           }),
       );
@@ -533,12 +615,14 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
   private updateExcludeCount(setting: Setting): void {
     const patterns = this.plugin.settings.excludePatterns;
-    if (patterns.length === 0) {
-      setting.setDesc(`Files matching these patterns won't sync. One per line. Examples: *.pdf, attachments/, ${this.app.vault.configDir}/workspace*`);
-      return;
-    }
     const allFiles = this.app.vault.getFiles();
     const excluded = allFiles.filter((f: TFile) => isExcluded(f.path, patterns));
-    setting.setDesc(`${excluded.length} file(s) excluded out of ${allFiles.length} total.`);
+    const base =
+      "Files matching these patterns won't sync (one per line). Defaults include .git/, plugin state, and sync logs — remove a line to allow that path to sync.";
+    if (patterns.length === 0) {
+      setting.setDesc(base);
+      return;
+    }
+    setting.setDesc(`${base} Currently: ${excluded.length} of ${allFiles.length} local file(s) excluded.`);
   }
 }

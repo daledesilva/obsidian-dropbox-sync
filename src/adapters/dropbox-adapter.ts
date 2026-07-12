@@ -13,6 +13,7 @@ import type {
   DropboxErrorResponse,
 } from "./dropbox-types";
 import { refreshAccessToken } from "./dropbox-auth";
+import { delay, runAbortable, throwIfAborted } from "../abort-utils";
 
 const API_BASE = "https://api.dropboxapi.com/2";
 const CONTENT_BASE = "https://content.dropboxapi.com/2";
@@ -39,7 +40,14 @@ export interface DropboxAdapterConfig {
  * HttpClient 기반. Obsidian에서는 requestUrl, CLI에서는 fetch를 주입한다.
  */
 export class DropboxAdapter implements RemoteStorage {
+  private abortSignal: AbortSignal | undefined;
+
   constructor(private config: DropboxAdapterConfig) {}
+
+  /** 현재 sync cycle의 AbortSignal (HTTP·retry 대기 중단). */
+  setAbortSignal(signal: AbortSignal | undefined): void {
+    this.abortSignal = signal;
+  }
 
   async listChanges(cursor?: string): Promise<ListChangesResult> {
     let result: DropboxListFolderResult;
@@ -94,9 +102,28 @@ export class DropboxAdapter implements RemoteStorage {
       },
     });
 
-    const metadata = JSON.parse(
-      resp.headers["dropbox-api-result"] ?? "{}",
-    ) as DropboxFileMetadata;
+    const apiResult = resp.headers["dropbox-api-result"];
+    if (!apiResult?.trim()) {
+      throw new Error(
+        "Dropbox download metadata missing (dropbox-api-result header). "
+        + `status=${resp.status}, headerKeys=${Object.keys(resp.headers).join(",")}`,
+      );
+    }
+
+    let metadata: DropboxFileMetadata;
+    try {
+      metadata = JSON.parse(apiResult) as DropboxFileMetadata;
+    } catch {
+      throw new Error(
+        "Dropbox download metadata invalid (dropbox-api-result is not JSON)",
+      );
+    }
+
+    if (!metadata.rev || !metadata.path_display) {
+      throw new Error(
+        "Dropbox download metadata incomplete (missing rev or path_display)",
+      );
+    }
 
     return {
       data: new Uint8Array(resp.arrayBuffer),
@@ -149,6 +176,18 @@ export class DropboxAdapter implements RemoteStorage {
     });
   }
 
+  async move(from: string, to: string): Promise<RemoteEntry> {
+    const result = await this.rpcCall<{ metadata: DropboxFileMetadata }>(
+      "/files/move_v2",
+      {
+        from_path: this.toRemotePath(from),
+        to_path: this.toRemotePath(to),
+        autorename: false,
+      },
+    );
+    return this.fileMetadataToEntry(result.metadata);
+  }
+
   // ── private ──
 
   private async rpcCall<T>(endpoint: string, body: object): Promise<T> {
@@ -185,24 +224,30 @@ export class DropboxAdapter implements RemoteStorage {
     on429Final?: (errBody: DropboxErrorResponse) => void;
   }): Promise<{ status: number; json: unknown; text: string; headers: Record<string, string>; arrayBuffer: ArrayBuffer }> {
     const maxRetries = 4;
+    const signal = this.abortSignal;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
+      throwIfAborted(signal);
       let resp;
       try {
         await this.ensureValidToken();
-        resp = await this.config.httpClient({
-          url: opts.url,
-          method: opts.method,
-          headers: {
-            Authorization: `Bearer ${this.config.getAccessToken()}`,
-            ...opts.headers,
-          },
-          body: opts.body,
-        });
+        resp = await runAbortable(
+          this.config.httpClient({
+            url: opts.url,
+            method: opts.method,
+            headers: {
+              Authorization: `Bearer ${this.config.getAccessToken()}`,
+              ...opts.headers,
+            },
+            body: opts.body,
+          }),
+          signal,
+        );
       } catch (e) {
+        throwIfAborted(signal);
         // 네트워크 연결 실패 (iOS -1005 등) — 긴 딜레이로 연결 풀 리셋 유도
         if (attempt < maxRetries) {
-          const delay = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
-          await this.sleep(delay);
+          const backoffMs = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
+          await delay(backoffMs, signal);
           continue;
         }
         throw e;
@@ -211,10 +256,10 @@ export class DropboxAdapter implements RemoteStorage {
       // retry 판정 (429 / 5xx)
       if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
         if (attempt < maxRetries) {
-          const delay = resp.status === 429
+          const backoffMs = resp.status === 429
             ? ((resp.json as DropboxErrorResponse | undefined)?.error?.retry_after ?? 1) * 1000
             : 1000 * Math.pow(2, attempt);
-          await this.sleep(delay);
+          await delay(backoffMs, signal);
           continue;
         }
         if (resp.status === 429 && opts.on429Final) {
@@ -325,10 +370,6 @@ export class DropboxAdapter implements RemoteStorage {
       size: metadata.size,
       deleted: false,
     };
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
   }
 
   private parseError(status: number, text: string): Error {

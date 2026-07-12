@@ -7,7 +7,7 @@ import {
   type ListChangesResult,
   type DownloadResult,
 } from "../types";
-import type { FileSystem, RemoteStorage, SyncStateStore } from "./interfaces";
+import type { FileListOptions, FileSystem, RemoteStorage, SyncStateStore } from "./interfaces";
 
 // re-export for backward compat
 export { RevConflictError };
@@ -40,7 +40,15 @@ export class MemoryFileSystem implements FileSystem {
     this.files.delete(path);
   }
 
-  async list(): Promise<FileInfo[]> {
+  // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
+  async rename(from: string, to: string): Promise<void> {
+    const file = this.files.get(from);
+    if (!file) throw new Error(`File not found: ${from}`);
+    this.files.delete(from);
+    this.files.set(to, file);
+  }
+
+  async list(_options?: FileListOptions): Promise<FileInfo[]> {
     const result: FileInfo[] = [];
     for (const [path, file] of this.files) {
       result.push({
@@ -188,6 +196,22 @@ export class MemoryRemoteStorage implements RemoteStorage {
       deleted: true,
       hash: null,
     });
+  }
+
+  async move(from: string, to: string): Promise<RemoteEntry> {
+    const fromLower = from.toLowerCase();
+    const file = this.files.get(fromLower);
+    if (!file || file.deleted) {
+      throw new Error(`File not found on remote: ${from}`);
+    }
+    this.files.delete(fromLower);
+    const toLower = to.toLowerCase();
+    file.pathLower = toLower;
+    file.pathDisplay = to;
+    this.files.set(toLower, file);
+    const entry = this.toRemoteEntry(file);
+    this.addChangeLog(entry);
+    return entry;
   }
 
   // 테스트 헬퍼

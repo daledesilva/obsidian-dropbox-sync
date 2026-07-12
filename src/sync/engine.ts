@@ -1,12 +1,28 @@
 import type { FileSystem, RemoteStorage, SyncStateStore } from "../adapters/interfaces";
-import type { RemoteEntry, SyncPlan, SyncResult } from "../types";
+import type { PathGuardIssue, PathIssueResolution, RemoteEntry, SyncPlan, SyncResult } from "../types";
+import { checkPathGuard } from "./path-guard";
 import { createPlan } from "./planner";
 import type { ConflictStrategy, ConflictResolver, DeleteGuardResult } from "../types";
 import { executePlan } from "./executor";
 import { checkDeleteGuard } from "./guards";
-import { DropboxCursorResetError } from "../adapters/dropbox-adapter";
+import { DropboxAdapter, DropboxCursorResetError } from "../adapters/dropbox-adapter";
 import { isExcluded } from "../exclude";
 import { CycleContext } from "./cycle-context";
+import type { SyncLiveReportSink } from "../ui/sync-live-report";
+import { VaultAdapter, type LocalFileScanCallback } from "../adapters/vault-adapter";
+import { isPathInScope, isPathInSections, type SyncScope, type VaultSection } from "./sync-scope";
+import {
+  countBasePlugins,
+  countDeleteIntentSources,
+  countLocalBySection,
+  countRemotePlugins,
+  emitDiagnosticsPhaseLines,
+  shouldSkipPluginInfer,
+  summarizeDeletePlan,
+  type DeleteIntentSource,
+  type SyncCycleDiagnostics,
+} from "./sync-diagnostics";
+import { classifyVaultPath } from "./sync-scope";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -32,14 +48,20 @@ export interface SyncEngineOptions {
   excludePatterns?: string[];
   /** 병렬 실행 동시성. 기본값 1 (순차) */
   concurrency?: number;
-  /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수) */
-  onProgress?: (completed: number, total: number) => void;
+  /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수, 실패 수) */
+  onProgress?: (completed: number, total: number, failed: number) => void;
   /** conflict 직렬 실행 전 호출. conflict 총 수 전달. */
   onConflictCount?: (count: number) => void;
   /** 사이클 리포트 활성화 */
   enableCycleReports?: boolean;
   /** 사이클 리포트 저장 콜백 */
   onCycleReport?: (report: string, cycleId: string) => Promise<void>;
+  /** iOS/모바일에서 로컬 경로 규칙 적용 */
+  strictLocalPaths?: boolean;
+  /** 호환되지 않는 경로 감지 시 모달 등 처리 */
+  onPathIssues?: (issues: PathGuardIssue[]) => Promise<PathIssueResolution>;
+  /** Adapter-scan vault root for hidden/dot paths (user setting). */
+  includeHiddenFilesAndFolders?: boolean;
 }
 
 export interface CycleResult {
@@ -49,8 +71,14 @@ export interface CycleResult {
   deletesSkipped?: number;
   /** 활성 파일 보호로 건너뛴 항목 수 */
   deferredCount?: number;
+  /** 경로 rename 적용됨 — 재동기화 필요 */
+  pathRenamesApplied?: boolean;
+  /** 경로 문제로 스킵한 항목 수 */
+  pathsSkipped?: number;
   /** 사이클 리포트 (JSONL) */
   cycleReport?: string;
+  /** Per-cycle diagnostics for sync-logs and debug log. */
+  diagnostics?: SyncCycleDiagnostics;
 }
 
 /**
@@ -68,21 +96,63 @@ export interface CycleResult {
  */
 export class SyncEngine {
   private deletedPaths = new Set<string>();
+  private deleteIntentSources = new Map<string, DeleteIntentSource>();
+  private lastDiagnostics: SyncCycleDiagnostics | null = null;
+  private liveReport: SyncLiveReportSink | null = null;
+  private syncScope: SyncScope = "everything";
+  private sectionFilter: VaultSection[] | null = null;
+  private configDir = ".obsidian";
 
   constructor(
     private deps: SyncEngineDeps,
     private options: SyncEngineOptions = {},
   ) {}
 
+  /** Per-sync live markdown report (set before each runCycle). */
+  setLiveReport(report: SyncLiveReportSink | null): void {
+    this.liveReport = report;
+  }
+
+  /** 동기화 범위 — manual single scope (set before each runCycle). */
+  setSyncScope(scope: SyncScope, configDir: string): void {
+    this.syncScope = scope;
+    this.sectionFilter = null;
+    this.configDir = configDir;
+  }
+
+  /** Background sync — multiple vault sections (set before each runCycle). */
+  setSyncSections(sections: VaultSection[], configDir: string): void {
+    this.sectionFilter = sections;
+    this.configDir = configDir;
+  }
+
+  private pathInScope(path: string): boolean {
+    const patterns = this.options.excludePatterns ?? [];
+    if (this.sectionFilter) {
+      return isPathInSections(path, this.sectionFilter, this.configDir, patterns);
+    }
+    return isPathInScope(path, this.syncScope, this.configDir, patterns);
+  }
+
   /** 로컬 삭제 이벤트 기록 */
   trackDelete(pathLower: string): void {
     this.deletedPaths.add(pathLower);
+    this.deleteIntentSources.set(pathLower, "event");
+  }
+
+  /** 잘못 기록된 삭제 의도 제거 (경로 rename 등) */
+  clearDeleteIntent(pathLower: string): void {
+    this.deletedPaths.delete(pathLower);
+    this.deleteIntentSources.delete(pathLower);
   }
 
   /** 저장된 삭제 로그에서 복원 */
   restoreDeleteLog(paths: string[]): void {
     for (const p of paths) {
       this.deletedPaths.add(p);
+      if (!this.deleteIntentSources.has(p)) {
+        this.deleteIntentSources.set(p, "persisted");
+      }
     }
   }
 
@@ -98,6 +168,25 @@ export class SyncEngine {
 
   async runCycle(signal?: AbortSignal): Promise<CycleResult> {
     const { fs, remote, store } = this.deps;
+    this.attachAbortSignal(signal);
+    try {
+      return await this.runCycleInner(signal);
+    } finally {
+      this.attachAbortSignal(undefined);
+    }
+  }
+
+  private attachAbortSignal(signal?: AbortSignal): void {
+    if (this.deps.fs instanceof VaultAdapter) {
+      this.deps.fs.setAbortSignal(signal ?? null);
+    }
+    if (this.deps.remote instanceof DropboxAdapter) {
+      this.deps.remote.setAbortSignal(signal);
+    }
+  }
+
+  private async runCycleInner(signal?: AbortSignal): Promise<CycleResult> {
+    const { fs, remote, store } = this.deps;
     const ctx = this.options.enableCycleReports ? new CycleContext() : undefined;
 
     // 0. 사이클 시작 이벤트
@@ -109,45 +198,222 @@ export class SyncEngine {
     // 1. 로컬 파일 수집
     signal?.throwIfAborted();
     const localScanStart = Date.now();
-    const localFiles = this.collectLocalFiles(await fs.list());
+    await this.liveReport?.phaseStart(1);
+    const localScanCb: LocalFileScanCallback = (path, detail) => {
+      this.liveReport?.line(`\`${path}\` (${detail})`);
+    };
+    this.attachLocalScanCallback(localScanCb);
+    let localFiles: import("../types").FileInfo[];
+    let allLocalFiles: import("../types").FileInfo[] = [];
+    const configDiskScan = this.sectionFilter?.some((s) => s !== "notes") ?? false;
+    const listOpts = {
+      configDir: this.configDir,
+      configDiskScan,
+      includeHiddenFilesAndFolders: this.options.includeHiddenFilesAndFolders ?? false,
+    };
+    try {
+      allLocalFiles = this.collectLocalFiles(await fs.list(listOpts));
+      localFiles = allLocalFiles.filter((f) => this.pathInScope(f.path));
+    } finally {
+      this.attachLocalScanCallback(null);
+    }
+    const listStats =
+      fs instanceof VaultAdapter
+        ? fs.lastListStats
+        : {
+            vaultIndexed: allLocalFiles.length,
+            configDiskAdded: 0,
+            hiddenDiskAdded: 0,
+            mergedBeforeExclude: allLocalFiles.length,
+            mergedAfterExclude: allLocalFiles.length,
+          };
+    const inScopeBySection = countLocalBySection(localFiles, this.configDir);
+    this.lastDiagnostics = {
+      local: {
+        vaultIndexed: listStats.vaultIndexed,
+        configDiskAdded: listStats.configDiskAdded,
+        hiddenDiskAdded: listStats.hiddenDiskAdded,
+        mergedAfterExclude: listStats.mergedAfterExclude,
+        inScope: localFiles.length,
+        outOfScope: listStats.mergedAfterExclude - localFiles.length,
+        bySection: inScopeBySection,
+      },
+      syncState: {
+        baseInScope: 0,
+        remoteInScope: 0,
+        basePlugins: 0,
+        remotePlugins: 0,
+        localPlugins: inScopeBySection.plugins,
+      },
+      deleteIntent: {
+        totalInLog: this.deletedPaths.size,
+        fromVaultEvents: 0,
+        fromPersistedLog: 0,
+        inferredThisCycle: 0,
+        inferredSample: [],
+        inferredSkippedPlugin: 0,
+      },
+      deletePlan: {
+        deleteRemote: 0,
+        deleteLocal: 0,
+        deleteRemoteBySource: {},
+        deleteRemoteSample: [],
+      },
+    };
+    emitDiagnosticsPhaseLines(this.liveReport, "scan", this.lastDiagnostics);
+    await this.liveReport?.phaseEnd(`${localFiles.length} file(s) scanned`);
     ctx?.emit({ type: "local_scan", ts: Date.now(), fileCount: localFiles.length, duration: Date.now() - localScanStart });
 
     // 2. 원격 변경 수집 (delta)
-    const { deltaEntries, latestCursor } = await this.fetchRemoteDeltas(store, remote, signal, ctx);
+    await this.liveReport?.phaseStart(2);
+    const { deltaEntries, latestCursor, inScopeDeltaCount } = await this.fetchRemoteDeltas(
+      store,
+      remote,
+      signal,
+      ctx,
+    );
+    await this.liveReport?.phaseEnd(
+      `${inScopeDeltaCount} in-scope remote entry/entries (${deltaEntries.length} delta total)`,
+    );
 
     // 3. 이전 상태 로드
     signal?.throwIfAborted();
-    const baseEntries = await store.getAllEntries();
+    const baseEntries = (await store.getAllEntries()).filter((e) =>
+      this.pathInScope(e.localPath),
+    );
 
     // 4. base + delta 병합 → 전체 원격 상태
     const fullRemoteMap = this.buildFullRemoteState(baseEntries, deltaEntries);
+    this.filterRemoteMapByScope(fullRemoteMap);
+
+    if (this.lastDiagnostics) {
+      this.lastDiagnostics.syncState.baseInScope = baseEntries.length;
+      this.lastDiagnostics.syncState.remoteInScope = fullRemoteMap.size;
+      this.lastDiagnostics.syncState.basePlugins = countBasePlugins(baseEntries, this.configDir);
+      this.lastDiagnostics.syncState.remotePlugins = countRemotePlugins(fullRemoteMap, this.configDir);
+    }
 
     // 5. catch-up: vault 이벤트 누락 보완
-    this.inferMissingDeletes(localFiles, fullRemoteMap, baseEntries);
+    const inferred = this.inferMissingDeletes(localFiles, fullRemoteMap, baseEntries);
+    if (this.lastDiagnostics) {
+      const intentSources = countDeleteIntentSources(
+        this.deletedPaths,
+        this.deleteIntentSources,
+      );
+      this.lastDiagnostics.deleteIntent = {
+        totalInLog: this.deletedPaths.size,
+        fromVaultEvents: intentSources.event,
+        fromPersistedLog: intentSources.persisted,
+        inferredThisCycle: inferred.count,
+        inferredSample: inferred.sample,
+        inferredSkippedPlugin: inferred.skippedPluginInfer,
+      };
+      emitDiagnosticsPhaseLines(this.liveReport, "intent", this.lastDiagnostics);
+    }
 
     // 6. 동기화 계획 생성
     signal?.throwIfAborted();
     const fullRemoteEntries = Array.from(fullRemoteMap.values());
+    await this.liveReport?.phaseStart(3);
+    let planItemsLogged = 0;
     const plan = createPlan(localFiles, fullRemoteEntries, baseEntries, {
       localDeletedPaths: this.deletedPaths,
       ctx,
+      onPlanItem: (pathLower, localPath, actionType, reason) => {
+        if (planItemsLogged < 15) {
+          this.liveReport?.line(`\`${localPath}\` → **${actionType}** (${reason})`);
+          planItemsLogged++;
+        }
+      },
     });
+    if (plan.items.length > planItemsLogged) {
+      this.liveReport?.line(`… and ${plan.items.length - planItemsLogged} more planned`);
+    }
+    if (this.lastDiagnostics) {
+      this.lastDiagnostics.deletePlan = summarizeDeletePlan(plan, this.deleteIntentSources);
+      emitDiagnosticsPhaseLines(this.liveReport, "plan", this.lastDiagnostics);
+    }
+    await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
 
     // 7. 삭제 가드 적용
     const { planToExecute, deletesSkipped } = await this.applyDeleteGuard(plan, ctx);
+    if (this.lastDiagnostics?.deleteGuard?.triggered) {
+      emitDiagnosticsPhaseLines(this.liveReport, "guard", this.lastDiagnostics);
+    }
+
+    // 7b. 경로 호환성 가드
+    let planToRun = planToExecute;
+    let pathsSkipped = 0;
+    await this.liveReport?.phaseStart(4);
+    const pathGuard = checkPathGuard(planToRun, this.options.strictLocalPaths ?? false);
+    if (!pathGuard.passed) {
+      for (const issue of pathGuard.issues) {
+        const types = issue.issues.map((i) => i.message).join("; ");
+        this.liveReport?.line(
+          `blocked \`${issue.item.localPath}\` (${issue.item.action.type}): ${types}`,
+        );
+      }
+      if (this.options.onPathIssues) {
+        const resolution = await this.options.onPathIssues(pathGuard.issues);
+        if (resolution.action === "renamed") {
+          const pairs = resolution.renames.map((r) => `\`${r.from}\` → \`${r.to}\``).join(", ");
+          this.liveReport?.line(`resolution: **renamed** (${pairs})`);
+          await this.liveReport?.phaseEnd("renames applied — execution deferred to next sync");
+          return {
+            plan,
+            result: { succeeded: [], failed: [], deferred: [] },
+            deletesSkipped,
+            pathRenamesApplied: true,
+            diagnostics: this.lastDiagnostics ?? undefined,
+          };
+        }
+        if (resolution.action === "skip") {
+          this.liveReport?.line("resolution: **skip** incompatible paths");
+        }
+        planToRun = pathGuard.filteredPlan;
+        pathsSkipped = pathGuard.issues.length;
+      } else {
+        planToRun = pathGuard.filteredPlan;
+        pathsSkipped = pathGuard.issues.length;
+      }
+    }
+    await this.liveReport?.phaseEnd(
+      pathGuard.passed
+        ? "all paths compatible"
+        : `${pathsSkipped} blocked, ${planToRun.items.length} remaining in plan`,
+    );
 
     // 8. 계획 실행
     signal?.throwIfAborted();
-    const result = await executePlan(planToExecute, { fs, remote, store }, {
+    await this.liveReport?.phaseStart(5);
+    let execFailed = 0;
+    const result = await executePlan(planToRun, { fs, remote, store }, {
       conflictStrategy: this.options.conflictStrategy,
       conflictResolver: this.options.conflictResolver,
       isFileActive: this.options.isFileActive,
       signal,
       concurrency: this.options.concurrency,
-      onProgress: this.options.onProgress,
+      onProgress: (completed, total) => {
+        if (completed % 10 === 0 || completed === total) {
+          this.liveReport?.progressLine(
+            `${completed} / ${total} (${execFailed} failed)`,
+          );
+        }
+        this.options.onProgress?.(completed, total, execFailed);
+      },
       onConflictCount: this.options.onConflictCount,
+      strictLocalPaths: this.options.strictLocalPaths,
       ctx,
+      onExecItem: (localPath, actionType, event, ok, error) => {
+        if (event === "end" && !ok) {
+          execFailed++;
+          this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
+        }
+      },
     });
+    await this.liveReport?.phaseEnd(
+      `${result.succeeded.length} ok, ${result.failed.length} failed, ${result.deferred.length} deferred`,
+    );
 
     // 9. 상태 갱신
     await this.finalizeState(store, result, latestCursor, deletesSkipped);
@@ -168,13 +434,44 @@ export class SyncEngine {
       const report = ctx.toJsonl();
       await this.options.onCycleReport?.(report, ctx.cycleId);
 
-      return { plan, result, deletesSkipped, deferredCount, cycleReport: report };
+      return {
+        plan,
+        result,
+        deletesSkipped,
+        deferredCount,
+        pathsSkipped: pathsSkipped || undefined,
+        cycleReport: report,
+        diagnostics: this.lastDiagnostics ?? undefined,
+      };
     }
 
-    return { plan, result, deletesSkipped, deferredCount };
+    return {
+      plan,
+      result,
+      deletesSkipped,
+      deferredCount,
+      pathsSkipped: pathsSkipped || undefined,
+      diagnostics: this.lastDiagnostics ?? undefined,
+    };
   }
 
   // ── private helpers ──
+
+  private filterRemoteMapByScope(map: Map<string, RemoteEntry>): void {
+    for (const key of [...map.keys()]) {
+      const entry = map.get(key)!;
+      const path = entry.pathDisplay || entry.pathLower;
+      if (!this.pathInScope(path)) {
+        map.delete(key);
+      }
+    }
+  }
+
+  private attachLocalScanCallback(cb: LocalFileScanCallback | null): void {
+    if (this.deps.fs instanceof VaultAdapter) {
+      this.deps.fs.onLocalFileScanned = cb;
+    }
+  }
 
   /** conflict 파일을 제외한 로컬 파일 목록 */
   private collectLocalFiles(files: import("../types").FileInfo[]): import("../types").FileInfo[] {
@@ -187,7 +484,7 @@ export class SyncEngine {
     remote: import("../adapters/interfaces").RemoteStorage,
     signal?: AbortSignal,
     ctx?: CycleContext,
-  ): Promise<{ deltaEntries: RemoteEntry[]; latestCursor: string }> {
+  ): Promise<{ deltaEntries: RemoteEntry[]; latestCursor: string; inScopeDeltaCount: number }> {
     let cursor = await store.getMeta("cursor");
     const fetchStart = Date.now();
     let changes;
@@ -207,6 +504,14 @@ export class SyncEngine {
     let deltaEntries = [...changes.entries];
     let latestCursor = changes.cursor;
     let hasMore = changes.hasMore;
+    let loggedInScope = 0;
+    for (const entry of changes.entries) {
+      const path = entry.pathDisplay || entry.pathLower;
+      if (!this.pathInScope(path)) continue;
+      loggedInScope++;
+      const tag = entry.deleted ? "deleted" : "file";
+      this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
+    }
 
     ctx?.emit({
       type: "remote_fetch",
@@ -221,6 +526,13 @@ export class SyncEngine {
       signal?.throwIfAborted();
       const pageStart = Date.now();
       const more = await remote.listChanges(latestCursor);
+      for (const entry of more.entries) {
+        const path = entry.pathDisplay || entry.pathLower;
+        if (!this.pathInScope(path)) continue;
+        loggedInScope++;
+        const tag = entry.deleted ? "deleted" : "file";
+        this.liveReport?.line(`\`${entry.pathDisplay}\` (${tag}, rev ${entry.rev ?? "—"})`);
+      }
       deltaEntries = deltaEntries.concat(more.entries);
       latestCursor = more.cursor;
       hasMore = more.hasMore;
@@ -234,7 +546,7 @@ export class SyncEngine {
       });
     }
 
-    return { deltaEntries, latestCursor };
+    return { deltaEntries, latestCursor, inScopeDeltaCount: loggedInScope };
   }
 
   /** base + delta 병합 → 전체 원격 상태 맵 (제외 패턴 적용 포함) */
@@ -282,17 +594,49 @@ export class SyncEngine {
     localFiles: import("../types").FileInfo[],
     fullRemoteMap: Map<string, RemoteEntry>,
     baseEntries: import("../types").SyncEntry[],
-  ): void {
+  ): { count: number; sample: string[]; skippedPluginInfer: number } {
     const localPathSet = new Set(localFiles.map((f) => f.pathLower));
+    const sample: string[] = [];
+    let count = 0;
+    let skippedPluginInfer = 0;
+
+    const pluginsSectionActive = this.sectionFilter?.includes("plugins") ?? false;
+    const localPlugins = countLocalBySection(localFiles, this.configDir).plugins;
+    const basePlugins = countBasePlugins(baseEntries, this.configDir);
+    const skipPluginInfer = shouldSkipPluginInfer(
+      pluginsSectionActive,
+      localPlugins,
+      basePlugins,
+    );
+
     for (const base of baseEntries) {
+      if (
+        skipPluginInfer &&
+        classifyVaultPath(base.localPath, this.configDir) === "plugins"
+      ) {
+        if (
+          !localPathSet.has(base.pathLower) &&
+          !this.deletedPaths.has(base.pathLower) &&
+          fullRemoteMap.has(base.pathLower)
+        ) {
+          skippedPluginInfer++;
+        }
+        continue;
+      }
       if (
         !localPathSet.has(base.pathLower) &&
         !this.deletedPaths.has(base.pathLower) &&
         fullRemoteMap.has(base.pathLower)
       ) {
         this.deletedPaths.add(base.pathLower);
+        this.deleteIntentSources.set(base.pathLower, "inferred");
+        count++;
+        if (sample.length < 8) {
+          sample.push(base.localPath);
+        }
       }
     }
+    return { count, sample, skippedPluginInfer };
   }
 
   /** 삭제 가드 적용 → 실행할 plan과 스킵 수 반환 */
@@ -315,6 +659,20 @@ export class SyncEngine {
       passed: guard.passed,
     });
 
+    const deleteRemote = guard.deleteItems.filter((i) => i.action.type === "deleteRemote").length;
+    const deleteLocal = guard.deleteItems.filter((i) => i.action.type === "deleteLocal").length;
+    if (this.lastDiagnostics && guard.deleteItems.length > 0) {
+      this.lastDiagnostics.deleteGuard = {
+        triggered: true,
+        totalDeletes: guard.deleteItems.length,
+        deleteRemote,
+        deleteLocal,
+        threshold,
+        passed: guard.passed,
+        skipped: guard.passed ? undefined : guard.deleteItems.length,
+      };
+    }
+
     if (guard.passed) {
       return { planToExecute: plan, deletesSkipped: 0 };
     }
@@ -326,7 +684,11 @@ export class SyncEngine {
       }
     }
 
-    return { planToExecute: guard.filteredPlan, deletesSkipped: guard.deleteItems.length };
+    const skipped = guard.deleteItems.length;
+    if (this.lastDiagnostics?.deleteGuard) {
+      this.lastDiagnostics.deleteGuard.skipped = skipped;
+    }
+    return { planToExecute: guard.filteredPlan, deletesSkipped: skipped };
   }
 
   /** cursor 갱신 + 성공한 삭제 항목 정리 */
@@ -345,6 +707,7 @@ export class SyncEngine {
     for (const item of result.succeeded) {
       if (item.action.type === "deleteRemote" || item.action.type === "deleteLocal") {
         this.deletedPaths.delete(item.pathLower);
+        this.deleteIntentSources.delete(item.pathLower);
       }
     }
   }

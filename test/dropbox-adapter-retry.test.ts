@@ -130,6 +130,48 @@ describe("DropboxAdapter retry on 429", () => {
 
   // ── Content-Type 회귀 방지 ──
 
+  test("download: non-JSON body with dropbox-api-result header succeeds", async () => {
+    const adapter = createAdapter();
+    const markdown = "# hello\n\nworld";
+    const buf = new TextEncoder().encode(markdown).buffer;
+
+    httpClientMock.mockResolvedValueOnce({
+      status: 200,
+      arrayBuffer: buf,
+      headers: {
+        "dropbox-api-result": JSON.stringify({
+          path_display: "/test.md",
+          content_hash: "abc",
+          server_modified: "2024-01-01T00:00:00Z",
+          rev: "rev_md",
+          size: markdown.length,
+        }),
+      },
+      text: markdown,
+      json: undefined,
+    });
+
+    const result = await adapter.download("test.md");
+    expect(result.metadata.rev).toBe("rev_md");
+    expect(new TextDecoder().decode(result.data)).toBe(markdown);
+  });
+
+  test("download: missing dropbox-api-result throws clear error", async () => {
+    const adapter = createAdapter();
+
+    httpClientMock.mockResolvedValueOnce({
+      status: 200,
+      arrayBuffer: new ArrayBuffer(0),
+      headers: {},
+      text: "body",
+      json: undefined,
+    });
+
+    await expect(adapter.download("test.md")).rejects.toThrow(
+      "dropbox-api-result header",
+    );
+  });
+
   test("download: headers에 Content-Type을 명시적으로 전달한다", async () => {
     const adapter = createAdapter();
 
@@ -272,21 +314,25 @@ describe("DropboxAdapter retry on 429", () => {
     expect(httpClientMock).toHaveBeenCalledTimes(2);
   });
 
-  test("upload: 503 연속 5번 → 에러 throw", async () => {
-    const adapter = createAdapter();
-    const data = new Uint8Array([1]);
+  test(
+    "upload: 503 연속 5번 → 에러 throw",
+    async () => {
+      const adapter = createAdapter();
+      const data = new Uint8Array([1]);
 
-    for (let i = 0; i < 5; i++) {
-      httpClientMock.mockResolvedValueOnce({
-        status: 503,
-        json: {},
-        text: "service unavailable",
-      });
-    }
+      for (let i = 0; i < 5; i++) {
+        httpClientMock.mockResolvedValueOnce({
+          status: 503,
+          json: {},
+          text: "service unavailable",
+        });
+      }
 
-    await expect(adapter.upload("test.md", data)).rejects.toThrow("Dropbox API error 503");
-    expect(httpClientMock).toHaveBeenCalledTimes(5);
-  });
+      await expect(adapter.upload("test.md", data)).rejects.toThrow("Dropbox API error 503");
+      expect(httpClientMock).toHaveBeenCalledTimes(5);
+    },
+    20_000,
+  );
 
   test("rpcCall: 409 reset → DropboxCursorResetError (retry 안 함)", async () => {
     const adapter = createAdapter();
@@ -320,17 +366,21 @@ describe("DropboxAdapter retry on 429", () => {
     expect(httpClientMock).toHaveBeenCalledTimes(2);
   });
 
-  test("upload: 네트워크 에러 연속 5번 → throw", async () => {
-    const adapter = createAdapter();
-    const data = new Uint8Array([1]);
+  test(
+    "upload: 네트워크 에러 연속 5번 → throw",
+    async () => {
+      const adapter = createAdapter();
+      const data = new Uint8Array([1]);
 
-    for (let i = 0; i < 5; i++) {
-      httpClientMock.mockRejectedValueOnce(new Error("The network connection was lost."));
-    }
+      for (let i = 0; i < 5; i++) {
+        httpClientMock.mockRejectedValueOnce(new Error("The network connection was lost."));
+      }
 
-    await expect(adapter.upload("test.md", data)).rejects.toThrow("network connection was lost");
-    expect(httpClientMock).toHaveBeenCalledTimes(5);
-  });
+      await expect(adapter.upload("test.md", data)).rejects.toThrow("network connection was lost");
+      expect(httpClientMock).toHaveBeenCalledTimes(5);
+    },
+    35_000,
+  );
 
   test("download: 네트워크 에러 → 5xx → 성공", async () => {
     const adapter = createAdapter();

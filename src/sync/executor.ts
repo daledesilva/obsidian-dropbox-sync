@@ -1,7 +1,7 @@
 import { dropboxContentHashBrowser } from "../hash.browser";
 import type { FileSystem, RemoteStorage, SyncStateStore } from "../adapters/interfaces";
-import { PathValidationError, RevConflictError, type ConflictResolver, type ConflictStrategy, type SyncPlan, type SyncPlanItem, type SyncResult } from "../types";
-import { validateDropboxPath } from "./path-validator";
+import { RevConflictError, type ConflictResolver, type ConflictStrategy, type SyncPlan, type SyncPlanItem, type SyncResult } from "../types";
+import { assertValidSyncPath } from "./path-assert";
 import { runWithConcurrency } from "./concurrency";
 import {
   ConflictSkippedError,
@@ -35,6 +35,16 @@ export interface ExecutorConfig {
   onBeforeDeleteLocal?: (pathLower: string) => void;
   /** 사이클 컨텍스트 (execution trace) */
   ctx?: CycleContext;
+  /** iOS/모바일 등 로컬 경로 규칙 적용 */
+  strictLocalPaths?: boolean;
+  /** 라이브 리포트: 실행 항목 시작/종료 */
+  onExecItem?: (
+    localPath: string,
+    actionType: string,
+    event: "start" | "end",
+    ok?: boolean,
+    error?: string,
+  ) => void;
 }
 
 /** 내부 함수에서 사용하는 통합 컨텍스트 */
@@ -78,13 +88,18 @@ export async function executePlan(
 
   // 일반 항목: 병렬
   const tasks = executable.map((item) => async () => {
-    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: item.action.type });
+    const actionType = item.action.type;
+    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
     const start = Date.now();
     try {
       await executeItem(item, ctx);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: item.action.type, ok: true, duration: Date.now() - start });
+      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
     } catch (e) {
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: item.action.type, ok: false, error: (e as Error).message, duration: Date.now() - start });
+      const errMsg = (e as Error).message;
+      ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
       throw e;
     }
   });
@@ -115,18 +130,24 @@ export async function executePlan(
   }
   for (const item of conflicts) {
     if (ctx.signal?.aborted) break;
-    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: item.action.type });
+    const actionType = item.action.type;
+    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
     const start = Date.now();
     try {
       await executeItem(item, ctx);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: item.action.type, ok: true, duration: Date.now() - start });
+      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
       succeeded.push(item);
     } catch (e) {
       if (e instanceof ConflictSkippedError) {
-        ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: item.action.type, ok: true, duration: Date.now() - start });
+        ctx.onExecItem?.(item.localPath, actionType, "end", true);
+        ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
         deferred.push(item);
       } else {
-        ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: item.action.type, ok: false, error: (e as Error).message, duration: Date.now() - start });
+        const errMsg = (e as Error).message;
+        ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
+        ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
         failed.push({ item, error: e as Error });
       }
     }
@@ -147,10 +168,7 @@ async function executeItem(
 
   switch (action.type) {
     case "upload": {
-      const pathError = validateDropboxPath(localPath);
-      if (pathError) {
-        throw new PathValidationError(localPath, pathError);
-      }
+      assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
 
       const data = await fs.read(localPath);
       const localHash = await dropboxContentHashBrowser(data);
@@ -187,6 +205,8 @@ async function executeItem(
     }
 
     case "download": {
+      assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
+
       const result = await downloadAndVerify(remote, localPath);
       await fs.write(localPath, result.data, result.metadata.serverModified);
       await updateSyncState(store, pathLower, localPath, result.verifiedHash, result.verifiedHash, result.metadata.rev);
