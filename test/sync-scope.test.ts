@@ -25,6 +25,8 @@ describe("classifyVaultPath", () => {
 
   test("plugins under .obsidian", () => {
     expect(classifyVaultPath(".obsidian/plugins/foo/main.js", CONFIG)).toBe("plugins");
+    // Enable list travels with the plugins section so installs activate after sync.
+    expect(classifyVaultPath(".obsidian/community-plugins.json", CONFIG)).toBe("plugins");
   });
 
   test("workspace files", () => {

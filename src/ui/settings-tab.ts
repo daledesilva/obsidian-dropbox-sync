@@ -499,8 +499,10 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Include hidden files and folders")
       .setDesc(
-        "Deep-scan the vault on disk for dotfiles and folders Obsidian does not index. "
-        + "Slower on large vaults. Built-in excludes (e.g. .git/) still apply.",
+        "Deep-scan the vault on disk for other dotfiles and folders Obsidian does not index "
+        + "(for example .git when not excluded). Slower on large vaults. "
+        + "Does not control .obsidian — use the Obsidian settings / plugins / workspaces "
+        + "section toggles for that; those always sync when enabled.",
       )
       .addToggle((toggle) =>
         toggle

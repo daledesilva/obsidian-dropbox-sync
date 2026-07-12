@@ -49,6 +49,7 @@ export function notifySyncStart(): void {
   new Notice("Dropbox Sync: syncing…", 3000);
 }
 
+/** durationMs 0 keeps the notice until the user dismisses it (manual sync finish). */
 export function notifySyncEnd(message: string, durationMs = 5000): void {
   new Notice(message, durationMs);
 }

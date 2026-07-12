@@ -497,7 +497,8 @@ export default class DropboxSyncPlugin extends Plugin {
     } finally {
       const endedAt = Date.now();
       setRibbonSyncing(this.ribbonEl, false);
-      if (manual) notifySyncEnd(endMessage, noticeDuration);
+      // Manual finish stays until dismissed so the result is not missed; start notice still auto-hides.
+      if (manual) notifySyncEnd(endMessage, 0);
 
       const reportInput: SyncReportInput = {
         startedAt,
@@ -638,7 +639,12 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private createEngineDeps() {
     const vaultId = this.app.vault.getName();
-    const fs = new VaultAdapter(this.app.vault, this.settings.excludePatterns, this.app.fileManager);
+    const fs = new VaultAdapter(
+      this.app.vault,
+      this.settings.excludePatterns,
+      this.app.fileManager,
+      this.app.vault.configDir,
+    );
     const remote = new DropboxAdapter({
       httpClient: obsidianHttpClient,
       appKey: getEffectiveAppKey(this.settings),
