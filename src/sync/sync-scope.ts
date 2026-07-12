@@ -59,7 +59,10 @@ function isWorkspacePath(path: string, configDir: string): boolean {
 function isPluginsPath(path: string, configDir: string): boolean {
   const obs = normalizeConfigDir(configDir);
   const lower = path.toLowerCase();
-  return lower.startsWith(`${obs}/plugins/`);
+  if (lower.startsWith(`${obs}/plugins/`)) return true;
+  // Enable list must travel with plugin binaries or Obsidian will not load them.
+  if (lower === `${obs}/community-plugins.json`) return true;
+  return false;
 }
 
 function isObsidianPath(path: string, configDir: string): boolean {

@@ -9,35 +9,38 @@ describe("isFolderAlreadyExistsError", () => {
 });
 
 describe("VaultAdapter write / ensureParentDir", () => {
-  test("ignores Folder already exists when vault index lags (parallel download race)", async () => {
+  test("writes config paths via DataAdapter not createBinary", async () => {
     const onDiskFolders = new Set<string>([".obsidian", ".obsidian/plugins"]);
-    const indexedFolders = new Set<string>([".obsidian", ".obsidian/plugins"]);
     const files = new Map<string, ArrayBuffer>();
-    const raceFolder = ".obsidian/plugins/obsidian-icon-folder/icons/tabler-icons";
-    // Another parallel download created this folder on disk; index not updated yet.
-    onDiskFolders.add(raceFolder);
+    let createBinaryCalls = 0;
 
     const vault = {
       getFiles: () => [],
       readBinary: async () => new ArrayBuffer(0),
-      getAbstractFileByPath: (path: string) => {
-        if (files.has(path)) {
-          return { stat: { mtime: 0, size: 0 }, extension: "svg" };
-        }
-        if (indexedFolders.has(path)) return { children: {} };
-        return null;
+      getAbstractFileByPath: () => null,
+      createFolder: async () => {
+        throw new Error("should use adapter.mkdir for config paths");
       },
-      createFolder: async (path: string) => {
-        if (onDiskFolders.has(path)) {
-          throw new Error("Folder already exists.");
-        }
-        onDiskFolders.add(path);
-        // Simulate iOS index lag: folder on disk but not visible yet.
-      },
-      createBinary: async (path: string, data: ArrayBuffer) => {
-        files.set(path, data);
+      createBinary: async () => {
+        createBinaryCalls++;
       },
       modifyBinary: async () => {},
+      adapter: {
+        exists: async (path: string) => onDiskFolders.has(path) || files.has(path),
+        mkdir: async (path: string) => {
+          if (onDiskFolders.has(path)) {
+            throw new Error("Folder already exists.");
+          }
+          onDiskFolders.add(path);
+        },
+        writeBinary: async (path: string, data: ArrayBuffer) => {
+          files.set(path, data);
+        },
+        readBinary: async () => new ArrayBuffer(0),
+        remove: async () => {},
+        rename: async () => {},
+        stat: async () => ({ mtime: 0, size: 0 }),
+      },
     };
 
     const adapter = new VaultAdapter(vault as never, [], {} as never);
@@ -45,39 +48,46 @@ describe("VaultAdapter write / ensureParentDir", () => {
     const data = new TextEncoder().encode("<svg/>");
 
     await expect(adapter.write(path, data)).resolves.toBeUndefined();
+    expect(createBinaryCalls).toBe(0);
     expect(onDiskFolders.has(".obsidian/plugins/obsidian-icon-folder")).toBe(true);
     expect(onDiskFolders.has(".obsidian/plugins/obsidian-icon-folder/icons")).toBe(true);
     expect(onDiskFolders.has(".obsidian/plugins/obsidian-icon-folder/icons/tabler-icons")).toBe(true);
     expect(files.has(path)).toBe(true);
   });
 
-  test("parallel writes to the same new parent folder both succeed", async () => {
+  test("parallel writes to the same new parent folder both succeed via adapter", async () => {
     const onDiskFolders = new Set<string>([".obsidian", ".obsidian/plugins"]);
-    const indexedFolders = new Set<string>([".obsidian", ".obsidian/plugins"]);
     const files = new Map<string, ArrayBuffer>();
-    let createFolderCalls = 0;
+    let mkdirCalls = 0;
 
     const vault = {
       getFiles: () => [],
       readBinary: async () => new ArrayBuffer(0),
-      getAbstractFileByPath: (path: string) => {
-        if (files.has(path)) {
-          return { stat: { mtime: 0, size: 0 }, extension: "svg" };
-        }
-        if (indexedFolders.has(path)) return { children: {} };
-        return null;
+      getAbstractFileByPath: () => null,
+      createFolder: async () => {
+        throw new Error("should use adapter.mkdir");
       },
-      createFolder: async (path: string) => {
-        createFolderCalls++;
-        if (onDiskFolders.has(path)) {
-          throw new Error("Folder already exists.");
-        }
-        onDiskFolders.add(path);
-      },
-      createBinary: async (path: string, data: ArrayBuffer) => {
-        files.set(path, data);
+      createBinary: async () => {
+        throw new Error("should use adapter.writeBinary");
       },
       modifyBinary: async () => {},
+      adapter: {
+        exists: async (path: string) => onDiskFolders.has(path) || files.has(path),
+        mkdir: async (path: string) => {
+          mkdirCalls++;
+          if (onDiskFolders.has(path)) {
+            throw new Error("Folder already exists.");
+          }
+          onDiskFolders.add(path);
+        },
+        writeBinary: async (path: string, data: ArrayBuffer) => {
+          files.set(path, data);
+        },
+        readBinary: async () => new ArrayBuffer(0),
+        remove: async () => {},
+        rename: async () => {},
+        stat: async () => ({ mtime: 0, size: 0 }),
+      },
     };
 
     const adapter = new VaultAdapter(vault as never, [], {} as never);
@@ -93,6 +103,45 @@ describe("VaultAdapter write / ensureParentDir", () => {
     expect(files.has(`${base}/a.svg`)).toBe(true);
     expect(files.has(`${base}/b.svg`)).toBe(true);
     expect(onDiskFolders.has(base)).toBe(true);
-    expect(createFolderCalls).toBeGreaterThan(1);
+    expect(mkdirCalls).toBeGreaterThan(1);
+  });
+
+  test("writes indexed note paths via createBinary", async () => {
+    const files = new Map<string, ArrayBuffer>();
+    const folders = new Set<string>();
+    let writeBinaryCalls = 0;
+
+    const vault = {
+      getFiles: () => [],
+      readBinary: async () => new ArrayBuffer(0),
+      getAbstractFileByPath: (path: string) => {
+        if (files.has(path)) return { stat: { mtime: 0, size: 0 }, extension: "md" };
+        if (folders.has(path)) return { children: {} };
+        return null;
+      },
+      createFolder: async (path: string) => {
+        folders.add(path);
+      },
+      createBinary: async (path: string, data: ArrayBuffer) => {
+        files.set(path, data);
+      },
+      modifyBinary: async () => {},
+      adapter: {
+        exists: async () => false,
+        mkdir: async () => {},
+        writeBinary: async () => {
+          writeBinaryCalls++;
+        },
+        readBinary: async () => new ArrayBuffer(0),
+        remove: async () => {},
+        rename: async () => {},
+        stat: async () => ({ mtime: 0, size: 0 }),
+      },
+    };
+
+    const adapter = new VaultAdapter(vault as never, [], {} as never);
+    await adapter.write("Notes/hello.md", new TextEncoder().encode("hi"));
+    expect(files.has("Notes/hello.md")).toBe(true);
+    expect(writeBinaryCalls).toBe(0);
   });
 });

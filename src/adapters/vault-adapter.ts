@@ -24,7 +24,10 @@ export interface VaultListStats {
  *
  * Discovery: vault.getFiles() plus optional vault.adapter disk scans for
  * config and hidden paths (Vault API is incomplete inside dot-folders).
- * Mutations: Vault API so events and MetadataCache stay correct.
+ * Mutations: Vault API for indexed notes; DataAdapter for config/dot paths
+ * because createBinary/getAbstractFileByPath are unreliable there
+ * (obsidian-developer-docs#186) — without this, plugin downloads appear to
+ * sync but never land on disk in a way Obsidian can load.
  */
 export type LocalFileScanCallback = (path: string, detail: "cached" | "hashed" | "disk") => void;
 
@@ -32,6 +35,7 @@ export class VaultAdapter implements FileSystem {
   private hashCache = new Map<string, HashCacheEntry>();
   private diskOnlyPaths = new Set<string>();
   private abortSignal: AbortSignal | null = null;
+  private configDirLower: string;
   onLocalFileScanned: LocalFileScanCallback | null = null;
   lastListStats: VaultListStats = {
     vaultIndexed: 0,
@@ -41,7 +45,14 @@ export class VaultAdapter implements FileSystem {
     mergedAfterExclude: 0,
   };
 
-  constructor(private vault: Vault, private excludePatterns: string[] = [], private fileManager: FileManager) {}
+  constructor(
+    private vault: Vault,
+    private excludePatterns: string[] = [],
+    private fileManager: FileManager,
+    configDir = ".obsidian",
+  ) {
+    this.configDirLower = configDir.replace(/\\/g, "/").replace(/\/+$/, "").toLowerCase();
+  }
 
   setAbortSignal(signal: AbortSignal | null): void {
     this.abortSignal = signal;
@@ -53,7 +64,7 @@ export class VaultAdapter implements FileSystem {
       const buffer = await this.vault.readBinary(file);
       return new Uint8Array(buffer);
     }
-    if (this.diskOnlyPaths.has(path.toLowerCase())) {
+    if (this.isAdapterBackedPath(path)) {
       const buffer = await this.vault.adapter.readBinary(normalizePath(path));
       return new Uint8Array(buffer);
     }
@@ -61,14 +72,24 @@ export class VaultAdapter implements FileSystem {
   }
 
   async write(path: string, data: Uint8Array, mtime?: number): Promise<void> {
-    const existing = this.vault.getAbstractFileByPath(path);
     const options = mtime ? { mtime } : undefined;
+    const arrayBuffer = toArrayBuffer(data);
 
+    // Config/dot paths must use DataAdapter — Vault createBinary is partial there.
+    if (this.isAdapterBackedPath(path)) {
+      await this.ensureParentDirViaAdapter(path);
+      await this.vault.adapter.writeBinary(normalizePath(path), arrayBuffer, options);
+      this.diskOnlyPaths.add(path.toLowerCase());
+      this.hashCache.delete(path.toLowerCase());
+      return;
+    }
+
+    const existing = this.vault.getAbstractFileByPath(path);
     if (existing && this.isTFile(existing)) {
-      await this.vault.modifyBinary(existing, data.buffer as ArrayBuffer, options);
+      await this.vault.modifyBinary(existing, arrayBuffer, options);
     } else {
       await this.ensureParentDir(path);
-      await this.vault.createBinary(path, data.buffer as ArrayBuffer, options);
+      await this.vault.createBinary(path, arrayBuffer, options);
       this.diskOnlyPaths.delete(path.toLowerCase());
     }
   }
@@ -77,6 +98,12 @@ export class VaultAdapter implements FileSystem {
     const file = this.vault.getAbstractFileByPath(path);
     if (file) {
       await this.fileManager.trashFile(file);
+    } else if (this.isAdapterBackedPath(path)) {
+      // Disk-only config/plugin files are invisible to Vault trash APIs.
+      const norm = normalizePath(path);
+      if (await this.vault.adapter.exists(norm)) {
+        await this.vault.adapter.remove(norm);
+      }
     }
     this.diskOnlyPaths.delete(path.toLowerCase());
     this.hashCache.delete(path.toLowerCase());
@@ -84,14 +111,18 @@ export class VaultAdapter implements FileSystem {
 
   async rename(from: string, to: string): Promise<void> {
     const file = this.vault.getAbstractFileByPath(from);
-    if (!file || !this.isTFile(file)) {
+    if (file && this.isTFile(file)) {
+      await this.ensureParentDir(to);
+      await this.fileManager.renameFile(file, to);
+    } else if (this.isAdapterBackedPath(from)) {
+      await this.ensureParentDirViaAdapter(to);
+      await this.vault.adapter.rename(normalizePath(from), normalizePath(to));
+    } else {
       throw new Error(`File not found: ${from}`);
     }
-    await this.ensureParentDir(to);
-    await this.fileManager.renameFile(file, to);
     const fromLower = from.toLowerCase();
     const toLower = to.toLowerCase();
-    if (this.diskOnlyPaths.has(fromLower)) {
+    if (this.diskOnlyPaths.has(fromLower) || this.isAdapterBackedPath(to)) {
       this.diskOnlyPaths.delete(fromLower);
       this.diskOnlyPaths.add(toLower);
     }
@@ -119,6 +150,8 @@ export class VaultAdapter implements FileSystem {
       .filter((p) => p.endsWith("/"))
       .map((p) => p.replace(/\/+$/, ""));
 
+    // Config scan is independent of includeHiddenFilesAndFolders: section
+    // toggles (settings/plugins/workspaces) always need .obsidian on disk.
     let configDiskAdded = 0;
     if (options?.configDiskScan && options.configDir) {
       const diskFiles = await listFilesRecursive(adapter, options.configDir, {
@@ -160,8 +193,7 @@ export class VaultAdapter implements FileSystem {
     if (file && this.isTFile(file)) {
       return { mtime: file.stat.mtime, size: file.stat.size };
     }
-    const pathLower = path.toLowerCase();
-    if (this.diskOnlyPaths.has(pathLower)) {
+    if (this.isAdapterBackedPath(path)) {
       const st = await this.vault.adapter.stat(normalizePath(path));
       if (st) return { mtime: st.mtime, size: st.size };
     }
@@ -174,7 +206,7 @@ export class VaultAdapter implements FileSystem {
       const data = await this.vault.readBinary(file);
       return dropboxContentHashBrowser(new Uint8Array(data));
     }
-    if (this.diskOnlyPaths.has(path.toLowerCase())) {
+    if (this.isAdapterBackedPath(path)) {
       const data = await this.vault.adapter.readBinary(normalizePath(path));
       return dropboxContentHashBrowser(new Uint8Array(data));
     }
@@ -186,6 +218,17 @@ export class VaultAdapter implements FileSystem {
   }
 
   // ── private ──
+
+  /**
+   * Paths Obsidian does not reliably index or mutate via Vault APIs.
+   * Includes configDir (.obsidian), any dot-segment path, and known disk-only entries.
+   */
+  private isAdapterBackedPath(path: string): boolean {
+    const lower = path.replace(/\\/g, "/").toLowerCase();
+    if (this.diskOnlyPaths.has(lower)) return true;
+    if (lower === this.configDirLower || lower.startsWith(`${this.configDirLower}/`)) return true;
+    return path.split("/").some((segment) => segment.startsWith("."));
+  }
 
   private async readViaIndexedFile(path: string): Promise<Uint8Array> {
     const file = this.getFile(path);
@@ -283,6 +326,7 @@ export class VaultAdapter implements FileSystem {
     return added;
   }
 
+  /** Create parent folders for indexed (non-dot) paths via Vault API. */
   private async ensureParentDir(path: string): Promise<void> {
     const parts = path.split("/");
     if (parts.length <= 1) return;
@@ -302,10 +346,36 @@ export class VaultAdapter implements FileSystem {
       }
     }
   }
+
+  /** Create parent folders for config/dot paths via DataAdapter.mkdir. */
+  private async ensureParentDirViaAdapter(path: string): Promise<void> {
+    const parts = path.split("/");
+    if (parts.length <= 1) return;
+
+    let current = "";
+    for (let i = 0; i < parts.length - 1; i++) {
+      current = current ? `${current}/${parts[i]}` : parts[i];
+      const norm = normalizePath(current);
+      try {
+        if (!(await this.vault.adapter.exists(norm))) {
+          await this.vault.adapter.mkdir(norm);
+        }
+      } catch (e) {
+        if (isFolderAlreadyExistsError(e)) continue;
+        // Parallel downloads may race on mkdir; treat exists-after-error as ok.
+        if (await this.vault.adapter.exists(norm)) continue;
+        throw e;
+      }
+    }
+  }
 }
 
 /** Obsidian throws this when createFolder races or the folder exists on disk but is not indexed yet. */
 export function isFolderAlreadyExistsError(e: unknown): boolean {
   const msg = e instanceof Error ? e.message : String(e);
   return /folder already exists/i.test(msg);
+}
+
+function toArrayBuffer(data: Uint8Array): ArrayBuffer {
+  return data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
 }

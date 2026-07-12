@@ -65,7 +65,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncName: "",
   excludePatterns: [],
   deviceId: "",
-  syncOnCreateDeleteRename: false,
+  syncOnCreateDeleteRename: true,
   includeHiddenFilesAndFolders: false,
   onboardingDone: false,
 };
