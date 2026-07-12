@@ -79,11 +79,12 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     } else {
       this.renderSyncSection(containerEl, hasSyncName);
       if (hasSyncName) {
+        // Background vs manual vs shared are separate so each toggle's scope is obvious.
         this.renderBackgroundSyncSection(containerEl, autoSyncOn);
+        this.renderManualSyncSection(containerEl);
+        this.renderSharedSyncOptions(containerEl);
+        this.renderAdvancedSafety(containerEl);
         this.renderSyncNameChange(containerEl, this.plugin.settings.syncName);
-      }
-      if (hasSyncName) {
-        this.renderSyncOptions(containerEl);
       }
     }
 
@@ -128,7 +129,10 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
   }
 
   private renderBackgroundSyncSection(containerEl: HTMLElement, autoSyncOn: boolean): void {
-    new Setting(containerEl).setName("Automatic background sync").setHeading();
+    new Setting(containerEl)
+      .setName("Automatic background sync")
+      .setDesc("These options apply only to automatic sync — not to Sync now.")
+      .setHeading();
 
     new Setting(containerEl)
       .setName("Enable automatic background sync")
@@ -156,12 +160,16 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     };
 
     new Setting(containerEl)
-      .setName("Sections to sync")
-      .setDesc("Which parts of the vault automatic sync includes. At least one must be enabled.");
+      .setName("Sections for background sync")
+      .setDesc(
+        "Which parts of the vault automatic sync includes. "
+        + "Manual Sync now chooses sections separately in its modal. At least one must be enabled.",
+      );
 
     for (const key of sectionKeys) {
       new Setting(containerEl)
         .setName(sectionLabels[key])
+        .setDesc("Background sync only")
         .addToggle((toggle) => {
           toggle.setValue(this.plugin.settings.backgroundSyncSections[key]).onChange(async (value) => {
             const sections = { ...this.plugin.settings.backgroundSyncSections };
@@ -179,7 +187,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("Sync interval (seconds)")
-      .setDesc("Fallback interval when no file changes are detected.")
+      .setDesc("Background only — fallback interval when no file changes are detected.")
       .addSlider((slider) =>
         slider
           .setLimits(30, 600, 30)
@@ -206,10 +214,43 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("Sync on file create")
+      .setDesc(
+        "Background only — trigger sync when new files are created. "
+        + "Edits, deletions, and renames always trigger background sync when it is enabled.",
+      )
+      .addToggle((toggle) =>
+        toggle
+          .setValue(this.plugin.settings.syncOnCreateDeleteRename)
+          .onChange(async (value) => {
+            this.plugin.settings.syncOnCreateDeleteRename = value;
+            await this.plugin.saveSettings();
+          }),
+      );
+  }
+
+  /** Explains that Sync now picks sections in the modal, separate from background toggles. */
+  private renderManualSyncSection(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Manual sync")
+      .setDesc("These apply when you tap Sync now — not to automatic background sync.")
+      .setHeading();
+
+    new Setting(containerEl)
+      .setName("Choose sections each run")
+      .setDesc(
+        "Sync now opens a modal where you pick notes, Obsidian settings, plugins, and workspaces. "
+        + "Those choices do not change the background section toggles above.",
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Sync now").onClick(() => this.plugin.openSyncScopeModal()),
+      );
   }
 
   private debounceDesc(sec: number): string {
-    return `Wait ${sec}s after a file edit, delete, or rename before starting a sync.`;
+    return `Background only — wait ${sec}s after a file edit, delete, or rename before starting a sync.`;
   }
 
   // 최초 설정: 이름 입력 + Set
@@ -441,8 +482,13 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       );
   }
 
-  private renderSyncOptions(containerEl: HTMLElement): void {
-    // ── 기본 옵션 ──
+  /** Conflict / exclude / hidden apply to both background and manual runs. */
+  private renderSharedSyncOptions(containerEl: HTMLElement): void {
+    new Setting(containerEl)
+      .setName("Shared sync options")
+      .setDesc("These apply to both automatic background sync and manual Sync now.")
+      .setHeading();
+
     const strategyDescs: Record<string, string> = {
       keep_both: "Both versions are kept. Remote version is saved as a .conflict file.",
       newest: "The newer version wins, based on modification time.",
@@ -499,8 +545,10 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl)
       .setName("Include hidden files and folders")
       .setDesc(
-        "Deep-scan the vault on disk for dotfiles and folders Obsidian does not index. "
-        + "Slower on large vaults. Built-in excludes (e.g. .git/) still apply.",
+        "Deep-scan the vault on disk for other dotfiles and folders Obsidian does not index "
+        + "(for example .git when not excluded). Slower on large vaults. "
+        + "Does not control .obsidian — use the Obsidian settings / plugins / workspaces "
+        + "section toggles for that; those always sync when enabled.",
       )
       .addToggle((toggle) =>
         toggle
@@ -511,21 +559,13 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             this.plugin.resetEngine();
           }),
       );
+  }
 
-    // ── Advanced ──
-    new Setting(containerEl).setName("Advanced").setHeading();
-
+  private renderAdvancedSafety(containerEl: HTMLElement): void {
     new Setting(containerEl)
-      .setName("Sync on file create")
-      .setDesc("Trigger sync when new files are created. Edits, deletions, and renames always trigger sync.")
-      .addToggle((toggle) =>
-        toggle
-          .setValue(this.plugin.settings.syncOnCreateDeleteRename)
-          .onChange(async (value) => {
-            this.plugin.settings.syncOnCreateDeleteRename = value;
-            await this.plugin.saveSettings();
-          }),
-      );
+      .setName("Safety")
+      .setDesc("Applies to both automatic and manual sync.")
+      .setHeading();
 
     const deleteDesc = (() => {
       const frag = document.createDocumentFragment();
