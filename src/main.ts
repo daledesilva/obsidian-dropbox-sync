@@ -47,6 +47,11 @@ import {
 import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
 import {
+  outcomeToSectionState,
+  SyncSectionProgress,
+} from "./ui/sync-section-progress";
+import {
+  SYNC_SCOPE_LABELS,
   type VaultSection,
   vaultEventShouldTriggerSync,
   vaultRenameShouldTriggerSync,
@@ -64,6 +69,7 @@ import {
 export default class DropboxSyncPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
   private statusBar: StatusBar | null = null;
+  private sectionProgress: SyncSectionProgress | null = null;
   private syncing = false;
   private syncTimerId: number | null = null;
   private abortController: AbortController | null = null;
@@ -195,6 +201,8 @@ export default class DropboxSyncPlugin extends Plugin {
     this.clearSyncTimer();
     this.clearDebounceTimer();
     this.longpoll?.stop();
+    this.sectionProgress?.destroy();
+    this.sectionProgress = null;
     this.statusBar?.destroy();
   }
 
@@ -397,6 +405,7 @@ export default class DropboxSyncPlugin extends Plugin {
     let errorMessage: string | undefined;
     let diagnostics: import("./sync/sync-diagnostics").SyncCycleDiagnostics | undefined;
     let liveReport: SyncLiveReport | null = null;
+    let currentManualSection: VaultSection | null = null;
 
     if (manual && createReport) {
       try {
@@ -420,11 +429,6 @@ export default class DropboxSyncPlugin extends Plugin {
       const engine = this.getOrCreateEngine();
       engine.setLiveReport(liveReport);
       const configDir = this.app.vault.configDir;
-      if (manual && manualSections) {
-        engine.setSyncSections(manualSections, configDir);
-      } else {
-        engine.setSyncSections(getEnabledBackgroundSections(this.settings), configDir);
-      }
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
       if (prunedDeletes > 0) {
         liveReport?.line(`pruned ${prunedDeletes} stale delete-log entry/entries`);
@@ -432,41 +436,135 @@ export default class DropboxSyncPlugin extends Plugin {
       }
       this.conflictIndex = 0;
       this.conflictTotal = 0;
-      const cycleResult = await engine.runCycle(this.abortController.signal);
-      plan = cycleResult.plan;
-      result = cycleResult.result;
-      deletesSkipped = cycleResult.deletesSkipped;
-      deferredCount = cycleResult.deferredCount;
-      pathsSkipped = cycleResult.pathsSkipped;
-      diagnostics = cycleResult.diagnostics;
 
-      await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}, pathsSkipped: ${pathsSkipped ?? 0}`);
-      if (diagnostics) {
-        await this.log("sync diagnostics", formatDiagnosticsForLog(diagnostics));
-      }
+      // Manual: one section at a time (notes → settings → plugins → workspaces) with
+      // explorer progress segments. Background keeps a single multi-section cycle.
+      if (manual && manualSections) {
+        this.sectionProgress?.destroy();
+        this.sectionProgress = new SyncSectionProgress(this.app);
+        this.sectionProgress.show(manualSections);
 
-      if (cycleResult.pathRenamesApplied) {
-        needsResyncAfterRename = true;
-        outcome = "renamed_resync";
-        endMessage = "Dropbox Sync: files renamed. Syncing again…";
-        noticeDuration = 5000;
-        this.lastSyncSummary = "renamed — resyncing";
-        this.statusBar?.update("success", "renamed — resyncing");
-        return;
-      }
+        const aggregatedSucceeded: SyncResult["succeeded"] = [];
+        const aggregatedFailed: SyncResult["failed"] = [];
+        const aggregatedDeferredItems: SyncResult["deferred"] = [];
+        let aggregatedDeletesSkipped = 0;
+        let aggregatedPathsSkipped = 0;
+        let lastPlan: SyncPlan | undefined;
+        let lastDiagnostics: typeof diagnostics;
 
-      this.engineMgr?.persistDeleteLog();
+        for (let i = 0; i < manualSections.length; i++) {
+          const section = manualSections[i];
+          currentManualSection = section;
+          const isLast = i === manualSections.length - 1;
+          engine.setDeferCursorUpdate(!isLast);
+          engine.setSyncSections([section], configDir);
+          this.sectionProgress.markActive(section);
+          liveReport?.line(`## ${SYNC_SCOPE_LABELS[section]}`);
+          this.statusBar?.update("syncing", SYNC_SCOPE_LABELS[section]);
 
-      const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
-      outcome = feedback.outcome;
-      endMessage = feedback.endMessage;
-      noticeDuration = feedback.noticeDuration;
+          const cycleResult = await engine.runCycle(this.abortController.signal);
+          lastPlan = cycleResult.plan;
+          lastDiagnostics = cycleResult.diagnostics;
+          aggregatedSucceeded.push(...cycleResult.result.succeeded);
+          aggregatedFailed.push(...cycleResult.result.failed);
+          aggregatedDeferredItems.push(...cycleResult.result.deferred);
+          aggregatedDeletesSkipped += cycleResult.deletesSkipped ?? 0;
+          aggregatedPathsSkipped += cycleResult.pathsSkipped ?? 0;
 
-      if (result.failed.length === 0 && !deletesSkipped && !deferredCount) {
-        cursorUpdated = true;
+          await this.log(
+            `section ${section}: plan ${cycleResult.plan.items.length}, ok ${cycleResult.result.succeeded.length}, fail ${cycleResult.result.failed.length}`,
+          );
+          if (cycleResult.diagnostics) {
+            await this.log(`sync diagnostics (${section})`, formatDiagnosticsForLog(cycleResult.diagnostics));
+          }
+
+          if (cycleResult.pathRenamesApplied) {
+            this.sectionProgress.markResult(section, "partial", "Renamed — resyncing");
+            needsResyncAfterRename = true;
+            outcome = "renamed_resync";
+            endMessage = "Dropbox Sync: files renamed. Syncing again…";
+            noticeDuration = 5000;
+            this.lastSyncSummary = "renamed — resyncing";
+            this.statusBar?.update("success", "renamed — resyncing");
+            engine.setDeferCursorUpdate(false);
+            return;
+          }
+
+          const sectionFeedback = buildSyncResultFeedback(
+            cycleResult.result,
+            cycleResult.deletesSkipped,
+            cycleResult.pathsSkipped,
+          );
+          this.sectionProgress.markResult(
+            section,
+            outcomeToSectionState(sectionFeedback.outcome),
+            sectionFeedback.summary,
+          );
+        }
+
+        engine.setDeferCursorUpdate(false);
+        this.engineMgr?.persistDeleteLog();
+
+        plan = lastPlan;
+        diagnostics = lastDiagnostics;
+        result = {
+          succeeded: aggregatedSucceeded,
+          failed: aggregatedFailed,
+          deferred: aggregatedDeferredItems,
+        };
+        deletesSkipped = aggregatedDeletesSkipped || undefined;
+        deferredCount = aggregatedDeferredItems.length || undefined;
+        pathsSkipped = aggregatedPathsSkipped || undefined;
+
+        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+        outcome = feedback.outcome;
+        endMessage = feedback.endMessage;
+        noticeDuration = feedback.noticeDuration;
+
+        if (aggregatedFailed.length === 0 && !aggregatedDeletesSkipped && aggregatedDeferredItems.length === 0) {
+          cursorUpdated = true;
+        }
+      } else {
+        engine.setDeferCursorUpdate(false);
+        engine.setSyncSections(getEnabledBackgroundSections(this.settings), configDir);
+        const cycleResult = await engine.runCycle(this.abortController.signal);
+        plan = cycleResult.plan;
+        result = cycleResult.result;
+        deletesSkipped = cycleResult.deletesSkipped;
+        deferredCount = cycleResult.deferredCount;
+        pathsSkipped = cycleResult.pathsSkipped;
+        diagnostics = cycleResult.diagnostics;
+
+        await this.log(`plan: ${plan.items.length} items, succeeded: ${result.succeeded.length}, failed: ${result.failed.length}, deletesSkipped: ${deletesSkipped ?? 0}, deferred: ${deferredCount ?? 0}, pathsSkipped: ${pathsSkipped ?? 0}`);
+        if (diagnostics) {
+          await this.log("sync diagnostics", formatDiagnosticsForLog(diagnostics));
+        }
+
+        if (cycleResult.pathRenamesApplied) {
+          needsResyncAfterRename = true;
+          outcome = "renamed_resync";
+          endMessage = "Dropbox Sync: files renamed. Syncing again…";
+          noticeDuration = 5000;
+          this.lastSyncSummary = "renamed — resyncing";
+          this.statusBar?.update("success", "renamed — resyncing");
+          return;
+        }
+
+        this.engineMgr?.persistDeleteLog();
+
+        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+        outcome = feedback.outcome;
+        endMessage = feedback.endMessage;
+        noticeDuration = feedback.noticeDuration;
+
+        if (result.failed.length === 0 && !deletesSkipped && !deferredCount) {
+          cursorUpdated = true;
+        }
       }
     } catch (e) {
+      this.getOrCreateEngine().setDeferCursorUpdate(false);
       if (e instanceof Error && e.name === "AbortError") {
+        this.sectionProgress?.markInterrupted(currentManualSection, "Cancelled");
         await this.log("sync aborted");
         outcome = "aborted";
         endMessage = "Dropbox Sync: cancelled";
@@ -475,6 +573,7 @@ export default class DropboxSyncPlugin extends Plugin {
         return;
       }
       if (e instanceof DropboxAuthError) {
+        this.sectionProgress?.markInterrupted(currentManualSection, "Auth error");
         await this.log("auth error — token revoked", e);
         this.settings.accessToken = "";
         this.settings.tokenExpiry = 0;
@@ -487,6 +586,7 @@ export default class DropboxSyncPlugin extends Plugin {
         this.statusBar?.update("error", "auth expired");
         return;
       }
+      this.sectionProgress?.markInterrupted(currentManualSection, (e as Error).message?.slice(0, 80) || "Error");
       await this.log("sync error", e);
       outcome = "error";
       errorMessage = (e as Error).message;
