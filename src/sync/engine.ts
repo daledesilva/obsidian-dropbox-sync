@@ -62,6 +62,12 @@ export interface SyncEngineOptions {
   onPathIssues?: (issues: PathGuardIssue[]) => Promise<PathIssueResolution>;
   /** Adapter-scan vault root for hidden/dot paths (user setting). */
   includeHiddenFilesAndFolders?: boolean;
+  /**
+   * When true, skip Dropbox cursor write after a successful cycle.
+   * Used for intermediate sections in sequential manual sync so later
+   * sections still see the same delta set.
+   */
+  deferCursorUpdate?: boolean;
 }
 
 export interface CycleResult {
@@ -124,6 +130,11 @@ export class SyncEngine {
   setSyncSections(sections: VaultSection[], configDir: string): void {
     this.sectionFilter = sections;
     this.configDir = configDir;
+  }
+
+  /** Defer cursor persistence across multi-section manual runs (see SyncEngineOptions). */
+  setDeferCursorUpdate(defer: boolean): void {
+    this.options.deferCursorUpdate = defer;
   }
 
   private pathInScope(path: string): boolean {
@@ -698,8 +709,14 @@ export class SyncEngine {
     latestCursor: string,
     deletesSkipped: number,
   ): Promise<void> {
-    // 모두 성공 시에만 cursor 갱신 (deferred도 미완료 취급)
-    if (result.failed.length === 0 && deletesSkipped === 0 && result.deferred.length === 0) {
+    // 모두 성공 시에만 cursor 갱신 (deferred도 미완료 취급).
+    // Intermediate sequential sections defer so later sections see the same delta.
+    if (
+      !this.options.deferCursorUpdate
+      && result.failed.length === 0
+      && deletesSkipped === 0
+      && result.deferred.length === 0
+    ) {
       await store.setMeta("cursor", latestCursor);
     }
 

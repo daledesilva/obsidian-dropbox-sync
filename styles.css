@@ -24,6 +24,93 @@
   transition: width 0.2s ease;
 }
 
+/* Manual sync section progress — sticky footer in file explorer */
+.dbx-sync-explorer-progress {
+  flex-shrink: 0;
+  border-top: 1px solid var(--background-modifier-border);
+  background: var(--background-secondary);
+  padding: 8px 10px 10px;
+  z-index: 5;
+}
+
+.dbx-sync-explorer-progress-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  margin-bottom: 6px;
+}
+
+.dbx-sync-explorer-progress-title {
+  font-size: var(--font-ui-small);
+  font-weight: var(--font-semibold);
+  color: var(--text-normal);
+}
+
+.dbx-sync-explorer-progress-close {
+  font-size: var(--font-ui-smaller);
+  padding: 2px 8px;
+  cursor: pointer;
+}
+
+.dbx-sync-section-track {
+  display: flex;
+  gap: 4px;
+  width: 100%;
+}
+
+.dbx-sync-section-seg {
+  flex: 1;
+  min-width: 0;
+}
+
+.dbx-sync-section-seg-bar {
+  height: 6px;
+  border-radius: 3px;
+  background: var(--background-modifier-border);
+  transition: background 0.2s ease;
+}
+
+.dbx-sync-section-seg-active .dbx-sync-section-seg-bar {
+  background: var(--interactive-accent);
+  animation: dbx-sync-pulse 1s ease-in-out infinite;
+}
+
+.dbx-sync-section-seg-success .dbx-sync-section-seg-bar {
+  background: var(--color-green, var(--text-success));
+}
+
+.dbx-sync-section-seg-partial .dbx-sync-section-seg-bar {
+  background: var(--color-yellow, var(--text-warning));
+}
+
+.dbx-sync-section-seg-failed .dbx-sync-section-seg-bar {
+  background: var(--color-red, var(--text-error));
+}
+
+.dbx-sync-section-seg-label {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--text-muted);
+  text-align: center;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.dbx-sync-explorer-progress-detail {
+  margin-top: 6px;
+  font-size: var(--font-ui-smaller);
+  color: var(--text-muted);
+  white-space: pre-wrap;
+  line-height: 1.35;
+}
+
+@keyframes dbx-sync-pulse {
+  0%, 100% { opacity: 1; }
+  50% { opacity: 0.45; }
+}
+
 /* ── Conflict Modal ── */
 
 .dbx-sync-conflict-modal-wide {
