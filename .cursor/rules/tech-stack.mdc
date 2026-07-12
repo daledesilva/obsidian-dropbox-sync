@@ -1,0 +1,19 @@
+---
+description: Tech stack — libraries, frameworks, and tools in use
+alwaysApply: true
+---
+
+# Tech Stack
+
+This file is the source of truth for the libraries, frameworks, and tools used in this project. **Keep it up to date — updating this file is the final step of every plan that introduces, removes, or changes a dependency or tool.**
+
+---
+
+- **Plugin host:** Obsidian (desktop + mobile), TypeScript
+- **Runtime / build:** Bun (`Bun.build` via `build.ts`)
+- **UI:** Obsidian native UI (`createEl`, Setting API, Modals) + `styles.css`
+- **Persistence:** localforage (IndexedDB) for sync state; plugin `data.json` for settings
+- **Remote API:** Dropbox HTTP API (OAuth PKCE, content_hash, rev, longpoll)
+- **Testing:** bun:test (unit + in-memory simulation)
+- **Lint / types:** ESLint (eslint-plugin-obsidianmd), TypeScript (`tsc --noEmit`)
+- **CI:** GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)

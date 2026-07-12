@@ -1,0 +1,39 @@
+---
+description: Project overview — purpose, folder structure, and architecture
+alwaysApply: true
+---
+
+# Project Overview
+
+## What This Project Is
+
+Obsidian community plugin that syncs a vault with Dropbox across desktop and mobile, with conflict handling and delete protection.
+
+## Folder Structure
+
+```
+src/                                   — Plugin source (UI, sync engine, adapters, auth)
+src/sync/                              — Planner, executor, engine, guards, longpoll
+src/adapters/                          — FileSystem, RemoteStorage, SyncStateStore implementations
+src/ui/                                — Settings tab, modals, status bar
+test/                                  — bun:test unit + simulation tests
+docs/                                  — User-facing and agent tooling docs
+dist/                                  — Build output (main.js, etc.) copied into the test vault
+```
+
+## Architecture Notes
+
+UI Layer → SyncEngine (Planner → Executor) → Adapters (FileSystem, RemoteStorage, SyncStateStore).
+
+- **Planner**: pure functions — (local, remote, base) → SyncPlan
+- **Executor**: runs SyncPlan through adapters
+- **Adapters**: interface-based DI; Memory mocks used in tests
+
+## Key Constraints
+
+1. **content_hash first**: mtime is secondary; Dropbox content_hash (4MB-block SHA-256) drives change detection
+2. **rev optimistic locking**: upload with `mode: update(rev)` for server-side conflict detection
+3. **Preserve originals**: on conflict/failure, keep both sides’ originals
+4. **path_lower keys**: Dropbox is case-insensitive; use `path_lower` as the comparison key
+5. **Dev deploy target**: after buildable changes, `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/` — Hot Reload picks up `.hotreload`; do not ask the user to reload manually
+6. **Test vault**: `~/Documents/sync-tester/` is for Dropbox integration testing, not a production vault
