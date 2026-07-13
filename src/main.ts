@@ -492,6 +492,10 @@ export default class DropboxSyncPlugin extends Plugin {
           engine.setDeferCursorUpdate(!isLast);
           engine.setSyncSections([section], configDir);
           this.sectionProgress.markScanning(section);
+          this.sectionProgress.notifySegmentTransition(
+            null,
+            `${SYNC_SCOPE_LABELS[section]}: Scanning changes…`,
+          );
           liveReport?.line(`## ${SYNC_SCOPE_LABELS[section]}`);
           this.statusBar?.update("syncing", SYNC_SCOPE_LABELS[section]);
 
@@ -513,6 +517,11 @@ export default class DropboxSyncPlugin extends Plugin {
 
           if (cycleResult.pathRenamesApplied) {
             this.sectionProgress.markResult(section, "partial", "Renamed — resyncing");
+            this.sectionProgress.notifySegmentTransition(
+              `${SYNC_SCOPE_LABELS[section]}: Renamed — resyncing`,
+              null,
+            );
+            this.sectionProgress.finishSegmentNotices();
             needsResyncAfterRename = true;
             outcome = "renamed_resync";
             endMessage = "Dropbox Sync: files renamed. Syncing again…";
@@ -533,8 +542,14 @@ export default class DropboxSyncPlugin extends Plugin {
             outcomeToSectionState(sectionFeedback.outcome),
             sectionFeedback.summary,
           );
+          // Hold end text so the next markScanning can combine into one Notice.
+          this.sectionProgress.notifySegmentTransition(
+            `${SYNC_SCOPE_LABELS[section]}: ${sectionFeedback.summary}`,
+            null,
+          );
         }
 
+        this.sectionProgress.finishSegmentNotices();
         engine.setDeferCursorUpdate(false);
         this.engineMgr?.persistDeleteLog();
 
@@ -601,6 +616,11 @@ export default class DropboxSyncPlugin extends Plugin {
               sectionFeedback.summary,
             );
           }
+          this.sectionProgress.notifySegmentTransition(
+            `${SYNC_SCOPE_LABELS[this.progressSection]}: ${sectionFeedback.summary}`,
+            null,
+          );
+          this.sectionProgress.finishSegmentNotices();
         }
 
         const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
@@ -847,6 +867,10 @@ export default class DropboxSyncPlugin extends Plugin {
     if (first) {
       this.progressSection = first;
       this.sectionProgress.markActive(first);
+      this.sectionProgress.notifySegmentTransition(
+        null,
+        `${SYNC_SCOPE_LABELS[first]}: Syncing…`,
+      );
     }
     if (!this.scopeModalOpen) {
       setRibbonSyncing(this.ribbonEl, true);
