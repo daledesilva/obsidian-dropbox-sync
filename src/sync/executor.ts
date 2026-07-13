@@ -33,6 +33,12 @@ export interface ExecutorConfig {
   onConflictCount?: (count: number) => void;
   /** deleteLocal 실행 직전 호출. vault 이벤트에서 구분하기 위해 pathLower 전달. */
   onBeforeDeleteLocal?: (pathLower: string) => void;
+  /**
+   * Per-item soft timeout (ms). Timed-out items free their concurrency slot and are
+   * retried once at the end so slow/hanging files do not stall the rest of the plan.
+   * 0 disables. Default 90_000.
+   */
+  itemTimeoutMs?: number;
   /** 사이클 컨텍스트 (execution trace) */
   ctx?: CycleContext;
   /** iOS/모바일 등 로컬 경로 규칙 적용 */
@@ -50,10 +56,21 @@ export interface ExecutorConfig {
 /** 내부 함수에서 사용하는 통합 컨텍스트 */
 type ExecutorContext = ExecutorDeps & ExecutorConfig;
 
+/** Thrown when a single plan item exceeds itemTimeoutMs. */
+export class ItemTimeoutError extends Error {
+  constructor(message = "Item timed out") {
+    super(message);
+    this.name = "ItemTimeoutError";
+  }
+}
+
+const DEFAULT_ITEM_TIMEOUT_MS = 90_000;
+
 /**
  * SyncPlan의 각 항목을 실행한다.
  *
  * - 항목별로 독립 실행 (하나 실패해도 나머지 계속)
+ * - Slow/hanging items time out, free a worker slot, and retry once at the end
  * - upload 시 rev 충돌 → conflict로 재분류
  * - download 후 hash 검증
  */
@@ -83,44 +100,50 @@ export async function executePlan(
   }
 
   const concurrency = ctx.concurrency ?? 1;
+  const itemTimeoutMs = ctx.itemTimeoutMs ?? DEFAULT_ITEM_TIMEOUT_MS;
   let completed = 0;
+  // Progress denominator counts each item once (retry does not inflate total).
   const total = executable.length + conflicts.length;
-
-  // 일반 항목: 병렬
-  const tasks = executable.map((item) => async () => {
-    const actionType = item.action.type;
-    ctx.onExecItem?.(item.localPath, actionType, "start");
-    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
-    const start = Date.now();
-    try {
-      await executeItem(item, ctx);
-      ctx.onExecItem?.(item.localPath, actionType, "end", true);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
-    } catch (e) {
-      const errMsg = (e as Error).message;
-      ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
-      throw e;
-    }
-  });
-  const settled = await runWithConcurrency(tasks, concurrency, {
-    signal: ctx.signal,
-    onTaskComplete: () => {
-      completed++;
-      ctx.onProgress?.(completed, total);
-    },
-  });
 
   const succeeded: SyncPlanItem[] = [];
   const failed: { item: SyncPlanItem; error: Error }[] = [];
 
-  for (let i = 0; i < settled.length; i++) {
-    const r = settled[i];
-    if (!r) continue; // signal로 건너뛴 항목
-    if (r.status === "fulfilled") {
-      succeeded.push(executable[i]);
-    } else {
-      failed.push({ item: executable[i], error: r.reason as Error });
+  const bumpProgress = () => {
+    completed++;
+    ctx.onProgress?.(completed, total);
+  };
+
+  // Pass 1: parallel batch. Timeouts free slots so other files keep moving.
+  const pass1 = await runExecutableBatch(executable, ctx, concurrency, itemTimeoutMs, {
+    // Only count successes/failures toward progress in pass 1; timeouts retry later.
+    onSettled: (kind) => {
+      if (kind !== "timeout") bumpProgress();
+    },
+  });
+  succeeded.push(...pass1.succeeded);
+  failed.push(...pass1.failed);
+
+  // Pass 2: push timed-out items to the back and retry once after faster work finishes.
+  if (pass1.timedOut.length > 0 && !ctx.signal?.aborted) {
+    const pass2 = await runExecutableBatch(pass1.timedOut, ctx, concurrency, itemTimeoutMs, {
+      onSettled: () => bumpProgress(),
+    });
+    succeeded.push(...pass2.succeeded);
+    failed.push(...pass2.failed);
+    for (const item of pass2.timedOut) {
+      failed.push({
+        item,
+        error: new ItemTimeoutError(`Timed out after ${itemTimeoutMs}ms (retry)`),
+      });
+      bumpProgress();
+    }
+  } else if (pass1.timedOut.length > 0) {
+    for (const item of pass1.timedOut) {
+      failed.push({
+        item,
+        error: new ItemTimeoutError(`Timed out after ${itemTimeoutMs}ms`),
+      });
+      bumpProgress();
     }
   }
 
@@ -151,11 +174,95 @@ export async function executePlan(
         failed.push({ item, error: e as Error });
       }
     }
-    completed++;
-    ctx.onProgress?.(completed, total);
+    bumpProgress();
   }
 
   return { succeeded, failed, deferred };
+}
+
+type BatchSettleKind = "success" | "failure" | "timeout";
+
+async function runExecutableBatch(
+  items: SyncPlanItem[],
+  ctx: ExecutorContext,
+  concurrency: number,
+  itemTimeoutMs: number,
+  hooks: { onSettled: (kind: BatchSettleKind) => void },
+): Promise<{
+  succeeded: SyncPlanItem[];
+  failed: { item: SyncPlanItem; error: Error }[];
+  timedOut: SyncPlanItem[];
+}> {
+  const succeeded: SyncPlanItem[] = [];
+  const failed: { item: SyncPlanItem; error: Error }[] = [];
+  const timedOut: SyncPlanItem[] = [];
+  if (items.length === 0) return { succeeded, failed, timedOut };
+
+  const tasks = items.map((item) => async () => {
+    const actionType = item.action.type;
+    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
+    const start = Date.now();
+    try {
+      await raceWithTimeout(executeItem(item, ctx), itemTimeoutMs, ctx.signal);
+      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
+    } catch (e) {
+      const errMsg = (e as Error).message;
+      ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
+      throw e;
+    }
+  });
+
+  const settled = await runWithConcurrency(tasks, concurrency, {
+    signal: ctx.signal,
+  });
+
+  for (let i = 0; i < settled.length; i++) {
+    const r = settled[i];
+    if (!r) continue;
+    if (r.status === "fulfilled") {
+      succeeded.push(items[i]);
+      hooks.onSettled("success");
+    } else if (r.reason instanceof ItemTimeoutError) {
+      timedOut.push(items[i]);
+      hooks.onSettled("timeout");
+    } else {
+      failed.push({ item: items[i], error: r.reason as Error });
+      hooks.onSettled("failure");
+    }
+  }
+
+  return { succeeded, failed, timedOut };
+}
+
+/** Soft-timeout wrapper: frees the concurrency slot without cancelling the underlying I/O. */
+async function raceWithTimeout<T>(
+  promise: Promise<T>,
+  ms: number,
+  signal?: AbortSignal,
+): Promise<T> {
+  if (ms <= 0) return promise;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const onAbort = () => {
+    if (timer !== undefined) clearTimeout(timer);
+  };
+  signal?.addEventListener("abort", onAbort, { once: true });
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new ItemTimeoutError(`Timed out after ${ms}ms`)),
+          ms,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal?.removeEventListener("abort", onAbort);
+  }
 }
 
 async function executeItem(
