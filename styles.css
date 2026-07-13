@@ -68,24 +68,36 @@
   height: 6px;
   border-radius: 3px;
   background: var(--background-modifier-border);
-  transition: background 0.2s ease;
+  overflow: hidden;
+  position: relative;
 }
 
-.dbx-sync-section-seg-active .dbx-sync-section-seg-bar {
+.dbx-sync-section-seg-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: 3px;
   background: var(--interactive-accent);
+  transition: width 0.15s ease;
+}
+
+/* Active: fill grows with execute progress and keeps pulsing. */
+.dbx-sync-section-seg-active .dbx-sync-section-seg-fill {
   animation: dbx-sync-pulse 1s ease-in-out infinite;
 }
 
-.dbx-sync-section-seg-success .dbx-sync-section-seg-bar {
+.dbx-sync-section-seg-success .dbx-sync-section-seg-fill {
   background: var(--color-green, var(--text-success));
+  animation: none;
 }
 
-.dbx-sync-section-seg-partial .dbx-sync-section-seg-bar {
+.dbx-sync-section-seg-partial .dbx-sync-section-seg-fill {
   background: var(--color-yellow, var(--text-warning));
+  animation: none;
 }
 
-.dbx-sync-section-seg-failed .dbx-sync-section-seg-bar {
+.dbx-sync-section-seg-failed .dbx-sync-section-seg-fill {
   background: var(--color-red, var(--text-error));
+  animation: none;
 }
 
 .dbx-sync-section-seg-label {

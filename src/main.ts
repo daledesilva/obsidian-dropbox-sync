@@ -70,6 +70,11 @@ export default class DropboxSyncPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
   private statusBar: StatusBar | null = null;
   private sectionProgress: SyncSectionProgress | null = null;
+  /**
+   * Section whose explorer segment fill follows executor onProgress.
+   * Set only during manual sequential section loops; null for background sync.
+   */
+  private progressSection: VaultSection | null = null;
   private syncing = false;
   private syncTimerId: number | null = null;
   private abortController: AbortController | null = null;
@@ -455,6 +460,7 @@ export default class DropboxSyncPlugin extends Plugin {
         for (let i = 0; i < manualSections.length; i++) {
           const section = manualSections[i];
           currentManualSection = section;
+          this.progressSection = section;
           const isLast = i === manualSections.length - 1;
           engine.setDeferCursorUpdate(!isLast);
           engine.setSyncSections([section], configDir);
@@ -629,6 +635,7 @@ export default class DropboxSyncPlugin extends Plugin {
       }
 
       this.syncing = false;
+      this.progressSection = null;
       this.syncDeletedByEngine.clear();
       this.abortController = null;
       this.lastSyncTime = endedAt;
@@ -826,6 +833,10 @@ export default class DropboxSyncPlugin extends Plugin {
         const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
         const failHint = failed > 0 ? ` · ${failed} failed` : "";
         this.statusBar?.update("syncing", `${pct}% · ${completed}/${total}${failHint}`);
+        // Drive the active explorer segment fill from plan execute progress.
+        if (this.progressSection) {
+          this.sectionProgress?.updateOperationProgress(this.progressSection, completed, total);
+        }
         if (completed % 25 === 0 || completed === total) {
           void this.log(`execute: ${completed}/${total} (${failed} failed)`);
         }
