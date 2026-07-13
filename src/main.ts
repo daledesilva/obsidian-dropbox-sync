@@ -11,6 +11,7 @@ import {
 import { DropboxSyncSettingTab } from "./ui/settings-tab";
 import { StatusBar } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
+import { ConfirmModal } from "./ui/confirm-modal";
 import { DeleteConfirmModal } from "./ui/delete-confirm-modal";
 import { IncompatiblePathsModal } from "./ui/incompatible-paths-modal";
 import { LogViewerModal } from "./ui/log-viewer-modal";
@@ -313,7 +314,19 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private async handleRibbonClick(): Promise<void> {
     if (this.syncing) {
-      this.cancelCurrentSync();
+      // Confirm before aborting — accidental ribbon taps mid-sync were too easy.
+      const shouldCancel = await new ConfirmModal(
+        this.app,
+        "Cancel sync?",
+        "Stop the sync that is currently running?",
+        undefined,
+        "Cancel sync",
+        "Keep syncing",
+        true,
+      ).waitForConfirmation();
+      if (shouldCancel) {
+        this.cancelCurrentSync();
+      }
       return;
     }
     if (this.scopeModalOpen) return;

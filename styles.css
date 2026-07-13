@@ -5,8 +5,30 @@
   to { transform: rotate(360deg); }
 }
 
-.dbx-sync-ribbon-syncing svg {
+.dbx-sync-ribbon-syncing {
+  position: relative;
+}
+
+/* Only the refresh glyph spins; the stop square overlay stays fixed. */
+.dbx-sync-ribbon-syncing > svg {
   animation: dbx-sync-spin 1s linear infinite;
+}
+
+.dbx-sync-ribbon-stop {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+}
+
+.dbx-sync-ribbon-stop svg {
+  width: 8px;
+  height: 8px;
+  /* Fill the Lucide square so it reads as a stop glyph. */
+  fill: currentColor;
+  stroke: none;
 }
 
 .sync-progress-bar-container {
@@ -31,6 +53,7 @@
   background: var(--background-secondary);
   padding: 8px 10px 10px;
   z-index: 5;
+  cursor: pointer;
 }
 
 .dbx-sync-explorer-progress-header {
@@ -47,10 +70,28 @@
   color: var(--text-normal);
 }
 
-.dbx-sync-explorer-progress-close {
-  font-size: var(--font-ui-smaller);
-  padding: 2px 8px;
+.dbx-sync-explorer-progress-toggle {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 2px;
+  background: transparent;
+  border: none;
   cursor: pointer;
+  color: var(--text-muted);
+}
+
+.dbx-sync-explorer-progress-toggle svg {
+  width: 16px;
+  height: 16px;
+}
+
+.dbx-sync-explorer-progress-minimized .dbx-sync-explorer-progress-detail {
+  display: none;
+}
+
+.dbx-sync-explorer-progress-minimized .dbx-sync-explorer-progress-header {
+  margin-bottom: 4px;
 }
 
 .dbx-sync-section-track {

@@ -9,6 +9,10 @@ export class ConfirmModal extends Modal {
     private title: string,
     private message: string,
     private warning?: string,
+    private confirmLabel = "Confirm",
+    private cancelLabel = "Cancel",
+    /** When true, the confirm button uses Obsidian's warning style (e.g. cancel sync). */
+    private confirmIsWarning = false,
   ) {
     super(app);
   }
@@ -25,17 +29,19 @@ export class ConfirmModal extends Modal {
     }
 
     new Setting(contentEl)
+      .addButton((btn) => {
+        btn.setButtonText(this.confirmLabel).onClick(() => {
+          this.confirmed = true;
+          this.close();
+        });
+        if (this.confirmIsWarning) {
+          btn.setWarning();
+        } else {
+          btn.setCta();
+        }
+      })
       .addButton((btn) =>
-        btn
-          .setButtonText("Confirm")
-          .setCta()
-          .onClick(() => {
-            this.confirmed = true;
-            this.close();
-          }),
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Cancel").onClick(() => this.close()),
+        btn.setButtonText(this.cancelLabel).onClick(() => this.close()),
       );
   }
 
