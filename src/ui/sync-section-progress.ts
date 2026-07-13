@@ -54,6 +54,17 @@ export class SyncSectionProgress {
     this.render();
   }
 
+  /** Show the segment as active before plan/execute (local+remote scan). */
+  markScanning(section: VaultSection): void {
+    const seg = this.segments.find((s) => s.section === section);
+    if (!seg) return;
+    seg.state = "active";
+    seg.description = "Scanning changes…";
+    seg.completed = 0;
+    seg.total = 0;
+    this.render();
+  }
+
   /**
    * Update fill % from executor progress for the active section.
    * Prefer this over full re-render so concurrent ops can update often.
@@ -143,7 +154,7 @@ export class SyncSectionProgress {
       this.rootEl.addEventListener("click", () => this.toggleMinimized());
 
       const header = this.rootEl.createDiv({ cls: "dbx-sync-explorer-progress-header" });
-      header.createSpan({ text: "Manual sync", cls: "dbx-sync-explorer-progress-title" });
+      header.createSpan({ text: "Sync", cls: "dbx-sync-explorer-progress-title" });
       this.toggleBtn = header.createEl("button", {
         cls: "dbx-sync-explorer-progress-toggle",
         attr: { type: "button", "aria-label": "Minimize" },

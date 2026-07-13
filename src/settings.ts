@@ -37,6 +37,11 @@ export interface PluginSettings {
   backgroundSyncSections: BackgroundSyncSections;
   /** Debounce before syncing after vault file change events (seconds). */
   vaultEventDebounceSec: VaultEventDebounceSec;
+  /**
+   * When a background sync plans more than this many actions, show progress UI
+   * and allow cancel like a manual Sync now (default 10 → promote when > 10).
+   */
+  largeSyncInteractiveThreshold: number;
   conflictStrategy: ConflictStrategy;
   deleteProtection: boolean;
   deleteThreshold: number;
@@ -59,6 +64,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   backgroundSyncEnabled: false,
   backgroundSyncSections: { ...DEFAULT_BACKGROUND_SYNC_SECTIONS },
   vaultEventDebounceSec: 2,
+  largeSyncInteractiveThreshold: 10,
   conflictStrategy: "keep_both",
   deleteProtection: true,
   deleteThreshold: 5,
@@ -189,6 +195,13 @@ export function migrateSettings(
   }
   if (migrated.includeHiddenFilesAndFolders === undefined) {
     migrated.includeHiddenFilesAndFolders = false;
+  }
+  if (
+    migrated.largeSyncInteractiveThreshold === undefined
+    || typeof migrated.largeSyncInteractiveThreshold !== "number"
+    || migrated.largeSyncInteractiveThreshold < 1
+  ) {
+    migrated.largeSyncInteractiveThreshold = 10;
   }
   return migrated;
 }

@@ -229,6 +229,23 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           }),
       );
+
+    new Setting(containerEl)
+      .setName("Large sync progress threshold")
+      .setDesc(
+        "When a background sync plans more than this many file actions, show the progress bar "
+        + "and allow cancel like Sync now. Default 10.",
+      )
+      .addSlider((slider) =>
+        slider
+          .setLimits(1, 100, 1)
+          .setValue(this.plugin.settings.largeSyncInteractiveThreshold)
+          .setDynamicTooltip()
+          .onChange(async (value) => {
+            this.plugin.settings.largeSyncInteractiveThreshold = value;
+            await this.plugin.saveSettings();
+          }),
+      );
   }
 
   /** Explains that Sync now picks sections in the modal, separate from background toggles. */

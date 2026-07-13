@@ -99,6 +99,13 @@ export default class DropboxSyncPlugin extends Plugin {
   private lastManualCreateReport = false;
   /** Scope modal open — ribbon stays idle until user picks an option. */
   private scopeModalOpen = false;
+  /**
+   * True for Sync now, or after a background sync is promoted because the plan
+   * exceeded largeSyncInteractiveThreshold (progress + notices + cancel UX).
+   */
+  private interactiveUi = false;
+  /** Background sections used when promoting mid-cycle to interactive progress. */
+  private backgroundPromoteSections: VaultSection[] | null = null;
 
   get isSyncing(): boolean {
     return this.syncing;
@@ -402,6 +409,11 @@ export default class DropboxSyncPlugin extends Plugin {
 
     const startedAt = Date.now();
     this.syncing = true;
+    // Manual always gets interactive UX; background may promote after plan is ready.
+    this.interactiveUi = manual;
+    this.backgroundPromoteSections = manual
+      ? null
+      : getEnabledBackgroundSections(this.settings);
     this.clearSyncTimer();
     this.abortController = new AbortController();
     this.longpoll?.stop();
@@ -440,7 +452,7 @@ export default class DropboxSyncPlugin extends Plugin {
       }
     }
 
-    if (manual) notifySyncStart();
+    if (this.interactiveUi) notifySyncStart();
     void this.log(`sync started (v${this.manifest.version}, scope: ${scopeLabel})`);
 
     try {
@@ -456,10 +468,12 @@ export default class DropboxSyncPlugin extends Plugin {
       this.conflictTotal = 0;
 
       // Manual: one section at a time (notes → settings → plugins → workspaces) with
-      // explorer progress segments. Background keeps a single multi-section cycle.
+      // explorer progress segments. Background keeps a single multi-section cycle
+      // unless the plan exceeds largeSyncInteractiveThreshold (then progress UI attaches).
       if (manual && manualSections) {
         this.sectionProgress?.destroy();
         this.sectionProgress = new SyncSectionProgress(this.app);
+        // Show immediately so a long scan still has a visible "Scanning changes…" segment.
         this.sectionProgress.show(manualSections);
 
         const aggregatedSucceeded: SyncResult["succeeded"] = [];
@@ -477,7 +491,7 @@ export default class DropboxSyncPlugin extends Plugin {
           const isLast = i === manualSections.length - 1;
           engine.setDeferCursorUpdate(!isLast);
           engine.setSyncSections([section], configDir);
-          this.sectionProgress.markActive(section);
+          this.sectionProgress.markScanning(section);
           liveReport?.line(`## ${SYNC_SCOPE_LABELS[section]}`);
           this.statusBar?.update("syncing", SYNC_SCOPE_LABELS[section]);
 
@@ -571,6 +585,24 @@ export default class DropboxSyncPlugin extends Plugin {
 
         this.engineMgr?.persistDeleteLog();
 
+        if (this.interactiveUi && this.sectionProgress && this.progressSection) {
+          const sectionFeedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
+          this.sectionProgress.markResult(
+            this.progressSection,
+            outcomeToSectionState(sectionFeedback.outcome),
+            sectionFeedback.summary,
+          );
+          // Remaining promoted segments share the overall outcome for this single cycle.
+          for (const section of this.backgroundPromoteSections ?? []) {
+            if (section === this.progressSection) continue;
+            this.sectionProgress.markResult(
+              section,
+              outcomeToSectionState(sectionFeedback.outcome),
+              sectionFeedback.summary,
+            );
+          }
+        }
+
         const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
         outcome = feedback.outcome;
         endMessage = feedback.endMessage;
@@ -583,7 +615,10 @@ export default class DropboxSyncPlugin extends Plugin {
     } catch (e) {
       this.getOrCreateEngine().setDeferCursorUpdate(false);
       if (e instanceof Error && e.name === "AbortError") {
-        this.sectionProgress?.markInterrupted(currentManualSection, "Cancelled");
+        this.sectionProgress?.markInterrupted(
+          currentManualSection ?? this.progressSection,
+          "Cancelled",
+        );
         await this.log("sync aborted");
         outcome = "aborted";
         endMessage = "Dropbox Sync: cancelled";
@@ -592,7 +627,10 @@ export default class DropboxSyncPlugin extends Plugin {
         return;
       }
       if (e instanceof DropboxAuthError) {
-        this.sectionProgress?.markInterrupted(currentManualSection, "Auth error");
+        this.sectionProgress?.markInterrupted(
+          currentManualSection ?? this.progressSection,
+          "Auth error",
+        );
         await this.log("auth error — token revoked", e);
         this.settings.accessToken = "";
         this.settings.tokenExpiry = 0;
@@ -605,7 +643,10 @@ export default class DropboxSyncPlugin extends Plugin {
         this.statusBar?.update("error", "auth expired");
         return;
       }
-      this.sectionProgress?.markInterrupted(currentManualSection, (e as Error).message?.slice(0, 80) || "Error");
+      this.sectionProgress?.markInterrupted(
+        currentManualSection ?? this.progressSection,
+        (e as Error).message?.slice(0, 80) || "Error",
+      );
       await this.log("sync error", e);
       outcome = "error";
       errorMessage = (e as Error).message;
@@ -616,8 +657,8 @@ export default class DropboxSyncPlugin extends Plugin {
     } finally {
       const endedAt = Date.now();
       setRibbonSyncing(this.ribbonEl, false);
-      // Manual finish stays until dismissed so the result is not missed; start notice still auto-hides.
-      if (manual) notifySyncEnd(endMessage, 0);
+      // Interactive finish stays until dismissed so the result is not missed; start notice still auto-hides.
+      if (this.interactiveUi) notifySyncEnd(endMessage, 0);
 
       const reportInput: SyncReportInput = {
         startedAt,
@@ -648,6 +689,8 @@ export default class DropboxSyncPlugin extends Plugin {
       }
 
       this.syncing = false;
+      this.interactiveUi = false;
+      this.backgroundPromoteSections = null;
       this.progressSection = null;
       this.syncDeletedByEngine.clear();
       this.abortController = null;
@@ -785,6 +828,31 @@ export default class DropboxSyncPlugin extends Plugin {
     return { fs, remote, store };
   }
 
+  /**
+   * Attach manual-like progress/notices when a background plan exceeds the threshold.
+   * Called mid-cycle after planning so execute still drives the segment fill.
+   */
+  private promoteBackgroundToInteractive(actionCount: number, threshold: number): void {
+    this.interactiveUi = true;
+    const sections =
+      this.backgroundPromoteSections ?? getEnabledBackgroundSections(this.settings);
+    void this.log(
+      `large background sync: ${actionCount} actions > ${threshold} — interactive UI`,
+    );
+    notifySyncStart();
+    this.sectionProgress?.destroy();
+    this.sectionProgress = new SyncSectionProgress(this.app);
+    this.sectionProgress.show(sections);
+    const first = sections[0];
+    if (first) {
+      this.progressSection = first;
+      this.sectionProgress.markActive(first);
+    }
+    if (!this.scopeModalOpen) {
+      setRibbonSyncing(this.ribbonEl, true);
+    }
+  }
+
   private createEngineOptions() {
     return {
       conflictStrategy: this.settings.conflictStrategy,
@@ -842,6 +910,19 @@ export default class DropboxSyncPlugin extends Plugin {
       },
       strictLocalPaths: Platform.isIosApp || Platform.isMobile,
       onPathIssues: (issues: PathGuardIssue[]) => this.handlePathIssues(issues),
+      onPlanReady: async (plan: SyncPlan) => {
+        if (this.interactiveUi) {
+          // Flip Scanning → Syncing once the plan exists (execute follows).
+          if (this.progressSection) {
+            this.sectionProgress?.markActive(this.progressSection);
+          }
+          return;
+        }
+        const threshold = this.settings.largeSyncInteractiveThreshold ?? 10;
+        // plan.items excludes noops — count is the actionable change volume.
+        if (plan.items.length <= threshold) return;
+        this.promoteBackgroundToInteractive(plan.items.length, threshold);
+      },
       onProgress: (completed: number, total: number, failed: number) => {
         const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
         const failHint = failed > 0 ? ` · ${failed} failed` : "";

@@ -50,6 +50,11 @@ export interface SyncEngineOptions {
   concurrency?: number;
   /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수, 실패 수) */
   onProgress?: (completed: number, total: number, failed: number) => void;
+  /**
+   * Called after the plan is built (non-noop actions only) and before guards/execute.
+   * Used to promote a large background sync to interactive progress UI.
+   */
+  onPlanReady?: (plan: SyncPlan) => void | Promise<void>;
   /** conflict 직렬 실행 전 호출. conflict 총 수 전달. */
   onConflictCount?: (count: number) => void;
   /** 사이클 리포트 활성화 */
@@ -345,6 +350,9 @@ export class SyncEngine {
       emitDiagnosticsPhaseLines(this.liveReport, "plan", this.lastDiagnostics);
     }
     await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
+
+    // Let the host promote UI (e.g. large background → interactive) before execute.
+    await this.options.onPlanReady?.(plan);
 
     // 7. 삭제 가드 적용
     const { planToExecute, deletesSkipped } = await this.applyDeleteGuard(plan, ctx);
