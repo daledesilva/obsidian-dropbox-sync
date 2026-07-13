@@ -87,7 +87,6 @@ export default class DropboxSyncPlugin extends Plugin {
   private conflictIndex = 0;
   private conflictTotal = 0;
   private syncDeletedByEngine = new Set<string>();
-  private deleteGuardApproved = false;
   private deleteConfirmModal: DeleteConfirmModal | null = null;
   private incompatiblePathsModal: IncompatiblePathsModal | null = null;
   /** applyPathRenames 중 vault rename → trackDelete 억제 */
@@ -785,22 +784,17 @@ export default class DropboxSyncPlugin extends Plugin {
       },
       deleteProtection: this.settings.deleteProtection,
       deleteThreshold: this.settings.deleteThreshold,
-      onDeleteGuardTriggered: (guard: DeleteGuardResult): Promise<boolean> => {
-        // Previously approved deletions — execute without modal
-        if (this.deleteGuardApproved) {
-          this.deleteGuardApproved = false;
-          return Promise.resolve(true);
-        }
-        // Already showing a delete confirm modal — skip duplicate
+      // Await the modal so Delete/Skip applies to this cycle. Returning false
+      // immediately used to always strip deletes; a later flag+debounce never
+      // re-ran reliably (e.g. background sync off), so both choices looked like Skip.
+      onDeleteGuardTriggered: async (guard: DeleteGuardResult): Promise<boolean> => {
         if (this.deleteConfirmModal) {
-          return Promise.resolve(false);
+          return false;
         }
-        // Non-blocking: skip deletions now, show modal async.
-        // If user approves, flag it and schedule follow-up sync.
         const modal = new DeleteConfirmModal(this.app, guard.deleteItems);
         this.deleteConfirmModal = modal;
-        void modal.waitForConfirmation().then((approved) => {
-          this.deleteConfirmModal = null;
+        try {
+          const approved = await modal.waitForConfirmation();
           const remote = guard.deleteItems.filter((i) => i.action.type === "deleteRemote").length;
           const local = guard.deleteItems.filter((i) => i.action.type === "deleteLocal").length;
           void this.log(
@@ -809,12 +803,10 @@ export default class DropboxSyncPlugin extends Plugin {
               : `delete guard: user skipped ${guard.deleteItems.length} deletions`,
             { remote, local, threshold: this.settings.deleteThreshold },
           );
-          if (approved) {
-            this.deleteGuardApproved = true;
-            this.scheduleDebouncedSync();
-          }
-        });
-        return Promise.resolve(false);
+          return approved;
+        } finally {
+          this.deleteConfirmModal = null;
+        }
       },
       isFileActive: (path: string) => this.app.workspace.getActiveFile()?.path === path,
       excludePatterns: this.settings.excludePatterns,
