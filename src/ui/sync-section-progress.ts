@@ -1,4 +1,4 @@
-import { setIcon, type App, type WorkspaceLeaf } from "obsidian";
+import { Notice, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 
 export type SectionProgressState = "pending" | "active" | "success" | "partial" | "failed";
@@ -11,6 +11,21 @@ export interface SectionProgressSegment {
   completed: number;
   /** Plan operations total for this section; 0 until execute reports a total. */
   total: number;
+}
+
+/**
+ * True when at least one file-explorer leaf is laid out and visible.
+ * Collapsed sidebars / no explorer leaf → false (segment Notices should fill in).
+ */
+export function isFileExplorerVisible(app: App): boolean {
+  const leaves = app.workspace.getLeavesOfType("file-explorer");
+  for (const leaf of leaves) {
+    const el = (leaf.view as { containerEl?: HTMLElement }).containerEl;
+    if (!el) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width > 0 && rect.height > 0) return true;
+  }
+  return false;
 }
 
 /**
@@ -28,6 +43,13 @@ export class SyncSectionProgress {
   private segments: SectionProgressSegment[] = [];
   private fillEls = new Map<VaultSection, HTMLElement>();
   private layoutHandler: (() => void) | null = null;
+  /**
+   * When true for this run, emit Notices for segment start/end because the explorer
+   * was closed at show() (or later checks find it closed).
+   */
+  private segmentNoticesEnabled = false;
+  /** Pending end message to combine with the next segment start into one Notice. */
+  private pendingEndedNotice: string | null = null;
 
   constructor(private app: App) {}
 
@@ -40,8 +62,53 @@ export class SyncSectionProgress {
       completed: 0,
       total: 0,
     }));
+    // Sticky for the run: closed at start keeps Notices even if the user opens explorer later.
+    this.segmentNoticesEnabled = !isFileExplorerVisible(this.app);
+    this.pendingEndedNotice = null;
     this.mount();
     this.render();
+  }
+
+  /**
+   * Notify when a segment ends and/or the next starts. Combines end+start into one Notice
+   * when both are provided (explorer closed / was closed at start).
+   */
+  notifySegmentTransition(ended: string | null, started: string | null): void {
+    if (!this.shouldEmitSegmentNotices()) return;
+    if (ended && started) {
+      new Notice(`Dropbox Sync: ${ended} → ${started}`, 5000);
+      this.pendingEndedNotice = null;
+      return;
+    }
+    if (ended && !started) {
+      // Hold until the next start so end+start can combine; flush on finishSegmentNotices.
+      this.pendingEndedNotice = ended;
+      return;
+    }
+    if (started) {
+      if (this.pendingEndedNotice) {
+        new Notice(`Dropbox Sync: ${this.pendingEndedNotice} → ${started}`, 5000);
+        this.pendingEndedNotice = null;
+      } else {
+        new Notice(`Dropbox Sync: ${started}`, 4000);
+      }
+    }
+  }
+
+  /** Flush a held end Notice at the end of the interactive run. */
+  finishSegmentNotices(): void {
+    if (!this.shouldEmitSegmentNotices()) {
+      this.pendingEndedNotice = null;
+      return;
+    }
+    if (this.pendingEndedNotice) {
+      new Notice(`Dropbox Sync: ${this.pendingEndedNotice}`, 5000);
+      this.pendingEndedNotice = null;
+    }
+  }
+
+  private shouldEmitSegmentNotices(): boolean {
+    return this.segmentNoticesEnabled || !isFileExplorerVisible(this.app);
   }
 
   markActive(section: VaultSection): void {
@@ -131,6 +198,8 @@ export class SyncSectionProgress {
     this.detailEl = null;
     this.toggleBtn = null;
     this.isMinimized = false;
+    this.segmentNoticesEnabled = false;
+    this.pendingEndedNotice = null;
     this.fillEls.clear();
     this.segments = [];
   }
