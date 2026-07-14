@@ -42,6 +42,16 @@ export function setRibbonSyncing(ribbonEl: HTMLElement | null, syncing: boolean)
   if (wasSyncing !== syncing) {
     setIcon(ribbonEl, RIBBON_ICON);
   }
+  // Stop square stays centered and must not spin with the refresh icon.
+  let stopEl = ribbonEl.querySelector(".dbx-sync-ribbon-stop") as HTMLElement | null;
+  if (syncing) {
+    if (!stopEl) {
+      stopEl = ribbonEl.createDiv({ cls: "dbx-sync-ribbon-stop" });
+      setIcon(stopEl, "square");
+    }
+  } else {
+    stopEl?.remove();
+  }
   ribbonEl.setAttr("aria-label", syncing ? "Stop sync" : "Dropbox sync");
 }
 

@@ -1,4 +1,4 @@
-import type { App, WorkspaceLeaf } from "obsidian";
+import { setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 
 export type SectionProgressState = "pending" | "active" | "success" | "partial" | "failed";
@@ -15,13 +15,16 @@ export interface SectionProgressSegment {
 
 /**
  * Sticky footer in the file explorer for manual sync section progress.
- * Stays visible after the run until the user closes it so outcomes remain readable.
+ * Stays visible after the run until the next manual sync replaces it (or unload).
+ * Click the footer to minimize/restore detail text; chevron flips with state.
  * Active segments pulse and fill left-to-right from execute onProgress (completed/total).
  */
 export class SyncSectionProgress {
   private rootEl: HTMLElement | null = null;
   private trackEl: HTMLElement | null = null;
   private detailEl: HTMLElement | null = null;
+  private toggleBtn: HTMLElement | null = null;
+  private isMinimized = false;
   private segments: SectionProgressSegment[] = [];
   private fillEls = new Map<VaultSection, HTMLElement>();
   private layoutHandler: (() => void) | null = null;
@@ -115,22 +118,37 @@ export class SyncSectionProgress {
     this.rootEl = null;
     this.trackEl = null;
     this.detailEl = null;
+    this.toggleBtn = null;
+    this.isMinimized = false;
     this.fillEls.clear();
     this.segments = [];
+  }
+
+  /** Collapse detail lines while keeping title + segment bars visible. */
+  private toggleMinimized(): void {
+    this.isMinimized = !this.isMinimized;
+    this.rootEl?.toggleClass("dbx-sync-explorer-progress-minimized", this.isMinimized);
+    if (this.toggleBtn) {
+      // Down = can minimize; up = can restore.
+      setIcon(this.toggleBtn, this.isMinimized ? "chevron-up" : "chevron-down");
+      this.toggleBtn.setAttr("aria-label", this.isMinimized ? "Expand" : "Minimize");
+    }
   }
 
   private mount(): void {
     if (!this.rootEl) {
       this.rootEl = document.createElement("div");
       this.rootEl.addClass("dbx-sync-explorer-progress");
+      // Whole footer toggles minimize — clearer than a Close control that stopped sync UI.
+      this.rootEl.addEventListener("click", () => this.toggleMinimized());
 
       const header = this.rootEl.createDiv({ cls: "dbx-sync-explorer-progress-header" });
       header.createSpan({ text: "Manual sync", cls: "dbx-sync-explorer-progress-title" });
-      const closeBtn = header.createEl("button", {
-        text: "Close",
-        cls: "dbx-sync-explorer-progress-close",
+      this.toggleBtn = header.createEl("button", {
+        cls: "dbx-sync-explorer-progress-toggle",
+        attr: { type: "button", "aria-label": "Minimize" },
       });
-      closeBtn.addEventListener("click", () => this.destroy());
+      setIcon(this.toggleBtn, "chevron-down");
 
       this.trackEl = this.rootEl.createDiv({ cls: "dbx-sync-section-track" });
       this.detailEl = this.rootEl.createDiv({ cls: "dbx-sync-explorer-progress-detail" });
