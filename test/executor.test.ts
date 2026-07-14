@@ -522,7 +522,8 @@ describe("executePlan", () => {
       onProgress: (completed, total) => progress.push([completed, total]),
     });
 
-    expect(progress).toHaveLength(5);
+    expect(progress).toHaveLength(6); // seed 0/N then one bump per item
+    expect(progress[0]).toEqual([0, 5]);
     expect(progress[progress.length - 1]).toEqual([5, 5]);
     // total은 항상 5
     expect(progress.every(([, t]) => t === 5)).toBe(true);

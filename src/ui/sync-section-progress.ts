@@ -3,13 +3,17 @@ import { SYNC_SCOPE_LABELS, type VaultSection } from "../sync/sync-scope";
 
 export type SectionProgressState = "pending" | "active" | "success" | "partial" | "failed";
 
+export type SectionProgressPhase = "idle" | "scan" | "sync";
+
 export interface SectionProgressSegment {
   section: VaultSection;
   state: SectionProgressState;
   description: string;
-  /** Plan operations finished in this section (execute phase). */
+  /** scan = local list/hash; sync = plan execute. Drives detail copy for counts. */
+  phase: SectionProgressPhase;
+  /** Files/ops finished in the current phase. */
   completed: number;
-  /** Plan operations total for this section; 0 until execute reports a total. */
+  /** Known total for the current phase; 0 means indeterminate (full pulsing fill). */
   total: number;
 }
 
@@ -32,7 +36,8 @@ export function isFileExplorerVisible(app: App): boolean {
  * Sticky footer in the file explorer for manual sync section progress.
  * Stays visible after the run until the next manual sync replaces it (or unload).
  * Click the footer to minimize/restore detail text; chevron flips with state.
- * Active segments pulse and fill left-to-right from execute onProgress (completed/total).
+ * Active segments pulse on the track; fill grows left-to-right once a total is known
+ * (scan file count or execute ops). Unknown total → full fill so the pulse stays visible.
  */
 export class SyncSectionProgress {
   private rootEl: HTMLElement | null = null;
@@ -53,12 +58,13 @@ export class SyncSectionProgress {
 
   constructor(private app: App) {}
 
-  /** Show N segments for the selected sections (notes → settings → plugins → workspaces order). */
+  /** Show N segments for the selected sections (files → settings → plugins → workspaces order). */
   show(sections: VaultSection[]): void {
     this.segments = sections.map((section) => ({
       section,
       state: "pending" as const,
       description: "Waiting…",
+      phase: "idle" as const,
       completed: 0,
       total: 0,
     }));
@@ -115,7 +121,9 @@ export class SyncSectionProgress {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
     seg.state = "active";
+    seg.phase = "sync";
     seg.description = "Syncing…";
+    // Reset counts so scan totals do not leak into execute fill until onProgress.
     seg.completed = 0;
     seg.total = 0;
     this.render();
@@ -126,6 +134,7 @@ export class SyncSectionProgress {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
     seg.state = "active";
+    seg.phase = "scan";
     seg.description = "Scanning changes…";
     seg.completed = 0;
     seg.total = 0;
@@ -133,7 +142,7 @@ export class SyncSectionProgress {
   }
 
   /**
-   * Update fill % from executor progress for the active section.
+   * Update fill % for the active section (local scan or execute).
    * Prefer this over full re-render so concurrent ops can update often.
    */
   updateOperationProgress(section: VaultSection, completed: number, total: number): void {
@@ -142,7 +151,11 @@ export class SyncSectionProgress {
     seg.completed = completed;
     seg.total = total;
     if (total > 0) {
-      seg.description = `Syncing… ${completed}/${total}`;
+      // Context: scan vs sync copy so the footer matches the current phase.
+      seg.description =
+        seg.phase === "scan"
+          ? `Scanning… ${completed}/${total}`
+          : `Syncing… ${completed}/${total}`;
     }
     const fill = this.fillEls.get(section);
     if (fill) {
@@ -290,19 +303,25 @@ export class SyncSectionProgress {
   }
 }
 
-/** Width % for the segment fill: pending empty, finished full, active by completed/total. */
+/**
+ * Width % for the segment fill.
+ * Active with unknown total stays at 100% so the accent fill + pulse remain visible
+ * (regression from moving pulse onto a 0-width fill during scan / pre-execute).
+ */
 function fillPercent(seg: SectionProgressSegment): number {
   if (seg.state === "pending") return 0;
   // Finished with no execute totals (e.g. empty plan) still show a complete bar.
   if (seg.state !== "active" && seg.total <= 0) return 100;
-  if (seg.total <= 0) return 0;
+  // Indeterminate active (scanning before file count, or sync before first onProgress).
+  if (seg.total <= 0) return 100;
   return Math.min(100, Math.round((seg.completed / seg.total) * 100));
 }
 
 function shortLabel(section: VaultSection): string {
   switch (section) {
     case "notes":
-      return "Notes";
+      // Ticket: segment label is "Files" (vault notes + other in-scope files), not "Notes".
+      return "Files";
     case "settings":
       return "Settings";
     case "plugins":

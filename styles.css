@@ -121,24 +121,24 @@
   transition: width 0.15s ease;
 }
 
-/* Active: fill grows with execute progress and keeps pulsing. */
-.dbx-sync-section-seg-active .dbx-sync-section-seg-fill {
+/*
+ * Pulse the track (not only the fill) so activity stays visible when fill is 0%
+ * at the start of a known-total phase, and when fill is full during indeterminate scan.
+ */
+.dbx-sync-section-seg-active .dbx-sync-section-seg-bar {
   animation: dbx-sync-pulse 1s ease-in-out infinite;
 }
 
 .dbx-sync-section-seg-success .dbx-sync-section-seg-fill {
   background: var(--color-green, var(--text-success));
-  animation: none;
 }
 
 .dbx-sync-section-seg-partial .dbx-sync-section-seg-fill {
   background: var(--color-yellow, var(--text-warning));
-  animation: none;
 }
 
 .dbx-sync-section-seg-failed .dbx-sync-section-seg-fill {
   background: var(--color-red, var(--text-error));
-  animation: none;
 }
 
 .dbx-sync-section-seg-label {

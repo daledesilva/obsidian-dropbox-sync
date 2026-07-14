@@ -30,6 +30,8 @@ export interface VaultListStats {
  * sync but never land on disk in a way Obsidian can load.
  */
 export type LocalFileScanCallback = (path: string, detail: "cached" | "hashed" | "disk") => void;
+/** Local list/hash progress for explorer section fill during Scanning…. */
+export type LocalScanProgressCallback = (completed: number, total: number) => void;
 
 export class VaultAdapter implements FileSystem {
   private hashCache = new Map<string, HashCacheEntry>();
@@ -37,6 +39,8 @@ export class VaultAdapter implements FileSystem {
   private abortSignal: AbortSignal | null = null;
   private configDirLower: string;
   onLocalFileScanned: LocalFileScanCallback | null = null;
+  /** Fires after each indexed/disk file is hashed so UI can fill scan progress. */
+  onLocalScanProgress: LocalScanProgressCallback | null = null;
   lastListStats: VaultListStats = {
     vaultIndexed: 0,
     configDiskAdded: 0,
@@ -135,13 +139,22 @@ export class VaultAdapter implements FileSystem {
     const byPath = new Map<string, FileInfo>();
     const nextCache = new Map<string, HashCacheEntry>();
 
-    // Pass 1 — indexed (vault.getFiles)
-    for (const file of this.vault.getFiles()) {
+    // Pass 1 — indexed (vault.getFiles). Total is known up front for scan fill.
+    const indexedFiles = this.vault.getFiles();
+    let scanned = 0;
+    const indexedTotal = indexedFiles.length;
+    // Seed 0/N so the footer leaves indeterminate mode as soon as count is known.
+    if (indexedTotal > 0) {
+      this.onLocalScanProgress?.(0, indexedTotal);
+    }
+    for (const file of indexedFiles) {
       this.abortSignal?.throwIfAborted();
       const info = await this.fileInfoFromIndexed(file, nextCache);
       if (info) {
         byPath.set(info.pathLower, info);
       }
+      scanned++;
+      this.onLocalScanProgress?.(scanned, indexedTotal);
     }
     const vaultIndexed = byPath.size;
 
@@ -158,7 +171,8 @@ export class VaultAdapter implements FileSystem {
         signal: this.abortSignal,
         skipDirPrefixes,
       });
-      configDiskAdded = await this.mergeDiskFiles(diskFiles, byPath, nextCache);
+      configDiskAdded = await this.mergeDiskFiles(diskFiles, byPath, nextCache, scanned);
+      scanned = byPath.size;
     }
 
     let hiddenDiskAdded = 0;
@@ -168,8 +182,9 @@ export class VaultAdapter implements FileSystem {
         skipDirPrefixes,
       });
       const before = byPath.size;
-      await this.mergeDiskFiles(diskFiles, byPath, nextCache);
+      await this.mergeDiskFiles(diskFiles, byPath, nextCache, scanned);
       hiddenDiskAdded = byPath.size - before;
+      scanned = byPath.size;
     }
 
     const mergedBeforeExclude = byPath.size;
@@ -294,8 +309,16 @@ export class VaultAdapter implements FileSystem {
     diskFiles: { path: string; mtime: number; size: number }[],
     byPath: Map<string, FileInfo>,
     nextCache: Map<string, HashCacheEntry>,
+    scannedBefore: number,
   ): Promise<number> {
     let added = 0;
+    // New disk paths only — total grows as we discover files not already indexed.
+    const newDiskCount = diskFiles.filter((d) => !byPath.has(d.path.toLowerCase())).length;
+    let scanned = scannedBefore;
+    const scanTotal = scannedBefore + newDiskCount;
+    if (newDiskCount > 0) {
+      this.onLocalScanProgress?.(scanned, scanTotal);
+    }
     for (const disk of diskFiles) {
       this.abortSignal?.throwIfAborted();
       const pathLower = disk.path.toLowerCase();
@@ -322,6 +345,8 @@ export class VaultAdapter implements FileSystem {
         size: disk.size,
       });
       added++;
+      scanned++;
+      this.onLocalScanProgress?.(scanned, scanTotal);
     }
     return added;
   }

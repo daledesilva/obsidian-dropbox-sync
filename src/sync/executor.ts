@@ -108,6 +108,9 @@ export async function executePlan(
   const succeeded: SyncPlanItem[] = [];
   const failed: { item: SyncPlanItem; error: Error }[] = [];
 
+  // Seed 0/N so the active segment leaves indeterminate full-fill as soon as execute starts.
+  ctx.onProgress?.(0, total);
+
   const bumpProgress = () => {
     completed++;
     ctx.onProgress?.(completed, total);
