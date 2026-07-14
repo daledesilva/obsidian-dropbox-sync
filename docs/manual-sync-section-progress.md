@@ -1,48 +1,71 @@
-# Manual sync section progress
+# Interactive sync progress
 
 ## Why it exists
 
-Manual sync can run several vault sections in sequence (notes → settings → plugins → workspaces). Without per-section feedback, a long run looks like one opaque spinner. The file-explorer progress footer shows which section is active, how far that section’s execute phase has gone, and each section’s final outcome — and stays visible until the user closes it.
+Long syncs need visible structure: which vault section is running, whether the run is cancellable, and what happened when the file explorer (where the progress footer lives) is hidden. Interactive progress covers **manual Sync now** and **large background syncs** that cross a configurable action threshold so those runs get the same progress / cancel / notice UX.
 
 ## Conceptual understanding
 
-- **Manual only.** Background sync does not show this footer.
-- **One segment per selected section.** Pending segments wait; the active segment fills; finished segments keep a full bar in success / partial / failed color.
-- **Fill tracks execute ops.** Width is `completed / total` from the SyncEngine executor’s `onProgress` callback for the section currently running — not planner time, not wall-clock.
-- **Detail line.** Under the bars, each section shows a short status string (e.g. `Syncing… 12/40` or the post-run summary).
+- **Interactive UI** means: explorer progress footer, start/end Notices, rotating ribbon with a stop affordance, and confirmed cancel from the ribbon.
+- **Manual Sync now** always uses interactive UI. The footer appears **immediately** with a **Scanning changes…** segment so slow local/remote scans are not an invisible wait.
+- **Background sync** stays quiet unless the plan has more actionable items than **Settings → Large sync progress threshold** (default **10** → promote when `plan.items.length > 10`). `plan.items` excludes noops.
+- **Minimize, don’t close.** Click the progress footer (or the chevron) to hide only the detail text; title and segment bars stay. There is no Close control that destroys the footer mid-run.
+- **Ribbon while syncing.** The refresh icon spins; a non-rotating stop square sits in the center. Clicking asks **Cancel sync** / **Keep syncing** before aborting.
+- **Explorer closed.** If the file explorer is not visible at footer `show()` (or later), segment start/end become Notices; adjacent end→start combine into one Notice.
 
 ## Flows
 
+### Manual section run
+
 ```mermaid
 flowchart TD
-  ManualSync[Manual sync starts] --> ShowFooter[Show explorer footer with N pending segments]
-  ShowFooter --> NextSection[Next section]
-  NextSection --> MarkActive[markActive: reset fill, pulse]
-  MarkActive --> Execute[runCycle execute]
-  Execute --> OnProgress[onProgress completed/total]
-  OnProgress --> UpdateFill[updateOperationProgress: width + detail]
-  UpdateFill --> Execute
-  Execute --> MarkResult[markResult: full bar + outcome color]
-  MarkResult --> More{More sections?}
-  More -->|yes| NextSection
-  More -->|no| StayOpen[Footer stays until Close]
+  Start[Manual sync] --> Footer[Show footer + markScanning]
+  Footer --> Cycle[runCycle]
+  Cycle --> PlanReady[onPlanReady: markActive Syncing]
+  PlanReady --> Exec[Execute + onProgress fill]
+  Exec --> Result[markResult]
+  Result --> Notice{Explorer closed?}
+  Notice -->|yes| SegNotice[notifySegmentTransition / combine]
+  Notice -->|no| Next
+  SegNotice --> Next{More sections?}
+  Next -->|yes| Footer
+  Next -->|no| Done[finishSegmentNotices + sticky end Notice]
+```
+
+### Large background promotion
+
+```mermaid
+flowchart TD
+  Bg[Background syncNow] --> Quiet[No footer yet]
+  Quiet --> Plan[createPlan]
+  Plan --> Ready[onPlanReady]
+  Ready --> Check{items.length > threshold?}
+  Check -->|no| ExecQuiet[Execute quietly]
+  Check -->|yes| Promote[promoteBackgroundToInteractive]
+  Promote --> Footer[Show footer + notices]
+  Footer --> ExecVis[Continue same cycle execute with fill]
 ```
 
 ## Technical details
 
 | Piece | Role |
 |---|---|
-| `SyncSectionProgress` (`src/ui/sync-section-progress.ts`) | Mounts a sticky footer under the file explorer; owns segment state and fill DOM |
-| `progressSection` on the plugin (`src/main.ts`) | Which section’s fill `onProgress` should drive during sequential manual runs |
-| `updateOperationProgress` | Patches fill width and detail without rebuilding the whole track (frequent execute ticks) |
-| `fillPercent` | Pending → 0%; active with unknown total → 0%; finished with no totals → 100%; else `completed/total` |
-| CSS (`.dbx-sync-section-seg-fill`) | Track is empty border color; fill grows L→R; active fill pulses |
+| `interactiveUi` (`src/main.ts`) | True for manual runs, or after background promotion; drives Notices and end sticky Notice |
+| `largeSyncInteractiveThreshold` | Setting (default 10); promote when actionable plan size is **greater than** this value |
+| `onPlanReady` (`SyncEngine`) | After plan, before guards/execute — flips Scanning→Syncing, or promotes background UI |
+| `SyncSectionProgress` | Footer mount, minimize, scanning/active/result, segment Notices |
+| `isFileExplorerVisible` | Layout-size check on file-explorer leaves |
+| `setRibbonSyncing` | Spin class + centered non-spinning stop square overlay |
+| `handleRibbonClick` / `ConfirmModal` | Confirm before `cancelCurrentSync` |
 
-Wiring: before each manual `runCycle`, the plugin sets `progressSection` and calls `markActive`. The shared executor `onProgress` handler updates the status bar always, and the explorer fill only when `progressSection` is set. On sync teardown, `progressSection` is cleared so leftover callbacks cannot paint a stale segment.
+Minimize: root click toggles `.dbx-sync-explorer-progress-minimized` and flips chevron down↔up. Chevron is decorative for that same toggle (single handler on the footer).
+
+Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility at start (sticky for the run). `notifySegmentTransition(ended, started)` holds a lone end until the next start so transitions combine; `finishSegmentNotices` flushes a trailing end.
 
 ## Technical Gotchas
 
-- **Background sync has no `progressSection`.** Status bar still shows `% · completed/total`; the explorer footer is not used.
-- **Do not full-re-render on every op.** `updateOperationProgress` writes `fill.style.width` and refreshes detail only; rebuilding the track would drop the fill element map mid-update.
-- **Empty plans.** If execute never reports a total, `markResult` forces a full bar so finished segments still read as complete in their outcome color.
-- **Interrupted runs.** Cancel / auth / error paths call `markInterrupted`, which fails the current and later segments; fill width still snaps to full via `markResult`-style completion when applicable, or via the failed-state styling on re-render.
+- **Promotion is mid-cycle.** Background still runs one multi-section `runCycle`; the footer attaches after the plan exists, so the scan phase for that promote may already be finished — UI jumps to Syncing/execute fill.
+- **Do not use bare `gh`-style host confusion here.** Interactive vs quiet is owned by `interactiveUi`, not by whether the ribbon happens to be spinning (background also spins the ribbon).
+- **Promotion count is `plan.items.length`.** Noops are never in `items`; do not subtract `stats.noop` again.
+- **Explorer “closed” is geometric.** Collapsed sidebars / zero-size leaves count as hidden even if a leaf still exists in the workspace.
+- **Footer replacement.** A new interactive run destroys/rebuilds `SyncSectionProgress`; leftover Close semantics from older builds were removed on purpose.

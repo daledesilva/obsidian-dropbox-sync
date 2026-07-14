@@ -351,7 +351,7 @@ export class SyncEngine {
     }
     await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
 
-    // Let the host promote UI (e.g. large background → interactive) before execute.
+    // Host may promote large background syncs to interactive UI before execute.
     await this.options.onPlanReady?.(plan);
 
     // 7. 삭제 가드 적용

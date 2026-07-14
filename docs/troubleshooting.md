@@ -40,14 +40,24 @@ If you recently changed the **Vault ID**, the plugin is now syncing to a differe
 
 ## "X deletions skipped by protection"
 
-This is the safety guard doing its job. A sync tried to delete more files than the threshold allows.
+This is the safety guard doing its job. A sync tried to delete more files than the threshold allows, and you chose **Skip deletions** (or dismissed the modal without approving).
 
 If the deletions are intentional:
-1. Sync again — the confirmation window will appear
+1. Start sync again when the confirm window appears
 2. Review the file list
-3. Click **Delete** to proceed
+3. Click **Delete** — those deletions run in **that same** cycle (the plugin waits for your answer)
 
 If this happens often, you can increase the threshold in **Settings > Delete threshold**.
+
+See [Sync Safety](sync-safety.md) for the three safety layers.
+
+## Ribbon keeps spinning after sync stopped
+
+Cancel should only abort the in-flight cycle; the spin clears when that cycle’s `finally` runs. If the icon still spins after a clear “cancelled” or finished Notice, reload the plugin (Hot Reload) and check logs. See [Sync execute isolation and cancel](sync-execute-isolation.md).
+
+## Sync seems stuck on a few files
+
+Slow or hanging uploads/downloads free their parallel slot after ~90 seconds and retry once at the end of the batch so other files keep moving. Persistent failures show in the sync result / logs. Details: [Sync execute isolation and cancel](sync-execute-isolation.md).
 
 ## Conflicts keep coming back
 
