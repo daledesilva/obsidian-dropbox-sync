@@ -361,9 +361,9 @@ export default class DropboxSyncPlugin extends Plugin {
   cancelCurrentSync(): void {
     if (!this.syncing) return;
     this.abortController?.abort();
-    this.syncing = false;
-    this.abortController = null;
-    setRibbonSyncing(this.ribbonEl, false);
+    // Do not clear syncing/ribbon here — syncNow's finally owns cleanup so a
+    // follow-up sync cannot start while an aborted cycle is still unwinding
+    // (which previously left the ribbon spinning or cleared a newer run's spin).
     this.statusBar?.update("idle", "stopping…");
     new Notice("Dropbox Sync: stopping…", 2000);
   }
