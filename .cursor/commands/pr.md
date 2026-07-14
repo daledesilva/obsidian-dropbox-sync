@@ -14,16 +14,34 @@ Any text after `/pr` is optional context — e.g. a ClickUp task ID (`/pr 86abc1
 - Never use git commands with the `-i` flag
 - If the branch has no commits ahead of the base branch, report that and stop — do not open an empty PR
 
+## PR host repo (forks)
+
+Always open PRs against the repository that **`origin`** points to (this checkout / your account), **not** against an `upstream` parent unless the user explicitly asks to contribute upstream.
+
+1. Resolve once at the start:
+   ```bash
+   ORIGIN_URL=$(git remote get-url origin)
+   # Normalize to owner/name (strip scheme, host, .git, trailing slash)
+   ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL" | sed -E 's#^git@[^:]+:##; s#^https?://[^/]+/##; s#\.git$##; s#/$##')
+   ```
+2. Use that host for all `gh` calls in this command:
+   - `gh repo view "$ORIGIN_REPO" --json defaultBranchRef,nameWithOwner`
+   - `gh pr list --repo "$ORIGIN_REPO" …`
+   - `gh pr view --repo "$ORIGIN_REPO" …`
+   - `gh pr create --repo "$ORIGIN_REPO" …`
+3. Do **not** choose the PR host from bare `gh repo view` / `gh pr create` with no repo argument — on forks that often selects the **parent** (`upstream`).
+4. After create, confirm the PR URL’s `owner/name` matches `$ORIGIN_REPO`. If it does not, stop and fix before updating ClickUp.
+
 ## Steps
 
 1. Run in parallel:
    - `git status` — confirm working tree is clean (or only allow untracked files the user clearly intends to exclude)
    - `git branch -vv` — current branch and upstream tracking
-   - `gh repo view --json defaultBranchRef,nameWithOwner` — default base branch and repo
+   - Resolve `$ORIGIN_REPO` (see **PR host repo**), then `gh repo view "$ORIGIN_REPO" --json defaultBranchRef,nameWithOwner` — default base branch on **origin**
    - Resolve the merge-base base branch: use text after `/pr` if it names a base (e.g. `into develop`); otherwise use the repo default (`main` / `master`)
    - `git log --oneline <base>...HEAD` — commits included in the PR
    - `git diff <base>...HEAD` — full change set for the conceptual summary
-   - `gh pr view --json url,number,state 2>/dev/null` or `gh pr list --head $(git branch --show-current) --json url,number,state` — check for an existing PR on this branch
+   - `gh pr view --repo "$ORIGIN_REPO" --json url,number,state 2>/dev/null` or `gh pr list --repo "$ORIGIN_REPO" --head $(git branch --show-current) --json url,number,state` — check for an existing PR on this branch
 
 2. If uncommitted tracked changes exist, stop and tell the user to `/commit` first.
 
@@ -45,10 +63,10 @@ Any text after `/pr` is optional context — e.g. a ClickUp task ID (`/pr 86abc1
 
 7. Push if needed: `git push` or `git push -u origin <branch>` when no upstream is set. Stop on push failure.
 
-8. Create the PR:
+8. Create the PR (always pass `--repo "$ORIGIN_REPO"`):
 
 ```bash
-gh pr create --base <base> --head <branch> --title "<title>" --body "$(cat <<'EOF'
+gh pr create --repo "$ORIGIN_REPO" --base <base> --head <branch> --title "<title>" --body "$(cat <<'EOF'
 <body>
 EOF
 )"
@@ -61,7 +79,7 @@ EOF
    - Leave status unchanged if the task is already in Review or a later review/done status, but still set or refresh the **PR** field.
    - If MCP is unavailable, the Review status cannot be resolved, or the **PR** field cannot be resolved/updated, report that clearly and ask the user to finish those steps manually.
 
-10. Report the PR URL, title, base branch, commit count, ClickUp tasks linked, ClickUp tasks moved to Review, **PR** field updates, and any warnings (no ClickUp tasks found, MCP unavailable, skipped push, status or PR-field update failed, etc.).
+10. Report the PR URL, title, base branch, **`--repo` / origin host**, commit count, ClickUp tasks linked, ClickUp tasks moved to Review, **PR** field updates, and any warnings (no ClickUp tasks found, MCP unavailable, skipped push, status or PR-field update failed, wrong host, etc.).
 
 ## PR body format
 
@@ -103,6 +121,7 @@ When done, show:
 - PR URL
 - PR title
 - Base ← head branches
+- Host repo (`--repo` / origin `owner/name`)
 - Number of commits included
 - ClickUp tasks linked (IDs + URLs)
 - ClickUp tasks moved to Review (IDs + status), or why they were not moved
