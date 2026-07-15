@@ -939,6 +939,12 @@ export default class DropboxSyncPlugin extends Plugin {
         if (plan.items.length <= threshold) return;
         this.promoteBackgroundToInteractive(plan.items.length, threshold);
       },
+      onScanProgress: (completed: number, total: number) => {
+        // Local list/hash fill while the section is still marked Scanning….
+        if (this.progressSection) {
+          this.sectionProgress?.updateOperationProgress(this.progressSection, completed, total);
+        }
+      },
       onProgress: (completed: number, total: number, failed: number) => {
         const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
         const failHint = failed > 0 ? ` · ${failed} failed` : "";

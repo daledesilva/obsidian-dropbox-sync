@@ -51,6 +51,11 @@ export interface SyncEngineOptions {
   /** 항목 실행 완료 시마다 호출. (완료 수, 전체 수, 실패 수) */
   onProgress?: (completed: number, total: number, failed: number) => void;
   /**
+   * Local vault list/hash progress during the scan phase (before plan).
+   * Drives explorer segment fill while the section is still "Scanning…".
+   */
+  onScanProgress?: (completed: number, total: number) => void;
+  /**
    * Called after the plan is built (non-noop actions only) and before guards/execute.
    * Used to promote a large background sync to interactive progress UI.
    */
@@ -219,6 +224,10 @@ export class SyncEngine {
       this.liveReport?.line(`\`${path}\` (${detail})`);
     };
     this.attachLocalScanCallback(localScanCb);
+    // Drive explorer scan fill from VaultAdapter hashing (indexed + disk merges).
+    this.attachLocalScanProgress((completed, total) => {
+      this.options.onScanProgress?.(completed, total);
+    });
     let localFiles: import("../types").FileInfo[];
     let allLocalFiles: import("../types").FileInfo[] = [];
     const configDiskScan = this.sectionFilter?.some((s) => s !== "notes") ?? false;
@@ -232,6 +241,7 @@ export class SyncEngine {
       localFiles = allLocalFiles.filter((f) => this.pathInScope(f.path));
     } finally {
       this.attachLocalScanCallback(null);
+      this.attachLocalScanProgress(null);
     }
     const listStats =
       fs instanceof VaultAdapter
@@ -489,6 +499,14 @@ export class SyncEngine {
   private attachLocalScanCallback(cb: LocalFileScanCallback | null): void {
     if (this.deps.fs instanceof VaultAdapter) {
       this.deps.fs.onLocalFileScanned = cb;
+    }
+  }
+
+  private attachLocalScanProgress(
+    cb: ((completed: number, total: number) => void) | null,
+  ): void {
+    if (this.deps.fs instanceof VaultAdapter) {
+      this.deps.fs.onLocalScanProgress = cb;
     }
   }
 
