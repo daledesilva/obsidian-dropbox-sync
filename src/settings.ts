@@ -51,6 +51,11 @@ export interface PluginSettings {
   syncOnCreateDeleteRename: boolean;
   /** Deep-scan dotfolders via adapter (whole vault). Off by default; slower. */
   includeHiddenFilesAndFolders: boolean;
+  /**
+   * When false, log() is a no-op (no vault file, console, or Cursor Wi‑Fi ingest).
+   * Default true preserves existing troubleshooting / View logs behavior.
+   */
+  debugLoggingEnabled: boolean;
   onboardingDone: boolean;
 }
 
@@ -73,6 +78,7 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   deviceId: "",
   syncOnCreateDeleteRename: true,
   includeHiddenFilesAndFolders: false,
+  debugLoggingEnabled: true,
   onboardingDone: false,
 };
 
@@ -195,6 +201,10 @@ export function migrateSettings(
   }
   if (migrated.includeHiddenFilesAndFolders === undefined) {
     migrated.includeHiddenFilesAndFolders = false;
+  }
+  // Pre-toggle installs always wrote sync-debug logs; default on so View logs stays useful.
+  if (migrated.debugLoggingEnabled === undefined) {
+    migrated.debugLoggingEnabled = true;
   }
   if (
     migrated.largeSyncInteractiveThreshold === undefined

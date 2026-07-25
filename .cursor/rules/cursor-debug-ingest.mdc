@@ -1,25 +1,30 @@
 ---
-description: Cursor Debug NDJSON ingest — preferred logging for mobile and desktop plugin debugging
+description: Cursor Debug NDJSON ingest — use when debugging mobile/iPad, Wi-Fi logs, sync flakiness, live runtime evidence, or when the user asks to monitor/debug ingest /debug-ingest
 alwaysApply: false
 ---
 
 # Cursor Debug structured ingest (Obsidian plugin)
 
+**This project already has a permanent Wi‑Fi → Cursor Debug ingest pipeline.** When the user asks to debug on iPad/mobile, watch live logs, or set up ingest, follow this rule and `/debug-ingest` — do not invent a parallel logging channel.
+
 Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or any target where a **Cursor Debug** agent session is active and you need **runtime evidence**.
 
 ## Preferred logging method
 
-**Use structured NDJSON ingest** — not ad-hoc `fetch`, not `console.log` alone.
+**Use the permanent gated log path + structured NDJSON ingest** — not ad-hoc `fetch`, not `console.log` alone.
 
 | Do | Don't |
 |----|--------|
-| A shared `postCursorDebugIngest()` helper using Obsidian **`requestUrl`** | `fetch('http://127.0.0.1:7662/…')` inside the plugin |
-| Build-time env vars for session id + ingest path | Assume mobile Safari `console.debug` reaches the agent |
+| `main.log()` / `postCursorDebugIngest()` via Obsidian **`requestUrl`** | `fetch('http://127.0.0.1:7662/…')` inside the plugin |
+| Runtime **device-local** Host / Port / Session ID / Ingest path (Settings → Troubleshooting) | Bake session id into the build as the primary workflow |
 | Read `.cursor/debug-<sessionId>.log` on the host after reproduction | Guess fixes from code alone |
+| Gate on **Debug logging** — when off, `log()` must no-op | Leave ingest POSTs running when logging is disabled |
 
-**Mobile + Wi‑Fi:** expose the host ingest port on the LAN (e.g. **`socat`** relay script). Document the relay command in project `docs/`.
+**Mobile + Wi‑Fi:** run `bash scripts/ingest-lan-relay.sh` (socat). Print pasteable host/port with `bash scripts/print-debug-ingest-settings.sh`. See `docs/cursor-debug-ingest.md`.
 
-**Android + USB:** use **`adb reverse tcp:<ingest-port> tcp:<ingest-port>`** via the project's USB debug bootstrap script when one exists.
+**Android + USB:** use **`adb reverse tcp:<ingest-port> tcp:<ingest-port>`** when a project USB bootstrap script exists; iOS has no adb reverse — use LAN relay.
+
+**Agent command:** `/debug-ingest` (`.cursor/commands/debug-ingest.md`).
 
 ## Deploy while debugging — agent must remind
 
@@ -28,14 +33,15 @@ Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or a
 | Copy local **`dist/`** to device vault | **Yes** |
 | CI / tagged release build | **No** — builds **committed** code at the tag only |
 
-**Before asking the user to reproduce via a release build:** remind them to **commit + push** and wait for CI — **or** copy local **`dist/`** after **`npm run build`**.
+**Before asking the user to reproduce via a release build:** remind them to **commit + push** and wait for CI — **or** copy local **`dist/`** after **`bun run build`**.
 
 ## Agent duties
 
 1. Confirm ingest relay (LAN) or **`adb reverse`** (USB) as appropriate.
-2. Ensure the build includes debug ingest configuration.
+2. Ensure **Debug logging** is on and device-local ingest fields match the active Debug session (path UUID ≠ session slug).
 3. **Remind deploy path** (local `dist/` copy vs release + commit).
 4. Clear **only** the session log file (`.cursor/debug-<sessionId>.log`) before each reproduction run.
-5. Read the log file after reproduction; cite line evidence before fixing.
+5. Prefer **Send test log** in settings to verify the pipeline before diagnosing the real bug.
+6. Read the log file after reproduction; cite line evidence before fixing.
 
-Remove temporary ingest call sites after verified fix. Keep the shared ingest helper module.
+Remove temporary ad-hoc ingest call sites after verified fix. Keep `src/debug/cursor-debug-ingest.ts` and the gated `main.log()` integration.

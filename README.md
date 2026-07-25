@@ -116,7 +116,9 @@ Read more: [How sync safety works](docs/sync-safety.md)
 See the [Troubleshooting guide](docs/troubleshooting.md) for common issues, or check the logs:
 
 - **Command palette** > "Dropbox Sync: View sync logs"
-- **Settings** > Dropbox Sync > Troubleshooting > **View Logs**
+- **Settings** > Dropbox Sync > Troubleshooting → enable **Debug logging** if needed → **View Logs**
+
+For live Cursor Debug ingest from mobile (Wi‑Fi), see [Cursor Debug ingest](docs/cursor-debug-ingest.md).
 
 ---
 
@@ -131,7 +133,7 @@ bun run typecheck  # TypeScript check
 bun test           # Run tests
 ```
 
-Internal docs: moved to Obsidian vault (`inbox/dropbox-sync/`)
+Mobile / agent live logs: [Cursor Debug ingest](docs/cursor-debug-ingest.md) (`/debug-ingest`, `scripts/ingest-lan-relay.sh`).
 
 </details>
 

@@ -37,3 +37,15 @@ UI Layer → SyncEngine (Planner → Executor) → Adapters (FileSystem, RemoteS
 4. **path_lower keys**: Dropbox is case-insensitive; use `path_lower` as the comparison key
 5. **Dev deploy target**: after buildable changes, `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/` — Hot Reload picks up `.hotreload`; do not ask the user to reload manually
 6. **Test vault**: `~/Documents/sync-tester/` is for Dropbox integration testing, not a production vault
+
+## Mobile / Cursor Debug ingest (live logs)
+
+When debugging on **iPad/mobile** (or any device where the agent needs live runtime logs on the Mac):
+
+1. Follow **`/debug-ingest`** (`.cursor/commands/debug-ingest.md`) and **`.cursor/rules/cursor-debug-ingest.mdc`**
+2. Start LAN relay: `bash scripts/ingest-lan-relay.sh` (needs `socat`); print Host/Port with `bash scripts/print-debug-ingest-settings.sh`
+3. Plugin path: Settings → Troubleshooting → **Debug logging** + device-local Cursor Host / Port / Session ID / Ingest path → **Send test log**
+4. Ordinary plugin logs go through gated `main.log()` → vault file + Wi‑Fi NDJSON when ingest is configured (`src/debug/cursor-debug-ingest.ts`)
+5. Docs: `docs/cursor-debug-ingest.md`
+
+Do **not** invent a new logging pipe or use `fetch` to localhost — use the existing ingest workflow.

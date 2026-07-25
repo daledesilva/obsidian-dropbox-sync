@@ -84,7 +84,7 @@ The code can only be used once and expires quickly, so paste it promptly.
 
 ## How to check the logs
 
-Logs can help diagnose what's going wrong. Two ways to access them:
+Logs can help diagnose what's going wrong. First ensure **Settings > Dropbox Sync > Troubleshooting > Debug logging** is on (it is on by default). Then:
 
 1. Open the **command palette** (Ctrl/Cmd+P) and search for "View sync logs"
 2. Go to **Settings > Dropbox Sync > Troubleshooting > View Logs**
@@ -93,3 +93,5 @@ Logs can help diagnose what's going wrong. Two ways to access them:
 <!-- 파일: docs/images/log-viewer.png -->
 
 You can copy the logs to your clipboard to share when reporting issues.
+
+For live logs on an agent’s Mac during a Cursor Debug session (including from iPad over Wi‑Fi), see [Cursor Debug ingest](cursor-debug-ingest.md).

@@ -29,6 +29,7 @@ import { DesktopAuth } from "./auth/desktop-auth";
 import { LongpollManager } from "./sync/longpoll";
 import { EngineManager } from "./sync/engine-manager";
 import { LogManager } from "./log-manager";
+import { postCursorDebugLogLine } from "./debug/cursor-debug-ingest";
 import { registerDemoCommands } from "./debug/demo-commands";
 import type { SyncEngine } from "./sync/engine";
 
@@ -115,12 +116,31 @@ export default class DropboxSyncPlugin extends Plugin {
   private longpoll: LongpollManager | null = null;
   private engineMgr: EngineManager | null = null;
 
+  /**
+   * Central log entry: gated by debugLoggingEnabled.
+   * When on, writes the vault sync-debug file and best-effort POSTs to Cursor
+   * Debug ingest when device-local host/path are configured.
+   */
   private log(msg: string, data?: unknown): Promise<void> {
+    if (!this.settings.debugLoggingEnabled) {
+      return Promise.resolve();
+    }
+    // Fire-and-forget Wi‑Fi ingest so local flush is not delayed by requestUrl.
+    postCursorDebugLogLine(msg, data);
     if (!this.logger) {
       console.debug("[Dropbox Sync]", msg, data ?? "");
       return Promise.resolve();
     }
     return this.logger.log(msg, data);
+  }
+
+  /** Settings "Send test log" — verifies local file + optional Cursor ingest. */
+  async sendDebugLogCanary(): Promise<void> {
+    await this.log("cursor-debug-ingest canary", {
+      deviceId: this.settings.deviceId || "unknown",
+      platform: Platform.isMobile ? "mobile" : "desktop",
+    });
+    await this.logger?.flush();
   }
 
   // ── Lifecycle ──

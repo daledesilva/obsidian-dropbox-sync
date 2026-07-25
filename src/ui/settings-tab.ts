@@ -20,6 +20,12 @@ import {
 } from "../adapters/dropbox-auth";
 import { LogViewerModal } from "./log-viewer-modal";
 import { isExcluded } from "../exclude";
+import {
+  patchDeviceSettings,
+  readDeviceSettings,
+} from "../device-settings/device-settings";
+import { DEFAULT_CURSOR_DEBUG_PORT } from "../device-settings/device-settings-defaults";
+import { isCursorDebugIngestConfigured } from "../debug/cursor-debug-ingest";
 
 const DOCS_BASE = "https://github.com/zeakd/obsidian-dropbox-sync/blob/main/docs";
 
@@ -102,6 +108,24 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     const tsLink = troubleshootingFrag.createEl("a", { text: "Troubleshooting guide", href: `${DOCS_BASE}/troubleshooting.md` });
     tsLink.setAttr("target", "_blank");
     new Setting(containerEl).setName("Troubleshooting").setDesc(troubleshootingFrag).setHeading();
+
+    new Setting(containerEl)
+      .setName("Debug logging")
+      .setDesc(
+        "When off, sync debug logs are not written and nothing is sent to Cursor. When on, logs go to the vault file and (if configured below) over Wi‑Fi to Cursor Debug ingest.",
+      )
+      .addToggle((toggle) =>
+        toggle.setValue(this.plugin.settings.debugLoggingEnabled).onChange(async (value) => {
+          this.plugin.settings.debugLoggingEnabled = value;
+          await this.plugin.saveSettings();
+          this.display();
+        }),
+      );
+
+    if (this.plugin.settings.debugLoggingEnabled) {
+      this.renderCursorDebugIngestSettings(containerEl);
+    }
+
     new Setting(containerEl)
       .setName("View sync logs")
       .setDesc(`Device: ${this.plugin.settings.deviceId || "unknown"}`)
@@ -109,6 +133,105 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
         btn.setButtonText("View logs").onClick(async () => {
           const content = await this.plugin.readLogs();
           new LogViewerModal(this.app, content, this.plugin.settings.deviceId).open();
+        }),
+      );
+  }
+
+  /**
+   * Device-local Cursor Debug target. Host/session must not live in synced
+   * data.json — each machine needs its own Mac LAN IP and Debug session path.
+   */
+  private renderCursorDebugIngestSettings(containerEl: HTMLElement): void {
+    const device = readDeviceSettings();
+    const ingestDocs = document.createDocumentFragment();
+    ingestDocs.appendText(
+      "Live Cursor Debug ingest (device-local). Start a Cursor Debug session, run ",
+    );
+    ingestDocs.createEl("code", { text: "bash scripts/ingest-lan-relay.sh" });
+    ingestDocs.appendText(" on the Mac, then paste host / session / path. See ");
+    const ingestLink = ingestDocs.createEl("a", {
+      text: "Cursor Debug ingest",
+      href: `${DOCS_BASE}/cursor-debug-ingest.md`,
+    });
+    ingestLink.setAttr("target", "_blank");
+    ingestDocs.appendText(".");
+
+    new Setting(containerEl).setName("Cursor Debug ingest").setDesc(ingestDocs).setHeading();
+
+    new Setting(containerEl)
+      .setName("Host")
+      .setDesc(
+        Platform.isMobile
+          ? "Mac LAN IP (required on mobile). Run print-debug-ingest-settings.sh on the Mac."
+          : "Leave empty to use 127.0.0.1 on desktop. Set Mac LAN IP for remote devices.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("192.168.x.x")
+          .setValue(device.cursorDebugHost)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugHost: value.trim() });
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Port")
+      .setDesc(`Cursor ingest port (default ${DEFAULT_CURSOR_DEBUG_PORT}). Must match the LAN relay.`)
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_CURSOR_DEBUG_PORT))
+          .setValue(String(device.cursorDebugPort))
+          .onChange((value) => {
+            const parsed = Number.parseInt(value.trim(), 10);
+            if (Number.isFinite(parsed) && parsed > 0 && parsed < 65536) {
+              patchDeviceSettings({ cursorDebugPort: parsed });
+            }
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Session ID")
+      .setDesc("Short slug from the Cursor Debug session (X-Debug-Session-Id / debug-<slug>.log).")
+      .addText((text) =>
+        text
+          .setPlaceholder("e7cde3")
+          .setValue(device.cursorDebugSessionId)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugSessionId: value.trim() });
+          }),
+      );
+
+    new Setting(containerEl)
+      .setName("Ingest path")
+      .setDesc("Path from Cursor Debug, e.g. /ingest/<uuid>. Not the same as the session slug.")
+      .addText((text) =>
+        text
+          .setPlaceholder("/ingest/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+          .setValue(device.cursorDebugIngestPath)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugIngestPath: value.trim() });
+          }),
+      );
+
+    const canaryDesc = isCursorDebugIngestConfigured()
+      ? "Writes a canary line to the vault log and POSTs to Cursor ingest."
+      : "Writes a canary line to the vault log. Fill host + ingest path to also POST to Cursor.";
+
+    new Setting(containerEl)
+      .setName("Send test log")
+      .setDesc(canaryDesc)
+      .addButton((btn) =>
+        btn.setButtonText("Send test log").onClick(async () => {
+          if (!this.plugin.settings.debugLoggingEnabled) {
+            new Notice("Enable Debug logging first.");
+            return;
+          }
+          await this.plugin.sendDebugLogCanary();
+          new Notice(
+            isCursorDebugIngestConfigured()
+              ? "Test log sent (vault + Cursor ingest)."
+              : "Test log written to vault (Cursor ingest not configured).",
+          );
         }),
       );
   }
