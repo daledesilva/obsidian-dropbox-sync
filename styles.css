@@ -54,20 +54,24 @@
   /* Extra bottom padding so Cancel/info sit clear of content below the explorer. */
   padding: 8px 10px 18px;
   z-index: 5;
-  cursor: pointer;
-}
-
-/* Finished run: body is not a dismiss target; only the trailing X closes. */
-.dbx-sync-explorer-progress-complete {
   cursor: default;
 }
 
+/* While running, only the title bar and progress track toggle minimize. */
+.dbx-sync-explorer-progress:not(.dbx-sync-explorer-progress-complete)
+  .dbx-sync-explorer-progress-header,
+.dbx-sync-explorer-progress:not(.dbx-sync-explorer-progress-complete)
+  .dbx-sync-section-track {
+  cursor: pointer;
+}
+
+/* Match panel bottom / detail top spacing (18px) between title and progress bars. */
 .dbx-sync-explorer-progress-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 8px;
-  margin-bottom: 6px;
+  margin-bottom: 18px;
 }
 
 .dbx-sync-explorer-progress-title {
@@ -109,47 +113,36 @@
   margin-bottom: 4px;
 }
 
+/* Cancel row — centered under the detail summary. */
 .dbx-sync-explorer-progress-info-row {
   display: flex;
-  justify-content: flex-start;
+  justify-content: center;
   align-items: center;
-  gap: 10px;
   margin-top: 8px;
+  min-height: 24px;
 }
 
-/* Text Cancel — not a themed button; stopPropagation handles clicks in TS. */
+/*
+ * Cancel — accent text on a faded accent wash (not error/danger; cancel is safe).
+ */
 .dbx-sync-explorer-progress-cancel {
-  color: var(--text-muted);
+  color: var(--text-accent);
+  background-color: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+  border-radius: var(--button-radius, var(--radius-s, 4px));
+  padding: 4px 10px;
   cursor: pointer;
   font-size: var(--font-ui-smaller);
-  line-height: 1;
+  line-height: 1.2;
   user-select: none;
 }
 
 .dbx-sync-explorer-progress-cancel:hover {
-  color: var(--text-normal);
+  color: var(--text-accent-hover, var(--text-accent));
+  background-color: color-mix(in srgb, var(--interactive-accent) 25%, transparent);
 }
 
 .dbx-sync-explorer-progress-cancel-hidden {
   display: none;
-}
-
-/* Accent “?” — not a themed button; stopPropagation handles clicks in TS. */
-.dbx-sync-explorer-progress-info {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  min-width: 1.1em;
-  color: var(--interactive-accent);
-  cursor: pointer;
-  font-size: var(--font-ui-small);
-  font-weight: var(--font-semibold);
-  line-height: 1;
-  user-select: none;
-}
-
-.dbx-sync-explorer-progress-info:hover {
-  color: var(--interactive-accent-hover, var(--text-accent-hover, var(--interactive-accent)));
 }
 
 .dbx-sync-cancel-safety {
@@ -161,16 +154,20 @@
   font-size: var(--font-ui-small);
 }
 
+/* Accent circle-i in the cancel confirm modal — opens the fuller interrupt-info modal. */
 .dbx-sync-cancel-safety-info {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  min-width: 1.1em;
   color: var(--interactive-accent);
   cursor: pointer;
-  font-weight: var(--font-semibold);
   line-height: 1;
   user-select: none;
+}
+
+.dbx-sync-cancel-safety-info svg {
+  width: 16px;
+  height: 16px;
 }
 
 .dbx-sync-cancel-safety-info:hover {
@@ -234,8 +231,9 @@
   white-space: nowrap;
 }
 
+/* Match panel bottom padding (18px) between progress bars and the text summary. */
 .dbx-sync-explorer-progress-detail {
-  margin-top: 6px;
+  margin-top: 18px;
   font-size: var(--font-ui-smaller);
   color: var(--text-muted);
   line-height: 1.35;
@@ -292,8 +290,9 @@
   stroke: #ffffff;
 }
 
+/* Transfer counts after ↑/↓ — quieter than the icons / section labels. */
 .dbx-sync-explorer-progress-summary-value {
-  color: var(--text-muted);
+  color: var(--text-faint);
 }
 
 .dbx-sync-explorer-progress-recent {
@@ -777,5 +776,23 @@
 
 .dbx-sync-scope-footer button {
   min-width: 100px;
+}
+
+/* Cursor Debug ingest — collapsed Advanced host/port/session/path */
+.dbx-debug-ingest-advanced {
+  margin: 0.75em 0 1em;
+  padding: 0.5em 0.75em;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s);
+}
+
+.dbx-debug-ingest-advanced > summary {
+  cursor: pointer;
+  font-weight: var(--font-medium);
+  margin-bottom: 0.25em;
+}
+
+.dbx-debug-ingest-advanced-body {
+  margin-top: 0.5em;
 }
 

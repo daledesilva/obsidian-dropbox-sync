@@ -1,9 +1,9 @@
-import { App, Modal, Setting } from "obsidian";
+import { App, Modal, Setting, setIcon } from "obsidian";
 import { SyncInterruptInfoModal } from "./sync-interrupt-info-modal";
 
 /**
  * Confirm before aborting an in-flight sync (explorer panel Cancel / ribbon).
- * Includes a one-line vault-safety note with a link into the longer interrupt info modal.
+ * Includes a one-line vault-safety note with an info icon into the longer interrupt modal.
  */
 export class SyncCancelConfirmModal extends Modal {
   private confirmed = false;
@@ -21,11 +21,10 @@ export class SyncCancelConfirmModal extends Modal {
       text: "Sync will stop now. Unfinished files stay as they are until the next sync.",
     });
 
-    // Safety line + accent “?” opens the fuller interrupt-info modal.
+    // Safety line + accent circle-i opens the fuller interrupt-info modal.
     const safety = contentEl.createDiv({ cls: "dbx-sync-cancel-safety" });
     safety.createSpan({ text: "Cancelling won't break your vault." });
     const infoBtn = safety.createSpan({
-      text: "?",
       cls: "dbx-sync-cancel-safety-info",
       attr: {
         role: "button",
@@ -33,6 +32,7 @@ export class SyncCancelConfirmModal extends Modal {
         "aria-label": "More about interrupting sync",
       },
     });
+    setIcon(infoBtn, "info");
     infoBtn.addEventListener("click", (event) => {
       event.preventDefault();
       event.stopPropagation();

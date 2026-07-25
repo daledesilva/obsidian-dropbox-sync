@@ -6,12 +6,16 @@ Long syncs need visible structure: which vault section is running, whether the r
 
 ## Conceptual understanding
 
-- **Interactive UI** means: explorer progress footer, start/end Notices, rotating ribbon with a stop affordance, and confirmed cancel from the ribbon.
+- **Interactive UI** means: explorer progress footer, start/end Notices, rotating ribbon with a stop affordance, and confirmed cancel from the ribbon or the footer **Cancel...** control.
 - **Manual Sync now** always uses interactive UI. The footer appears **immediately** with a **Scanning changes…** segment so slow local/remote scans are not an invisible wait.
 - **Background sync** stays quiet unless the plan has more actionable items than **Settings → Large sync progress threshold** (default **10** → promote when `plan.items.length > 10`). `plan.items` excludes noops.
-- **Minimize while running; dismiss when complete.** While syncing, click the footer (or the decorative chevron) to hide only the detail text; title and segment bars stay. When every section has a result, the title becomes **Sync completed**, the footer auto-expands if it was minimized, and the trailing control becomes a plain **X** that destroys the footer (body clicks no longer toggle minimize).
+- **Minimize while running; dismiss when complete.** While syncing, click the **title bar** or the **progress track** to hide only the detail text and Cancel row; title and segment bars stay. The detail summary, count links, and Cancel are **not** minimize targets. When every section has a result, the title becomes **Sync completed**, the footer auto-expands if it was minimized, and the trailing control becomes a plain **X** that destroys the footer.
+- **Title while running** is **Syncing...** (ellipsis signals an in-progress state).
+- **Scan fill stays at ~5%.** While a segment is in the scan / “figuring out how many files” phase, the bar holds a small indeterminate stub even if scan counts tick. Normal left-to-right fill starts once execute progress has a known total.
 - **Live execute fill.** Progress `completed/total` advances as each plan item finishes (not only after the whole concurrent batch), so large downloads do not sit at `0/N` until the end.
-- **Recent-path peek.** On an active segment with a known total, the accent `completed/total` count is a link that toggles a short newest-first peek (current + previous two paths) fed by scan/execute activity.
+- **Recent-path peek.** On an active segment with a known total, the accent `completed/total` count is a link that toggles up to **three** activity paths. Display order is **oldest on top → newest at bottom**; the two older rows are much more faded than the current file. Opening the peek opts into **follow-active**: when the next section becomes active, its peek opens automatically until the user collapses it.
+- **Cancel...** (centered under the detail) opens the cancel confirm modal — accent text on a faded accent wash (not error/danger). Interrupt-safety detail lives in that modal via a circle-**i** info control next to the vault-safety line (not on the footer itself).
+- **Finished summary counts** after ↑/↓ (and related action icons) use faint text so the icons stay primary.
 - **Ribbon while syncing.** The refresh icon spins; a non-rotating stop square sits in the center. Clicking asks **Cancel sync** / **Keep syncing** before aborting.
 - **Explorer closed.** If the file explorer is not visible at footer `show()` (or later), segment start/end become Notices; adjacent end→start combine into one Notice.
 
@@ -30,7 +34,10 @@ flowchart TD
   Notice -->|yes| SegNotice[notifySegmentTransition / combine]
   Notice -->|no| Next
   SegNotice --> Next{More sections?}
-  Next -->|yes| Footer
+  Next -->|yes| Follow{Path peek follow-active?}
+  Follow -->|yes| FooterPeek[markScanning + reopen peek]
+  Follow -->|no| Footer
+  FooterPeek --> Cycle
   Next -->|no| Done[finishSegmentNotices + sticky end Notice]
 ```
 
@@ -48,6 +55,19 @@ flowchart TD
   Footer --> ExecVis[Continue same cycle execute with fill]
 ```
 
+### Minimize / cancel chrome
+
+```mermaid
+flowchart LR
+  TitleOrTrack[Title bar or progress track click] -->|running| MinToggle[Toggle minimized]
+  Detail[Detail / Cancel clicks] --> NoMin[Do not minimize]
+  CancelBtn[Cancel...] --> Confirm[Cancel confirm modal]
+  Confirm --> InfoIcon[circle-i] --> InterruptInfo[Interrupt info modal]
+  Confirm --> Abort[Cancel sync → abort]
+  Confirm --> Keep[Keep syncing]
+  Complete[Run complete] --> X[Trailing X closes footer]
+```
+
 ## Technical details
 
 | Piece | Role |
@@ -55,13 +75,16 @@ flowchart TD
 | `interactiveUi` (`src/main.ts`) | True for manual runs, or after background promotion; drives Notices and end sticky Notice |
 | `largeSyncInteractiveThreshold` | Setting (default 10); promote when actionable plan size is **greater than** this value |
 | `onPlanReady` (`SyncEngine`) | After plan, before guards/execute — flips Scanning→Syncing, or promotes background UI |
-| `SyncSectionProgress` | Footer mount, minimize / Sync completed + X, scanning/active/result, recent-path peek, segment Notices |
-| `onActivityPath` / `recordActivityPath` | Newest scan or execute path into the count-link peek |
+| `SyncSectionProgress` | Footer mount, chrome minimize, Sync completed + X, scanning/active/result, recent-path peek, segment Notices |
+| `onActivityPath` / `recordActivityPath` | Newest scan or execute path into the count-link peek (storage newest-first, display reversed) |
+| `recentPathsFollowActive` | Set when the user opens the peek; `markScanning` / `markActive` call `adoptRecentPathsPeekForActiveSection` |
+| `countTextEls` + detail `pointerdown` | In-place count text updates + delegated toggles so live ticks do not destroy the click target |
+| `fillPercent` | Scan phase / unknown total → 5% stub; execute with total → normal % |
 | `isFileExplorerVisible` | Layout-size check on file-explorer leaves |
 | `setRibbonSyncing` | Spin class + centered non-spinning stop square overlay |
-| `handleRibbonClick` / cancel confirm modals | Confirm before `cancelCurrentSync` |
+| `SyncCancelConfirmModal` / `SyncInterruptInfoModal` | Confirm before abort; circle-i opens longer interrupt reassurance |
 
-While running: root click toggles `.dbx-sync-explorer-progress-minimized` and flips the decorative chevron. When complete: title **Sync completed**, class `dbx-sync-explorer-progress-complete`, X closes via `destroy()`.
+While running: header and track clicks toggle `.dbx-sync-explorer-progress-minimized` and flip the decorative chevron. Spacing uses **18px** between title↔bars, bars↔detail, and the panel’s bottom padding so the chrome feels even. When complete: title **Sync completed**, class `dbx-sync-explorer-progress-complete`, X closes via `destroy()`.
 
 Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility at start (sticky for the run). `notifySegmentTransition(ended, started)` holds a lone end until the next start so transitions combine; `finishSegmentNotices` flushes a trailing end.
 
@@ -74,3 +97,7 @@ Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility 
 - **Footer replacement.** A new interactive run destroys/rebuilds `SyncSectionProgress`; leftover Close semantics from older builds were removed on purpose.
 - **Use DOM `removeAttribute`, not Obsidian `removeAttr`.** Obsidian’s `HTMLElement` exposes `setAttr` but not `removeAttr`. Calling `removeAttr` during `show()`/`render` threw, aborted the sync before `runCycle`, and left `outcome` stuck at the default `up_to_date` (instant “completed” with no work). Aria cleanup must use `element.removeAttribute(...)`.
 - **Progress must settle per item inside the concurrent batch.** Calling `onSettled` only after `runWithConcurrency` returned made the bar sit at `0/N` until every download finished, then jump to done in one frame.
+- **Do not rebuild the count link on every progress tick.** `updateOperationProgress` must update `countTextEls` in place; emptying `detailEl` on each tick made count-link clicks miss while numbers re-rendered.
+- **Scan fill must ignore scan completed/total for bar width.** `onScanProgress` still updates the count text, but `fillPercent` forces 5% while `phase === "scan"` so discovery does not paint a full segment before execute.
+- **`--background-modifier-error` is solid danger red.** It is for warning buttons with light text, not a faded wash under error-coloured labels. Cancel uses accent + `color-mix` on purpose because abort is a normal, safe action.
+- **Follow-active survives `markResult`.** Finishing a section clears `recentPathsExpandedSection` for that section (no count link left) but keeps `recentPathsFollowActive` so the next `markScanning`/`markActive` reopens the peek.
