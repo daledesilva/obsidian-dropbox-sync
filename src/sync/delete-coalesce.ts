@@ -59,7 +59,9 @@ export function coalesceDeleteRemote(
     const covered = [...deleteSet].filter((p) => isUnderFolder(p, folder));
     if (covered.length < MIN_FOLDER_COVER_COUNT) continue;
 
-    // Every remote file still present under the folder must be scheduled for delete.
+    // Completeness is only as strong as existingRemote. An empty set makes this
+    // loop a no-op, so every candidate folder looks "complete" — callers must
+    // never pass an emptied snapshot after a richer section already ran.
     let allRemoteCovered = true;
     for (const remotePath of existingRemote) {
       if (isUnderFolder(remotePath, folder) && !deleteSet.has(remotePath)) {

@@ -74,6 +74,7 @@ Prune loads base keys and local vault paths **once** (set membership), then walk
 | Plugin `onDeleteGuardTriggered` (`src/main.ts`) | Opens the modal and **awaits** the result for this cycle |
 | `pruneStaleDeleteLog` (`src/main.ts`) | Drops orphan delete intents with one base + one local path set |
 | `deleteRemote` (`src/sync/executor.ts`) | Dropbox `path_lookup/not_found` treated as success (remote already gone) |
+| `deleteBatch` / `coalesceDeleteRemote` | Execution-only mass remote delete; see [Remote mass deletes](remote-mass-deletes.md) |
 | `shouldSkipNotesInfer` / `shouldSkipPluginInfer` | Incomplete-scan guards; shared threshold helper `shouldSkipInferForIncompleteLocal` |
 | `SyncEngine.finalizeState` | Advances Dropbox cursor only when the cycle fully succeeded **and** the delete log is empty after clearing executed deletes |
 
@@ -85,4 +86,5 @@ Prune loads base keys and local vault paths **once** (set membership), then walk
 - **Do not advance the cursor while the delete log still has pending intents.** Multi-section manual sync used to update the cursor on a later section after an earlier section skipped deletes, which left remote files intact and the next cycle re-downloaded (or re-prompted). Clear succeeded deletes first, then require `deletedPaths.size === 0` (and no `deletesSkipped` / failures / deferred) before writing the cursor.
 - **Incomplete-scan skip is not “user deleted half the vault.”** If local notes are still ≥ 50% of base, infer still runs. Explicit Obsidian delete/rename events always stay in the delete log.
 - **`deleteRemote` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry / delete intent instead of failing the item (stale intents otherwise stick and block cursor finalize).
+- **Folder coalesce can over-delete if the remote snapshot is empty.** Deferred deletes reuse `lastExistingRemotePathLowers`; an empty overwrite makes complete-subtree checks vacuously true. Details and batch behavior: [Remote mass deletes](remote-mass-deletes.md).
 - **Prune must stay O(n).** Never call `getEntry` / `vault.getFiles()` inside the per-path loop.

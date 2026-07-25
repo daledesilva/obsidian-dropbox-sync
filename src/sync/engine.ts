@@ -174,6 +174,9 @@ export class SyncEngine {
   /**
    * Non-deleted remote path_lowers from the last cycle remote map — reused by
    * executeDeletePlan so deferred Deletions can still coalesce folder deletes.
+   * Overwriting this with an empty list (e.g. a later scoped section) makes
+   * coalesceDeleteRemote treat every folder as remotely complete — prefer union
+   * across sections and never replace a non-empty snapshot with empty.
    */
   private lastExistingRemotePathLowers: string[] = [];
 
@@ -454,7 +457,8 @@ export class SyncEngine {
     // 4. base + delta 병합 → 전체 원격 상태
     const fullRemoteMap = this.buildFullRemoteState(baseEntries, deltaEntries);
     this.filterRemoteMapByScope(fullRemoteMap);
-    // Snapshot for delete_batch folder coalesce (including deferred Deletions segment).
+    // Snapshot for delete_batch folder coalesce (including deferred Deletions).
+    // Scoped/empty sections must not wipe a richer earlier snapshot — see field comment.
     this.lastExistingRemotePathLowers = [...fullRemoteMap.entries()]
       .filter(([, entry]) => !entry.deleted)
       .map(([pathLower]) => pathLower);

@@ -59,6 +59,8 @@ Parallel plan items (uploads, downloads, local deletes, etc.) share one worker p
 
 Each upload is still one `/files/upload` (bytes + namespace commit). Higher concurrency does not batch commits; it only widens the pool. Dropbox may respond with `429` / `too_many_write_operations` when too many writes hit the same namespace at once — the adapter retries those with backoff.
 
+Remote `deleteRemote` items are peeled out of this pool and run through folder coalesce + `/files/delete_batch` instead — see [Remote mass deletes](remote-mass-deletes.md).
+
 ```mermaid
 flowchart LR
   Plan[Executable plan items] --> Pool[Worker pool concurrency 8]
