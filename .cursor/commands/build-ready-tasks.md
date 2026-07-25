@@ -52,7 +52,7 @@ ORIGIN_REPO=$(printf '%s\n' "$ORIGIN_URL" | sed -E 's#^git@[^:]+:##; s#^https?:/
 3. For each list to process, resolve its release base branch from the list name.
    - Every group branched and every independent PR opened for that list must use the release branch that aligns with **that list’s** name — not the repo default (`main` / `master`).
    - From the list name, extract the version token: the last whitespace-separated segment that looks like a dotted version (e.g. `0.4`, `1.2.3`). Strip a trailing colon or similar punctuation from that token if present.
-   - Examples: list `xyz 0.4` → `release_0.4`; list `Sl: 0.1` → `release_0.1`; list `Product 1.2.0` → `release_1.2.0`.
+   - Examples: list `xyz 0.4` → `release_0.4`; list `Sl: 1.0` → `release_1.0`; list `Product 1.2.0` → `release_1.2.0`.
    - The base branch name is always `release_<version>` (underscore after `release`, no other separators).
    - Confirm that branch exists on the remote (fetch if needed, then `git rev-parse --verify origin/release_<version>` or equivalent).
    - If no version token can be extracted from the list name: for a **single-list** target, report and stop; for a **folder** target, skip that list, report why, and continue with other lists.
