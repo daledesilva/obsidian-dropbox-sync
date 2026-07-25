@@ -31,7 +31,8 @@ export class SyncScopeModal extends Modal {
       mobile ? "dbx-sync-scope-modal-mobile" : "dbx-sync-scope-modal",
     );
 
-    contentEl.createEl("h3", { text: "Manual sync" });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle("Manual sync");
     contentEl.createEl("p", {
       cls: "setting-item-description",
       text: "Choose which sections to sync. Background-synced sections are off by default.",

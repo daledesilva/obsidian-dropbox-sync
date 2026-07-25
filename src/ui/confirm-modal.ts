@@ -19,7 +19,8 @@ export class ConfirmModal extends Modal {
 
   onOpen(): void {
     const { contentEl } = this;
-    contentEl.createEl("h3", { text: this.title });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle(this.title);
     contentEl.createEl("p", { text: this.message });
     if (this.warning) {
       contentEl.createEl("p", {

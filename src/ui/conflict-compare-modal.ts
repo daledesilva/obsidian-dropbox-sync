@@ -26,7 +26,8 @@ export class ConflictCompareModal extends Modal {
     const { localPath } = this.options;
     const sibling = this.resolveSiblingPath();
 
-    contentEl.createEl("h3", { text: "Sync conflict" });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle("Sync conflict");
     contentEl.createEl("p", {
       text:
         "This file changed both on this device and in Dropbox. "

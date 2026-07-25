@@ -12,7 +12,8 @@ export class LogViewerModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
 
-    contentEl.createEl("h3", { text: `Sync Logs (${this.deviceId})` });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle(`Sync Logs (${this.deviceId})`);
 
     const ta = contentEl.createEl("textarea", { cls: "dbx-sync-log-textarea" });
     ta.value = this.logContent;

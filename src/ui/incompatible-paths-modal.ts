@@ -38,7 +38,8 @@ export class IncompatiblePathsModal extends Modal {
       mobile ? "dbx-sync-path-modal-wide-mobile" : "dbx-sync-path-modal-wide",
     );
 
-    contentEl.createEl("h3", { text: "Fix incompatible file names" });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle("Fix incompatible file names");
     contentEl.createEl("p", {
       text: "Some files use names that Dropbox allows but this device cannot create (often from Windows). Rename them below, or skip to sync everything else.",
     });

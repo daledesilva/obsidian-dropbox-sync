@@ -28,10 +28,11 @@ export class ConflictModal extends Modal {
 
     this.modalEl.addClass(mobile ? "dbx-sync-conflict-modal-wide-mobile" : "dbx-sync-conflict-modal-wide");
 
+    // Use the modal title bar — not an h3 inside the body.
     const title = this.progress && this.progress.total > 1
       ? `Sync Conflict (${this.progress.index}/${this.progress.total})`
       : "Sync Conflict";
-    contentEl.createEl("h3", { text: title });
+    this.setTitle(title);
     contentEl.createEl("p", {
       text: `"${this.filePath}" was modified on both this device and Dropbox.`,
     });

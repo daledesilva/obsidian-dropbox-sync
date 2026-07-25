@@ -24,10 +24,11 @@ export class DeleteConfirmModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
 
+    // Use the modal title bar — not an h3 inside the body.
     const title = this.sectionLabel
       ? `Delete protection — ${this.sectionLabel}`
       : "Delete protection";
-    contentEl.createEl("h3", { text: title });
+    this.setTitle(title);
     contentEl.createEl("p", {
       text: `${this.deleteItems.length} files will be deleted. Continue?`,
     });

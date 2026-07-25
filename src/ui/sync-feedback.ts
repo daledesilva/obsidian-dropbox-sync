@@ -2,10 +2,9 @@ import { Notice, Platform, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import {
-  groupSucceededPathsByAction,
   listConflictPaths,
-  summarizeActionParts,
   summarizeActions,
+  summarizeResultParts,
   type ActionSummaryPart,
   type ActionSummaryPaths,
 } from "../sync/sync-reporter";
@@ -80,10 +79,11 @@ export interface SyncResultFeedback {
   conflictPaths: string[];
   /**
    * Icon/count parts for the explorer panel (white icons + normal value colour).
-   * Empty when the summary is prose (failed / up to date) rather than action icons.
+   * Empty when the summary is prose (up to date) rather than action icons.
+   * Failures include a failed chip plus upload/download/etc. for successes.
    */
   summaryParts: ActionSummaryPart[];
-  /** Succeeded paths per action type — chip modals list these. */
+  /** Succeeded (and failed) paths per action type — chip modals list these. */
   summaryPaths: ActionSummaryPaths;
 }
 
@@ -94,9 +94,10 @@ export function buildSyncResultFeedback(
   pathsSkipped?: number,
 ): SyncResultFeedback {
   const conflictPaths = listConflictPaths(result.succeeded);
-  const summaryParts = summarizeActionParts(result.succeeded);
-  const summaryPaths = groupSucceededPathsByAction(result.succeeded);
+  // Always chip-ify successes; attach a failed chip when any items errored.
+  const { summaryParts, summaryPaths } = summarizeResultParts(result);
   if (result.failed.length > 0) {
+    // Notices keep the short prose; the explorer panel uses summaryParts chips.
     const summary = `${result.failed.length} failed, ${result.succeeded.length} ok`;
     const first = result.failed[0];
     const detail = first.error?.message?.slice(0, 100) ?? "";
@@ -110,9 +111,8 @@ export function buildSyncResultFeedback(
       endMessage: `Dropbox Sync: ${summary}\n${first.item.localPath}: ${detail}${pathHint}`,
       noticeDuration: 8000,
       conflictPaths,
-      // Prose summary — panel renders plain text, not icon parts.
-      summaryParts: [],
-      summaryPaths: {},
+      summaryParts,
+      summaryPaths,
     };
   }
   if (pathsSkipped && pathsSkipped > 0) {

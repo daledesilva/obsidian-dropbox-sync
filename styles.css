@@ -7,11 +7,13 @@
 
 .dbx-sync-ribbon-syncing {
   position: relative;
+  /* Theme accent for both the spinning refresh glyph and the stop square. */
+  color: var(--interactive-accent);
 }
 
-/* Only the refresh glyph spins; the stop square overlay stays fixed. */
+/* Only the refresh glyph spins; the stop square overlay stays fixed. Quarter of the old 1s cycle. */
 .dbx-sync-ribbon-syncing > svg {
-  animation: dbx-sync-spin 1s linear infinite;
+  animation: dbx-sync-spin 4s linear infinite;
 }
 
 .dbx-sync-ribbon-stop {
@@ -152,32 +154,9 @@
 }
 
 .dbx-sync-cancel-safety {
-  display: flex;
-  align-items: center;
-  gap: 8px;
   margin: 0.75em 0 1em;
   color: var(--text-muted);
   font-size: var(--font-ui-small);
-}
-
-/* Accent circle-i in the cancel confirm modal — opens the fuller interrupt-info modal. */
-.dbx-sync-cancel-safety-info {
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  color: var(--interactive-accent);
-  cursor: pointer;
-  line-height: 1;
-  user-select: none;
-}
-
-.dbx-sync-cancel-safety-info svg {
-  width: 16px;
-  height: 16px;
-}
-
-.dbx-sync-cancel-safety-info:hover {
-  color: var(--interactive-accent-hover, var(--text-accent-hover, var(--interactive-accent)));
 }
 
 .dbx-sync-section-track {
@@ -305,41 +284,68 @@
   text-decoration: none;
 }
 
+/* Failed chip — error wash so it reads differently from transfer chips. */
+.dbx-sync-explorer-progress-summary-chip-failed {
+  color: var(--text-error);
+  background-color: color-mix(in srgb, var(--text-error) 15%, transparent);
+}
+
+.dbx-sync-explorer-progress-summary-chip-failed:hover {
+  color: var(--text-error);
+  background-color: color-mix(in srgb, var(--text-error) 25%, transparent);
+}
+
 .dbx-sync-explorer-progress-summary-chip-disabled {
   cursor: default;
   opacity: 0.7;
   pointer-events: none;
 }
 
-/* Action glyphs inside chips — pure white; counts keep accent colour with the chip. */
+/*
+ * Action glyphs inside chips — theme primary text (not hard-coded white) so light
+ * and dark Obsidian themes both stay readable against the accent wash.
+ */
 .dbx-sync-explorer-progress-summary-icons {
   display: inline-flex;
   align-items: center;
   gap: 1px;
   vertical-align: -0.15em;
-  color: #ffffff;
+  color: var(--text-normal);
 }
 
 .dbx-sync-explorer-progress-summary-icon {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  color: #ffffff;
+  color: var(--text-normal);
 }
 
 .dbx-sync-explorer-progress-summary-icon svg {
   width: 12px;
   height: 12px;
-  stroke: #ffffff;
+  stroke: var(--text-normal);
 }
 
-/* Counts inside chips inherit accent; keep class for structure. */
+/* Finished chip counts inherit accent (or error on failed chips). */
 .dbx-sync-explorer-progress-summary-chip .dbx-sync-explorer-progress-summary-value {
   color: inherit;
 }
 
 .dbx-sync-explorer-progress-summary-value {
   color: var(--text-faint);
+}
+
+/*
+ * Live execute chips: completed stays accent; spaced slash + total use primary
+ * text so they read as secondary without hard-coded white.
+ */
+.dbx-sync-explorer-progress-summary-value-live .dbx-sync-explorer-progress-summary-value-done {
+  color: inherit;
+}
+
+.dbx-sync-explorer-progress-summary-value-live .dbx-sync-explorer-progress-summary-value-sep,
+.dbx-sync-explorer-progress-summary-value-live .dbx-sync-explorer-progress-summary-value-total {
+  color: var(--text-normal);
 }
 
 .dbx-sync-explorer-progress-recent {
@@ -371,8 +377,9 @@
   color: var(--text-faint);
 }
 
+/* Newest path name — theme primary text (was hard-coded white). */
 .dbx-sync-explorer-progress-path-name {
-  color: #ffffff;
+  color: var(--text-normal);
 }
 
 .dbx-sync-explorer-progress-recent-empty {

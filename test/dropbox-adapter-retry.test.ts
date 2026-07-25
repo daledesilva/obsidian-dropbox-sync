@@ -5,7 +5,10 @@ import type { HttpClient } from "@/http-client";
 // httpClient mock
 const httpClientMock = mock() as unknown as ReturnType<typeof mock> & HttpClient;
 
-function createAdapter(): DropboxAdapter {
+function createAdapter(opts?: {
+  trackSleep?: boolean;
+}): { adapter: DropboxAdapter; sleepCalls: number[] } {
+  const sleepCalls: number[] = [];
   const adapter = new DropboxAdapter({
     httpClient: (...args: unknown[]) => (httpClientMock as any)(...args),
     appKey: "test-key",
@@ -15,9 +18,14 @@ function createAdapter(): DropboxAdapter {
     getTokenExpiry: () => Date.now() + 3600_000,
     onTokenRefreshed: () => {},
   });
-  // sleep을 즉시 resolve로 override (retry 테스트 속도)
-  (adapter as any).sleep = () => Promise.resolve();
-  return adapter;
+  // Instant sleep for speed; optionally record wait durations for assertions.
+  (adapter as any).sleep = (ms: number) => {
+    if (opts?.trackSleep) sleepCalls.push(ms);
+    return Promise.resolve();
+  };
+  // Deterministic waits in tests (no random jitter).
+  (adapter as any).retryJitterMs = () => 0;
+  return { adapter, sleepCalls };
 }
 
 describe("DropboxAdapter retry on 429", () => {
@@ -26,13 +34,14 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("rpcCall: 429 한 번 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     // 첫 호출: 429
     httpClientMock.mockResolvedValueOnce({
       status: 429,
       json: { error: { retry_after: 0 } },
       text: "rate limited",
+      headers: {},
     });
 
     // 두 번째 호출: 성공
@@ -44,6 +53,7 @@ describe("DropboxAdapter retry on 429", () => {
         has_more: false,
       },
       text: "{}",
+      headers: {},
     });
 
     const result = await adapter.listChanges();
@@ -53,7 +63,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("rpcCall: 429 연속 5번 (max 4 retry 초과) → DropboxRateLimitError", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     // 5번 연속 429
     for (let i = 0; i < 5; i++) {
@@ -61,6 +71,7 @@ describe("DropboxAdapter retry on 429", () => {
         status: 429,
         json: { error: { retry_after: 0 } },
         text: "rate limited",
+        headers: {},
       });
     }
 
@@ -68,14 +79,132 @@ describe("DropboxAdapter retry on 429", () => {
     expect(httpClientMock).toHaveBeenCalledTimes(5);
   });
 
+  test("429 Retry-After header preferred over missing body retry_after", async () => {
+    const { adapter, sleepCalls } = createAdapter({ trackSleep: true });
+
+    httpClientMock.mockResolvedValueOnce({
+      status: 429,
+      json: { error_summary: "too_many_requests/..." },
+      text: "too_many_requests",
+      headers: { "retry-after": "2" },
+    });
+    httpClientMock.mockResolvedValueOnce({
+      status: 200,
+      json: { entries: [], cursor: "hdr", has_more: false },
+      text: "{}",
+      headers: {},
+    });
+
+    await adapter.listChanges();
+    expect(sleepCalls).toContain(2000);
+    expect(httpClientMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("429 body retry_after used when Retry-After header absent", async () => {
+    const { adapter, sleepCalls } = createAdapter({ trackSleep: true });
+
+    httpClientMock.mockResolvedValueOnce({
+      status: 429,
+      json: { error: { ".tag": "too_many_requests", retry_after: 3 } },
+      text: "rate limited",
+      headers: {},
+    });
+    httpClientMock.mockResolvedValueOnce({
+      status: 200,
+      json: { entries: [], cursor: "body", has_more: false },
+      text: "{}",
+      headers: {},
+    });
+
+    await adapter.listChanges();
+    expect(sleepCalls).toContain(3000);
+  });
+
+  test("upload: exhausted 429 throws DropboxRateLimitError with write-ops reason", async () => {
+    const { adapter } = createAdapter();
+    const data = new Uint8Array([1]);
+
+    for (let i = 0; i < 5; i++) {
+      httpClientMock.mockResolvedValueOnce({
+        status: 429,
+        json: {
+          error_summary: "too_many_write_operations/...",
+          error: { ".tag": "too_many_write_operations", retry_after: 0 },
+        },
+        text: "too_many_write_operations",
+        headers: { "retry-after": "0" },
+      });
+    }
+
+    let caught: unknown;
+    try {
+      await adapter.upload("test.md", data);
+    } catch (e) {
+      caught = e;
+    }
+    expect(caught).toBeInstanceOf(DropboxRateLimitError);
+    const err = caught as DropboxRateLimitError;
+    expect(err.reason).toBe("too_many_write_operations");
+    expect(err.retryAfter).toBe(0);
+    expect(httpClientMock).toHaveBeenCalledTimes(5);
+  });
+
+  test("shared rate-limit gate: concurrent uploads pause after first 429", async () => {
+    const { adapter, sleepCalls } = createAdapter({ trackSleep: true });
+    let inFlight = 0;
+    let maxInFlight = 0;
+    let call = 0;
+
+    httpClientMock.mockImplementation(async () => {
+      inFlight++;
+      maxInFlight = Math.max(maxInFlight, inFlight);
+      const n = ++call;
+      inFlight--;
+      if (n === 1) {
+        return {
+          status: 429,
+          json: { error: { ".tag": "too_many_requests", retry_after: 2 } },
+          text: "too_many_requests",
+          headers: { "retry-after": "2" },
+        };
+      }
+      return {
+        status: 200,
+        json: {
+          path_display: `/f${n}.md`,
+          content_hash: "h",
+          server_modified: "2024-01-01T00:00:00Z",
+          rev: `r${n}`,
+          size: 1,
+        },
+        text: "",
+        headers: {},
+      };
+    });
+
+    const data = new Uint8Array([1]);
+    // First call 429s and extends gate to +2s; second worker's attempt awaits gate.
+    await Promise.all([
+      adapter.upload("a.md", data),
+      adapter.upload("b.md", data),
+    ]);
+
+    expect(sleepCalls.some((ms) => ms >= 2000)).toBe(true);
+    // After the gate, both succeed — at least 3 HTTP calls (1×429 + 2×200) or more
+    // if the second also raced the first 429 before the gate was set.
+    expect(httpClientMock.mock.calls.length).toBeGreaterThanOrEqual(3);
+    expect(maxInFlight).toBeGreaterThanOrEqual(1);
+  });
+
   test("download: 429 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     // 첫 호출: 429
     httpClientMock.mockResolvedValueOnce({
       status: 429,
       json: { error: { retry_after: 0 } },
       text: "rate limited",
+      headers: {},
     });
 
     // 두 번째 호출: 성공
@@ -100,7 +229,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("upload: 429 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
     const data = new Uint8Array([1, 2, 3]);
 
     // 첫 호출: 429
@@ -108,6 +237,7 @@ describe("DropboxAdapter retry on 429", () => {
       status: 429,
       json: { error: { retry_after: 0 } },
       text: "rate limited",
+      headers: {},
     });
 
     // 두 번째 호출: 성공
@@ -121,6 +251,7 @@ describe("DropboxAdapter retry on 429", () => {
         size: 3,
       },
       text: "",
+      headers: {},
     });
 
     const result = await adapter.upload("test.md", data);
@@ -131,7 +262,7 @@ describe("DropboxAdapter retry on 429", () => {
   // ── Content-Type 회귀 방지 ──
 
   test("download: non-JSON body with dropbox-api-result header succeeds", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
     const markdown = "# hello\n\nworld";
     const buf = new TextEncoder().encode(markdown).buffer;
 
@@ -157,7 +288,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("download: missing dropbox-api-result throws clear error", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 200,
@@ -173,7 +304,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("download: headers에 Content-Type을 명시적으로 전달한다", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 200,
@@ -197,7 +328,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("upload: headers에 Content-Type을 명시적으로 전달한다", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 200,
@@ -218,7 +349,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("rpcCall: headers에 Content-Type: application/json을 전달한다", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 200,
@@ -235,7 +366,7 @@ describe("DropboxAdapter retry on 429", () => {
   // ── 5xx retry ──
 
   test("upload: 503 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
     const data = new Uint8Array([1, 2, 3]);
 
     httpClientMock.mockResolvedValueOnce({
@@ -262,7 +393,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("download: 500 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 500,
@@ -291,7 +422,7 @@ describe("DropboxAdapter retry on 429", () => {
   });
 
   test("rpcCall: 503 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockResolvedValueOnce({
       status: 503,
@@ -317,7 +448,7 @@ describe("DropboxAdapter retry on 429", () => {
   test(
     "upload: 503 연속 5번 → 에러 throw",
     async () => {
-      const adapter = createAdapter();
+      const { adapter } = createAdapter();
       const data = new Uint8Array([1]);
 
       for (let i = 0; i < 5; i++) {
@@ -335,7 +466,7 @@ describe("DropboxAdapter retry on 429", () => {
   );
 
   test("rpcCall: 409 reset → DropboxCursorResetError (retry 안 함)", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
     const { DropboxCursorResetError } = await import("@/adapters/dropbox-adapter");
 
     httpClientMock.mockResolvedValueOnce({
@@ -351,7 +482,7 @@ describe("DropboxAdapter retry on 429", () => {
   // ── 네트워크 에러 retry ──
 
   test("rpcCall: 네트워크 에러 1회 → retry 후 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockRejectedValueOnce(new Error("The network connection was lost."));
 
@@ -369,7 +500,7 @@ describe("DropboxAdapter retry on 429", () => {
   test(
     "upload: 네트워크 에러 연속 5번 → throw",
     async () => {
-      const adapter = createAdapter();
+      const { adapter } = createAdapter();
       const data = new Uint8Array([1]);
 
       for (let i = 0; i < 5; i++) {
@@ -383,7 +514,7 @@ describe("DropboxAdapter retry on 429", () => {
   );
 
   test("download: 네트워크 에러 → 5xx → 성공", async () => {
-    const adapter = createAdapter();
+    const { adapter } = createAdapter();
 
     httpClientMock.mockRejectedValueOnce(new Error("Request failed"));
     httpClientMock.mockResolvedValueOnce({ status: 503, json: {}, text: "unavailable" });

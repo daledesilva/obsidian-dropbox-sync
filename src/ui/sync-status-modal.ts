@@ -30,7 +30,8 @@ export class SyncStatusModal extends Modal {
     const { contentEl } = this;
     const { info } = this;
 
-    contentEl.createEl("h3", { text: "Dropbox sync" });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle("Dropbox sync");
 
     const statusText = this.formatStatus();
     const statusEl = contentEl.createEl("p", { text: statusText });

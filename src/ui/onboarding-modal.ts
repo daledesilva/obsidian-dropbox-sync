@@ -13,7 +13,8 @@ export class OnboardingModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
 
-    contentEl.createEl("h2", { text: "Dropbox sync" });
+    // Use the modal title bar — not an h2 inside the body.
+    this.setTitle("Dropbox sync");
     contentEl.createEl("p", {
       text: "Sync your Obsidian vault with Dropbox. Use the same vault across multiple devices.",
     });

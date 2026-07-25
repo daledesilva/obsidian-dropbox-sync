@@ -22,6 +22,53 @@ const DELETE_BATCH_MAX_ENTRIES = 1000;
 /** Initial poll interval for delete_batch/check; doubles up to a cap. */
 const DELETE_BATCH_POLL_MS = 500;
 const DELETE_BATCH_POLL_MAX_MS = 8_000;
+/** Max uniform jitter added to 429 waits so concurrent workers don't wake in lockstep. */
+const RATE_LIMIT_JITTER_MAX_MS = 250;
+
+export type DropboxRateLimitReason =
+  | "too_many_requests"
+  | "too_many_write_operations"
+  | "unknown";
+
+/**
+ * Prefer HTTP Retry-After (Dropbox always sends it), then JSON body retry_after,
+ * then 1s. too_many_write_operations often has Retry-After: 0 — keep that.
+ */
+function resolveRetryAfterSeconds(resp: {
+  headers?: Record<string, string>;
+  json: unknown;
+}): number {
+  const headerRaw = resp.headers?.["retry-after"];
+  if (headerRaw !== undefined && headerRaw !== "") {
+    const fromHeader = Number(headerRaw);
+    if (Number.isFinite(fromHeader) && fromHeader >= 0) return fromHeader;
+  }
+  const body = resp.json as DropboxErrorResponse | undefined;
+  const fromBody = body?.error?.retry_after;
+  if (typeof fromBody === "number" && Number.isFinite(fromBody) && fromBody >= 0) {
+    return fromBody;
+  }
+  return 1;
+}
+
+/** Classify 429 reason for logging / DropboxRateLimitError.reason. */
+function parseRateLimitReason(
+  errBody: DropboxErrorResponse | undefined,
+  text: string,
+): DropboxRateLimitReason {
+  const tag = errBody?.error?.[".tag"] ?? "";
+  const summary = `${errBody?.error_summary ?? ""} ${text}`;
+  if (
+    tag === "too_many_write_operations"
+    || summary.includes("too_many_write_operations")
+  ) {
+    return "too_many_write_operations";
+  }
+  if (tag === "too_many_requests" || summary.includes("too_many_requests")) {
+    return "too_many_requests";
+  }
+  return "unknown";
+}
 
 type DropboxDeleteBatchLaunch =
   | { ".tag": "complete"; entries: DropboxDeleteBatchResultEntry[] }
@@ -66,6 +113,11 @@ export interface DropboxAdapterConfig {
  */
 export class DropboxAdapter implements RemoteStorage {
   private abortSignal: AbortSignal | undefined;
+  /**
+   * Shared cooldown across all concurrent withRetry callers on this instance.
+   * One 429 extends the gate so other workers pause instead of stampeding.
+   */
+  private rateLimitedUntilMs = 0;
 
   constructor(private config: DropboxAdapterConfig) {}
 
@@ -332,19 +384,41 @@ export class DropboxAdapter implements RemoteStorage {
           throw new DropboxCursorResetError("Cursor reset required");
         }
       },
-      on429Final: (errBody) => {
-        throw new DropboxRateLimitError(
-          `Rate limited: ${endpoint}`,
-          errBody.error?.retry_after ?? 1,
-        );
-      },
     });
 
     return resp.json as T;
   }
 
+  /** Abort-aware sleep; tests stub this to avoid real timers. */
+  private async sleep(ms: number): Promise<void> {
+    await delay(ms, this.abortSignal);
+  }
+
+  /** Uniform jitter so concurrent retries don't align; tests may stub to 0. */
+  private retryJitterMs(): number {
+    return Math.floor(Math.random() * (RATE_LIMIT_JITTER_MAX_MS + 1));
+  }
+
+  /** Wait out any shared 429 cooldown before starting an attempt. */
+  private async awaitRateLimitGate(): Promise<void> {
+    const waitMs = this.rateLimitedUntilMs - Date.now();
+    if (waitMs > 0) {
+      await this.sleep(waitMs);
+    }
+  }
+
+  /** Extend the shared gate; overlapping 429s keep the later until-time. */
+  private extendRateLimitGate(waitMs: number): void {
+    const until = Date.now() + waitMs;
+    if (until > this.rateLimitedUntilMs) {
+      this.rateLimitedUntilMs = until;
+    }
+  }
+
   /**
-   * 공통 retry 루프: ensureValidToken → httpClient → retryable 판정 → 409/에러 처리.
+   * 공통 retry 루프: rate-limit gate → ensureValidToken → httpClient → retryable 판정.
+   * 429s honor Retry-After (header then body), add jitter, and pause all workers via
+   * the shared gate. Exhausted 429s always throw DropboxRateLimitError (RPC + content).
    */
   private async withRetry(opts: {
     url: string;
@@ -352,12 +426,13 @@ export class DropboxAdapter implements RemoteStorage {
     headers?: Record<string, string>;
     body?: string | ArrayBuffer;
     on409?: (errBody: DropboxErrorResponse) => void;
-    on429Final?: (errBody: DropboxErrorResponse) => void;
   }): Promise<{ status: number; json: unknown; text: string; headers: Record<string, string>; arrayBuffer: ArrayBuffer }> {
     const maxRetries = 4;
     const signal = this.abortSignal;
     for (let attempt = 0; attempt <= maxRetries; attempt++) {
       throwIfAborted(signal);
+      // Shared pause: a sibling worker's 429 may have extended the gate.
+      await this.awaitRateLimitGate();
       let resp;
       try {
         await this.ensureValidToken();
@@ -378,23 +453,33 @@ export class DropboxAdapter implements RemoteStorage {
         // 네트워크 연결 실패 (iOS -1005 등) — 긴 딜레이로 연결 풀 리셋 유도
         if (attempt < maxRetries) {
           const backoffMs = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
-          await delay(backoffMs, signal);
+          await this.sleep(backoffMs);
           continue;
         }
         throw e;
       }
 
-      // retry 판정 (429 / 5xx)
-      if (resp.status === 429 || (resp.status >= 500 && resp.status < 600)) {
+      if (resp.status === 429) {
+        const retryAfterSec = resolveRetryAfterSeconds(resp);
+        const waitMs = retryAfterSec * 1000 + this.retryJitterMs();
+        this.extendRateLimitGate(waitMs);
         if (attempt < maxRetries) {
-          const backoffMs = resp.status === 429
-            ? ((resp.json as DropboxErrorResponse | undefined)?.error?.retry_after ?? 1) * 1000
-            : 1000 * Math.pow(2, attempt);
-          await delay(backoffMs, signal);
+          await this.awaitRateLimitGate();
           continue;
         }
-        if (resp.status === 429 && opts.on429Final) {
-          opts.on429Final(resp.json as DropboxErrorResponse);
+        const errBody = resp.json as DropboxErrorResponse | undefined;
+        const reason = parseRateLimitReason(errBody, resp.text);
+        throw new DropboxRateLimitError(
+          `Rate limited (${reason}): ${opts.url}`,
+          retryAfterSec,
+          reason,
+        );
+      }
+
+      if (resp.status >= 500 && resp.status < 600) {
+        if (attempt < maxRetries) {
+          await this.sleep(1000 * Math.pow(2, attempt));
+          continue;
         }
         throw this.parseError(resp.status, resp.text);
       }
@@ -515,6 +600,7 @@ export class DropboxRateLimitError extends Error {
   constructor(
     message: string,
     public readonly retryAfter: number,
+    public readonly reason: DropboxRateLimitReason = "unknown",
   ) {
     super(message);
     this.name = "DropboxRateLimitError";

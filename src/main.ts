@@ -39,6 +39,7 @@ import {
   mergeActionSummaryParts,
   mergeActionSummaryPaths,
   summarizeActionParts,
+  summarizeResultParts,
 } from "./sync/sync-reporter";
 import { applyPathRenames } from "./sync/path-rename";
 import type { RemoteStorage, SyncStateStore } from "./adapters/interfaces";
@@ -820,12 +821,26 @@ export default class DropboxSyncPlugin extends Plugin {
                 }
                 return classifyVaultPath(item.localPath, configDir) === section;
               });
+              // Include section failures so the failed chip survives trash-chip merge.
+              const sectionNonDeleteFailed = aggregatedFailed.filter((f) => {
+                if (
+                  f.item.action.type === "deleteLocal"
+                  || f.item.action.type === "deleteRemote"
+                ) {
+                  return false;
+                }
+                return classifyVaultPath(f.item.localPath, configDir) === section;
+              });
+              const sectionChips = summarizeResultParts({
+                succeeded: sectionNonDeleteSucceeded,
+                failed: sectionNonDeleteFailed,
+              });
               const merged = mergeActionSummaryParts(
-                summarizeActionParts(sectionNonDeleteSucceeded),
+                sectionChips.summaryParts,
                 deleteParts,
               );
               const mergedPaths = mergeActionSummaryPaths(
-                groupSucceededPathsByAction(sectionNonDeleteSucceeded),
+                sectionChips.summaryPaths,
                 groupSucceededPathsByAction(deleteResult.succeeded),
               );
               sectionProgress.updateSummaryParts(section, merged, undefined, mergedPaths);
@@ -843,6 +858,18 @@ export default class DropboxSyncPlugin extends Plugin {
               : deletionPhaseSkipped > 0
                 ? "partial"
                 : "success";
+          // Aggregate delete successes/failures across sections for chip rendering.
+          const deletionChipSource = {
+            succeeded: aggregatedSucceeded.filter(
+              (item) =>
+                item.action.type === "deleteLocal" || item.action.type === "deleteRemote",
+            ),
+            failed: aggregatedFailed.filter(
+              (f) =>
+                f.item.action.type === "deleteLocal" || f.item.action.type === "deleteRemote",
+            ),
+          };
+          const deletionChips = summarizeResultParts(deletionChipSource);
           const deletionsSummary =
             deletionFailed > 0
               ? `${deletionFailed} failed, ${deletionSucceeded} ok`
@@ -851,7 +878,10 @@ export default class DropboxSyncPlugin extends Plugin {
                 : deletionSucceeded > 0
                   ? `${deletionSucceeded} deleted`
                   : "skipped";
-          sectionProgress.markResult("deletions", deletionsState, deletionsSummary);
+          sectionProgress.markResult("deletions", deletionsState, deletionsSummary, {
+            summaryParts: deletionChips.summaryParts,
+            summaryPaths: deletionChips.summaryPaths,
+          });
           sectionProgress.notifySegmentTransition(
             `Deletions: ${deletionsSummary}`,
             null,
@@ -1244,7 +1274,11 @@ export default class DropboxSyncPlugin extends Plugin {
    * Attach manual-like progress/notices when a background plan exceeds the threshold.
    * Called mid-cycle after planning so execute still drives the segment fill.
    */
-  private promoteBackgroundToInteractive(actionCount: number, threshold: number): void {
+  private promoteBackgroundToInteractive(
+    actionCount: number,
+    threshold: number,
+    planItems?: { action: { type: string } }[],
+  ): void {
     this.interactiveUi = true;
     const sections =
       this.backgroundPromoteSections ?? getEnabledBackgroundSections(this.settings);
@@ -1260,6 +1294,10 @@ export default class DropboxSyncPlugin extends Plugin {
     if (first) {
       this.progressSection = first;
       this.sectionProgress.markActive(first);
+      // Plan is already known at promote time — seed live chips immediately.
+      if (planItems) {
+        this.sectionProgress.beginLiveActionProgress(first, planItems);
+      }
       this.sectionProgress.notifySegmentTransition(
         null,
         `${SYNC_SCOPE_LABELS[first]}: Syncing…`,
@@ -1353,21 +1391,34 @@ export default class DropboxSyncPlugin extends Plugin {
           // Flip Scanning → Syncing once the plan exists (execute follows).
           if (this.progressSection) {
             this.sectionProgress?.markActive(this.progressSection);
+            // Seed upload/download chips with plan totals before the first onProgress tick.
+            this.sectionProgress?.beginLiveActionProgress(
+              this.progressSection,
+              plan.items,
+            );
           }
           return;
         }
         const threshold = this.settings.largeSyncInteractiveThreshold ?? 10;
         // plan.items excludes noops — count is the actionable change volume.
         if (plan.items.length <= threshold) return;
-        this.promoteBackgroundToInteractive(plan.items.length, threshold);
+        this.promoteBackgroundToInteractive(plan.items.length, threshold, plan.items);
       },
-      onExecItem: (localPath: string, _actionType: string, event: "start" | "end", ok?: boolean, error?: string) => {
+      onExecItem: (localPath: string, actionType: string, event: "start" | "end", ok?: boolean, error?: string) => {
         if (event === "start") {
           this.fileSyncStatus.markSyncing(
             localPath,
             "This file is currently syncing with Dropbox",
           );
           return;
+        }
+        // Grow live upload/download chips + open path modal as items succeed.
+        if (event === "end" && ok === true && this.progressSection) {
+          this.sectionProgress?.recordLiveActionSuccess(
+            this.progressSection,
+            actionType,
+            localPath,
+          );
         }
         // Terminal outcomes are applied from SyncResult; only surface live errors early.
         if (event === "end" && ok === false) {

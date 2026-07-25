@@ -2,6 +2,7 @@
 export const CONFLICT_SUMMARY_ICON = "\u{1F6AB}";
 
 export type ActionSummaryType =
+  | "failed"
   | "upload"
   | "download"
   | "conflict"
@@ -14,7 +15,12 @@ export interface ActionSummaryPart {
   count: number;
 }
 
+/**
+ * Panel / notice order: failed first (matches "N failed, … ok" copy), then
+ * transfer actions, then conflicts/deletes.
+ */
 const ACTION_ORDER: ActionSummaryType[] = [
+  "failed",
   "upload",
   "download",
   "conflict",
@@ -35,12 +41,32 @@ export function formatActionSummaryValue(part: ActionSummaryPart): string {
   if (part.type === "conflict") {
     return `${part.count} conflict${part.count === 1 ? "" : "s"}`;
   }
+  // Count-only — the chip icon already signals failure vs transfer.
   return String(part.count);
+}
+
+/** Live chip value while execute is still running (e.g. "3 / 10") — for aria/notices. */
+export function formatActionProgressValue(completed: number, total: number): string {
+  return `${completed} / ${total}`;
+}
+
+/** Action types that show live completed/total chips during execute. */
+export const LIVE_PROGRESS_ACTION_TYPES: readonly ActionSummaryType[] = [
+  "upload",
+  "download",
+];
+
+/** True when the action type participates in live upload/download chips. */
+export function isLiveProgressActionType(type: string): type is ActionSummaryType {
+  return (LIVE_PROGRESS_ACTION_TYPES as readonly string[]).includes(type);
 }
 
 /** Notice / status-bar string for one part (emoji/arrows + value). */
 export function formatActionSummaryPart(part: ActionSummaryPart): string {
   switch (part.type) {
+    case "failed":
+      // Ballot X — distinct from conflict’s prohibition sign.
+      return `\u2717${part.count}`;
     case "upload":
       return `\u2191${part.count}`;
     case "download":
@@ -102,6 +128,8 @@ export function mergeActionSummaryPaths(
 /** Modal title for a summary chip's affected-file list. */
 export function actionSummaryModalTitle(type: ActionSummaryType): string {
   switch (type) {
+    case "failed":
+      return "Failed Files";
     case "upload":
       return "Uploaded Files";
     case "download":
@@ -114,6 +142,36 @@ export function actionSummaryModalTitle(type: ActionSummaryType): string {
     case "conflict":
       return "Conflicted Files";
   }
+}
+
+/**
+ * Build panel chips for a sync result: failed first (when any), then succeeded
+ * action breakdown. Keeps upload/download/etc. visible instead of collapsing to
+ * prose like "8 failed, 406 ok".
+ */
+export function summarizeResultParts(
+  result: {
+    succeeded: { action: { type: string }; localPath: string }[];
+    failed: { item: { localPath: string; action: { type: string } } }[];
+  },
+): { summaryParts: ActionSummaryPart[]; summaryPaths: ActionSummaryPaths } {
+  const summaryParts = summarizeActionParts(result.succeeded);
+  const summaryPaths = groupSucceededPathsByAction(result.succeeded);
+  if (result.failed.length === 0) {
+    return { summaryParts, summaryPaths };
+  }
+  // Failed is not an executor action type — attach it from the failure list.
+  const failedPaths = result.failed.map((f) => f.item.localPath);
+  return {
+    summaryParts: mergeActionSummaryParts(
+      [{ type: "failed", count: result.failed.length }],
+      summaryParts,
+    ),
+    summaryPaths: {
+      ...summaryPaths,
+      failed: failedPaths,
+    },
+  };
 }
 
 /** Structured counts for panel icon/value styling. */
