@@ -23,6 +23,12 @@ import {
   type SyncCycleDiagnostics,
 } from "./sync-diagnostics";
 import { classifyVaultPath } from "./sync-scope";
+import {
+  countByActionType,
+  samplePaths,
+  SyncHypotheses,
+  type SyncMonitorLog,
+} from "../debug/sync-monitor";
 
 /** conflict 파일 판별 (.conflict-YYYY-MM-DDTHHMM 패턴) */
 export function isConflictFile(path: string): boolean {
@@ -78,6 +84,13 @@ export interface SyncEngineOptions {
    * sections still see the same delta set.
    */
   deferCursorUpdate?: boolean;
+  /**
+   * Structured sync monitor (vault file + Wi‑Fi ingest). Optional so unit tests
+   * need not supply logging.
+   */
+  log?: SyncMonitorLog;
+  /** deleteLocal 실행 직전 — vault delete 이벤트와 엔진 삭제를 구분 */
+  onBeforeDeleteLocal?: (pathLower: string) => void;
 }
 
 export interface CycleResult {
@@ -147,6 +160,23 @@ export class SyncEngine {
     this.options.deferCursorUpdate = defer;
   }
 
+  /**
+   * Refresh options each sync cycle (callbacks + settings) without dropping
+   * in-flight deferCursorUpdate used by multi-section manual runs.
+   */
+  applyOptions(options: SyncEngineOptions): void {
+    const deferCursorUpdate = this.options.deferCursorUpdate;
+    this.options = { ...options, deferCursorUpdate };
+  }
+
+  private log(
+    message: string,
+    data?: Record<string, unknown>,
+    meta?: { hypothesisId?: string; location?: string },
+  ): void {
+    this.options.log?.(message, data, meta);
+  }
+
   private pathInScope(path: string): boolean {
     const patterns = this.options.excludePatterns ?? [];
     if (this.sectionFilter) {
@@ -209,12 +239,23 @@ export class SyncEngine {
   private async runCycleInner(signal?: AbortSignal): Promise<CycleResult> {
     const { fs, remote, store } = this.deps;
     const ctx = this.options.enableCycleReports ? new CycleContext() : undefined;
+    const cycleStartedAt = Date.now();
 
     // 0. 사이클 시작 이벤트
+    const cursorAtStart = await store.getMeta("cursor");
     if (ctx) {
-      const cursor = await store.getMeta("cursor");
-      ctx.emit({ type: "cycle_start", ts: ctx.startTime, cursor: cursor ?? null });
+      ctx.emit({ type: "cycle_start", ts: ctx.startTime, cursor: cursorAtStart ?? null });
     }
+    this.log("cycle start", {
+      cursorPresent: !!cursorAtStart,
+      cursorPrefix: cursorAtStart ? cursorAtStart.slice(0, 12) : null,
+      deleteLogSize: this.deletedPaths.size,
+      sections: this.sectionFilter,
+      syncScope: this.syncScope,
+      deferCursorUpdate: !!this.options.deferCursorUpdate,
+      deleteProtection: !!this.options.deleteProtection,
+      deleteThreshold: this.options.deleteThreshold ?? 5,
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.runCycle" });
 
     // 1. 로컬 파일 수집
     signal?.throwIfAborted();
@@ -289,9 +330,19 @@ export class SyncEngine {
     emitDiagnosticsPhaseLines(this.liveReport, "scan", this.lastDiagnostics);
     await this.liveReport?.phaseEnd(`${localFiles.length} file(s) scanned`);
     ctx?.emit({ type: "local_scan", ts: Date.now(), fileCount: localFiles.length, duration: Date.now() - localScanStart });
+    this.log("phase local scan done", {
+      durationMs: Date.now() - localScanStart,
+      inScope: localFiles.length,
+      vaultIndexed: listStats.vaultIndexed,
+      configDiskAdded: listStats.configDiskAdded,
+      hiddenDiskAdded: listStats.hiddenDiskAdded,
+      mergedAfterExclude: listStats.mergedAfterExclude,
+      bySection: inScopeBySection,
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.localScan" });
 
     // 2. 원격 변경 수집 (delta)
     await this.liveReport?.phaseStart(2);
+    const remoteFetchStart = Date.now();
     const { deltaEntries, latestCursor, inScopeDeltaCount } = await this.fetchRemoteDeltas(
       store,
       remote,
@@ -301,6 +352,13 @@ export class SyncEngine {
     await this.liveReport?.phaseEnd(
       `${inScopeDeltaCount} in-scope remote entry/entries (${deltaEntries.length} delta total)`,
     );
+    this.log("phase remote delta done", {
+      durationMs: Date.now() - remoteFetchStart,
+      deltaTotal: deltaEntries.length,
+      inScopeDeltaCount,
+      deletedInDelta: deltaEntries.filter((e) => e.deleted).length,
+      latestCursorPrefix: latestCursor.slice(0, 12),
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.remoteDelta" });
 
     // 3. 이전 상태 로드
     signal?.throwIfAborted();
@@ -335,12 +393,26 @@ export class SyncEngine {
         inferredSkippedPlugin: inferred.skippedPluginInfer,
       };
       emitDiagnosticsPhaseLines(this.liveReport, "intent", this.lastDiagnostics);
+      // #region agent log
+      this.log("delete intent after infer", {
+        totalInLog: this.deletedPaths.size,
+        fromVaultEvents: intentSources.event,
+        fromPersistedLog: intentSources.persisted,
+        inferredThisCycle: inferred.count,
+        inferredSkippedPlugin: inferred.skippedPluginInfer,
+        inferredSample: inferred.sample,
+        localInScope: localFiles.length,
+        baseInScope: baseEntries.length,
+        remoteInScope: fullRemoteMap.size,
+      }, { hypothesisId: SyncHypotheses.reInferDeletes, location: "engine.inferMissingDeletes" });
+      // #endregion
     }
 
     // 6. 동기화 계획 생성
     signal?.throwIfAborted();
     const fullRemoteEntries = Array.from(fullRemoteMap.values());
     await this.liveReport?.phaseStart(3);
+    const planStart = Date.now();
     let planItemsLogged = 0;
     const plan = createPlan(localFiles, fullRemoteEntries, baseEntries, {
       localDeletedPaths: this.deletedPaths,
@@ -360,6 +432,19 @@ export class SyncEngine {
       emitDiagnosticsPhaseLines(this.liveReport, "plan", this.lastDiagnostics);
     }
     await this.liveReport?.phaseEnd(`${plan.items.length} action(s), ${plan.stats.noop} noop(s)`);
+    const planActions = countByActionType(plan.items);
+    this.log("phase plan done", {
+      durationMs: Date.now() - planStart,
+      actionCount: plan.items.length,
+      noop: plan.stats.noop,
+      actions: planActions,
+      deleteRemoteSample: samplePaths(
+        plan.items.filter((i) => i.action.type === "deleteRemote").map((i) => i.localPath),
+      ),
+      deleteLocalSample: samplePaths(
+        plan.items.filter((i) => i.action.type === "deleteLocal").map((i) => i.localPath),
+      ),
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.plan" });
 
     // Host may promote large background syncs to interactive UI before execute.
     await this.options.onPlanReady?.(plan);
@@ -416,12 +501,21 @@ export class SyncEngine {
     signal?.throwIfAborted();
     await this.liveReport?.phaseStart(5);
     let execFailed = 0;
+    const execStart = Date.now();
+    this.log("phase execute start", {
+      planToRun: planToRun.items.length,
+      actions: countByActionType(planToRun.items),
+      deletesSkipped,
+      pathsSkipped,
+      concurrency: this.options.concurrency ?? 1,
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.execute" });
     const result = await executePlan(planToRun, { fs, remote, store }, {
       conflictStrategy: this.options.conflictStrategy,
       conflictResolver: this.options.conflictResolver,
       isFileActive: this.options.isFileActive,
       signal,
       concurrency: this.options.concurrency,
+      log: this.options.log,
       onProgress: (completed, total) => {
         if (completed % 10 === 0 || completed === total) {
           this.liveReport?.progressLine(
@@ -431,6 +525,7 @@ export class SyncEngine {
         this.options.onProgress?.(completed, total, execFailed);
       },
       onConflictCount: this.options.onConflictCount,
+      onBeforeDeleteLocal: this.options.onBeforeDeleteLocal,
       strictLocalPaths: this.options.strictLocalPaths,
       ctx,
       onExecItem: (localPath, actionType, event, ok, error) => {
@@ -443,11 +538,47 @@ export class SyncEngine {
     await this.liveReport?.phaseEnd(
       `${result.succeeded.length} ok, ${result.failed.length} failed, ${result.deferred.length} deferred`,
     );
+    const deleteSucceeded = result.succeeded.filter(
+      (i) => i.action.type === "deleteRemote" || i.action.type === "deleteLocal",
+    );
+    const deleteFailed = result.failed.filter(
+      (f) => f.item.action.type === "deleteRemote" || f.item.action.type === "deleteLocal",
+    );
+    // #region agent log
+    this.log("phase execute done", {
+      durationMs: Date.now() - execStart,
+      succeeded: result.succeeded.length,
+      failed: result.failed.length,
+      deferred: result.deferred.length,
+      succeededByAction: countByActionType(result.succeeded),
+      failedByAction: countByActionType(result.failed.map((f) => f.item)),
+      deleteSucceeded: deleteSucceeded.length,
+      deleteFailed: deleteFailed.length,
+      deleteSucceededSample: samplePaths(deleteSucceeded.map((i) => `${i.action.type}:${i.localPath}`)),
+      deleteFailedSample: samplePaths(
+        deleteFailed.map((f) => `${f.item.action.type}:${f.item.localPath}:${f.error.message}`),
+      ),
+      timeoutFailures: result.failed.filter((f) => f.error.name === "ItemTimeoutError").length,
+    }, {
+      hypothesisId: deleteFailed.length > 0 || (deletesSkipped === 0 && deleteSucceeded.length === 0 && (planActions.deleteRemote || planActions.deleteLocal))
+        ? SyncHypotheses.deleteNotExecuted
+        : SyncHypotheses.sync,
+      location: "engine.execute",
+    });
+    // #endregion
 
     // 9. 상태 갱신
     await this.finalizeState(store, result, latestCursor, deletesSkipped);
 
     const deferredCount = result.deferred.length > 0 ? result.deferred.length : undefined;
+    this.log("cycle end", {
+      durationMs: Date.now() - cycleStartedAt,
+      deletesSkipped,
+      deferredCount: deferredCount ?? 0,
+      pathsSkipped,
+      deleteLogRemaining: this.deletedPaths.size,
+      deleteLogSample: samplePaths(this.deletedPaths),
+    }, { hypothesisId: SyncHypotheses.sync, location: "engine.runCycle" });
 
     // 10. 사이클 종료 이벤트 + 리포트
     if (ctx) {
@@ -711,11 +842,28 @@ export class SyncEngine {
     }
 
     if (guard.passed) {
+      this.log("delete guard passed", {
+        deleteCount: guard.deleteItems.length,
+        threshold,
+        enabled: this.options.deleteProtection ?? false,
+        deleteRemote,
+        deleteLocal,
+      }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.applyDeleteGuard" });
       return { planToExecute: plan, deletesSkipped: 0 };
     }
 
     if (this.options.onDeleteGuardTriggered) {
       const approved = await this.options.onDeleteGuardTriggered(guard);
+      // #region agent log
+      this.log("delete guard user decision", {
+        approved,
+        deleteCount: guard.deleteItems.length,
+        threshold,
+        deleteRemote,
+        deleteLocal,
+        sample: samplePaths(guard.deleteItems.map((i) => `${i.action.type}:${i.localPath}`)),
+      }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.applyDeleteGuard" });
+      // #endregion
       if (approved) {
         return { planToExecute: plan, deletesSkipped: 0 };
       }
@@ -725,6 +873,11 @@ export class SyncEngine {
     if (this.lastDiagnostics?.deleteGuard) {
       this.lastDiagnostics.deleteGuard.skipped = skipped;
     }
+    this.log("delete guard skipped deletions", {
+      skipped,
+      threshold,
+      sample: samplePaths(guard.deleteItems.map((i) => i.localPath)),
+    }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.applyDeleteGuard" });
     return { planToExecute: guard.filteredPlan, deletesSkipped: skipped };
   }
 
@@ -735,23 +888,48 @@ export class SyncEngine {
     latestCursor: string,
     deletesSkipped: number,
   ): Promise<void> {
-    // 모두 성공 시에만 cursor 갱신 (deferred도 미완료 취급).
-    // Intermediate sequential sections defer so later sections see the same delta.
-    if (
+    const deleteLogBefore = this.deletedPaths.size;
+    const canUpdateCursor =
       !this.options.deferCursorUpdate
       && result.failed.length === 0
       && deletesSkipped === 0
-      && result.deferred.length === 0
-    ) {
+      && result.deferred.length === 0;
+
+    // 모두 성공 시에만 cursor 갱신 (deferred도 미완료 취급).
+    // Intermediate sequential sections defer so later sections see the same delta.
+    if (canUpdateCursor) {
       await store.setMeta("cursor", latestCursor);
     }
 
     // 성공한 삭제 항목을 deletedPaths에서 제거
+    let deletesClearedFromLog = 0;
     for (const item of result.succeeded) {
       if (item.action.type === "deleteRemote" || item.action.type === "deleteLocal") {
-        this.deletedPaths.delete(item.pathLower);
+        if (this.deletedPaths.delete(item.pathLower)) {
+          deletesClearedFromLog++;
+        }
         this.deleteIntentSources.delete(item.pathLower);
       }
     }
+
+    // #region agent log
+    this.log("finalize state", {
+      cursorUpdated: canUpdateCursor,
+      deferCursorUpdate: !!this.options.deferCursorUpdate,
+      failed: result.failed.length,
+      deferred: result.deferred.length,
+      deletesSkipped,
+      blockReasons: [
+        ...(this.options.deferCursorUpdate ? ["deferCursorUpdate"] : []),
+        ...(result.failed.length > 0 ? [`failed:${result.failed.length}`] : []),
+        ...(deletesSkipped > 0 ? [`deletesSkipped:${deletesSkipped}`] : []),
+        ...(result.deferred.length > 0 ? [`deferred:${result.deferred.length}`] : []),
+      ],
+      deleteLogBefore,
+      deletesClearedFromLog,
+      deleteLogAfter: this.deletedPaths.size,
+      latestCursorPrefix: latestCursor.slice(0, 12),
+    }, { hypothesisId: SyncHypotheses.cursorStall, location: "engine.finalizeState" });
+    // #endregion
   }
 }

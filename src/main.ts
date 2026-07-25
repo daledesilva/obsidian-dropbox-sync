@@ -2,6 +2,7 @@ import { Menu, Notice, Platform, Plugin, TFile } from "obsidian";
 import {
   DEFAULT_SETTINGS,
   generateDeviceId,
+  generateVaultInstanceId,
   getDefaultExcludePatterns,
   mergeBuiltInExcludePatterns,
   getEffectiveAppKey,
@@ -19,7 +20,7 @@ import { SyncStatusModal } from "./ui/sync-status-modal";
 import { OnboardingModal } from "./ui/onboarding-modal";
 import { VaultAdapter } from "./adapters/vault-adapter";
 import { DropboxAdapter, DropboxAuthError } from "./adapters/dropbox-adapter";
-import { IndexedDBStore } from "./adapters/indexeddb-store";
+import { IndexedDBStore, migrateLegacyIndexedDbIfNeeded } from "./adapters/indexeddb-store";
 import { VaultFileStore } from "./adapters/vault-file-store";
 import type { ConflictContext, DeleteGuardResult, PathGuardIssue, PathIssueResolution, SyncResult } from "./types";
 import { applyPathRenames } from "./sync/path-rename";
@@ -29,8 +30,10 @@ import { DesktopAuth } from "./auth/desktop-auth";
 import { LongpollManager } from "./sync/longpoll";
 import { EngineManager } from "./sync/engine-manager";
 import { LogManager } from "./log-manager";
-import { postCursorDebugLogLine } from "./debug/cursor-debug-ingest";
+import { postCursorDebugLogLine, type CursorDebugLogMeta } from "./debug/cursor-debug-ingest";
+import { createSyncMonitorLog, SyncHypotheses, samplePaths } from "./debug/sync-monitor";
 import { registerDemoCommands } from "./debug/demo-commands";
+import { initDeviceSettings } from "./device-settings/device-settings";
 import type { SyncEngine } from "./sync/engine";
 
 import { fetchFileFromRemote } from "./deep-link";
@@ -120,13 +123,14 @@ export default class DropboxSyncPlugin extends Plugin {
    * Central log entry: gated by debugLoggingEnabled.
    * When on, writes the vault sync-debug file and best-effort POSTs to Cursor
    * Debug ingest when device-local host/path are configured.
+   * Optional meta tags (hypothesisId / location) filter Wi‑Fi NDJSON in Debug sessions.
    */
-  private log(msg: string, data?: unknown): Promise<void> {
+  private log(msg: string, data?: unknown, meta?: CursorDebugLogMeta): Promise<void> {
     if (!this.settings.debugLoggingEnabled) {
       return Promise.resolve();
     }
     // Fire-and-forget Wi‑Fi ingest so local flush is not delayed by requestUrl.
-    postCursorDebugLogLine(msg, data);
+    postCursorDebugLogLine(msg, data, meta);
     if (!this.logger) {
       console.debug("[Dropbox Sync]", msg, data ?? "");
       return Promise.resolve();
@@ -146,11 +150,19 @@ export default class DropboxSyncPlugin extends Plugin {
   // ── Lifecycle ──
 
   async onload(): Promise<void> {
+    // Vault-scoped device prefs (Cursor Debug ingest) before any log/ingest reads.
+    initDeviceSettings(this.app);
+
     await this.loadSettings();
 
     let needsSave = false;
     if (!this.settings.deviceId) {
       this.settings.deviceId = generateDeviceId();
+      needsSave = true;
+    }
+    // Stable IndexedDB key — never vault.getName() (folder basename collisions).
+    if (!this.settings.vaultInstanceId) {
+      this.settings.vaultInstanceId = generateVaultInstanceId();
       needsSave = true;
     }
     const configDir = this.app.vault.configDir;
@@ -167,10 +179,30 @@ export default class DropboxSyncPlugin extends Plugin {
       this.settings.excludePatterns = mergedExcludes;
       needsSave = true;
     }
+
+    // Migrate before saveSettings → applySyncState so a background timer cannot
+    // open an empty new DB before legacy entries/cursor are copied over.
+    if (!Platform.isIosApp) {
+      try {
+        const migrated = await migrateLegacyIndexedDbIfNeeded(
+          this.settings.vaultInstanceId,
+          this.app.vault.getName(),
+        );
+        if (migrated) {
+          void this.log("migrated sync state IndexedDB to vaultInstanceId");
+        }
+      } catch (e) {
+        console.error("Failed to migrate legacy sync-state IndexedDB:", e);
+      }
+    }
+
     if (needsSave) {
       await this.saveSettings();
     }
 
+    // User-facing debug log lives at the vault root on purpose (not under
+    // .obsidian/plugins or an excluded hidden folder): people open/share it from
+    // the file list and View logs. Do not "fix" this into plugin-private storage.
     this.logger = new LogManager(
       this.app.vault.adapter,
       () => `sync-debug-${this.settings.deviceId || "unknown"}.log`,
@@ -472,13 +504,27 @@ export default class DropboxSyncPlugin extends Plugin {
     }
 
     if (this.interactiveUi) notifySyncStart();
-    void this.log(`sync started (v${this.manifest.version}, scope: ${scopeLabel})`);
+    void this.log(`sync started (v${this.manifest.version}, scope: ${scopeLabel})`, {
+      manual,
+      platform: Platform.isMobile ? "mobile" : "desktop",
+      isIos: Platform.isIosApp,
+      deleteProtection: this.settings.deleteProtection,
+      deleteThreshold: this.settings.deleteThreshold,
+      backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
+    }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
 
     try {
       const engine = this.getOrCreateEngine();
+      // Refresh callbacks/settings each cycle so log + delete guard stay current.
+      engine.applyOptions(this.createEngineOptions());
       engine.setLiveReport(liveReport);
       const configDir = this.app.vault.configDir;
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
+      void this.log("delete-log before cycle", {
+        pending: engine.getDeleteLog().length,
+        pruned: prunedDeletes,
+        sample: samplePaths(engine.getDeleteLog()),
+      }, { hypothesisId: SyncHypotheses.reInferDeletes, location: "main.syncNow" });
       if (prunedDeletes > 0) {
         liveReport?.line(`pruned ${prunedDeletes} stale delete-log entry/entries`);
         this.engineMgr?.persistDeleteLog();
@@ -734,9 +780,28 @@ export default class DropboxSyncPlugin extends Plugin {
       this.syncDeletedByEngine.clear();
       this.abortController = null;
       this.lastSyncTime = endedAt;
+      void this.log("sync finished", {
+        outcome,
+        durationMs: endedAt - startedAt,
+        cursorUpdated,
+        needsResyncAfterRename,
+        deletesSkipped: deletesSkipped ?? 0,
+        deferredCount: deferredCount ?? 0,
+        pathsSkipped: pathsSkipped ?? 0,
+        planItems: plan?.items.length ?? 0,
+        succeeded: result?.succeeded.length ?? 0,
+        failed: result?.failed.length ?? 0,
+        pendingDeleteLog: this.engineMgr?.hasPendingDeletes() ?? false,
+        willDebounceForPendingDeletes:
+          !!(this.engineMgr?.hasPendingDeletes() && this.settings.backgroundSyncEnabled),
+        willLongpoll: !!(cursorUpdated && this.settings.backgroundSyncEnabled),
+      }, { hypothesisId: SyncHypotheses.cursorStall, location: "main.syncNow.finally" });
       await this.logger?.flush();
       // 미소비 삭제가 있으면 후속 싱크 스케줄 (싱크 중 사용자 삭제 처리)
       if (this.engineMgr?.hasPendingDeletes() && this.settings.backgroundSyncEnabled) {
+        void this.log("scheduling debounced sync: pending delete log", {
+          pendingCount: this.getOrCreateEngine().getDeleteLog().length,
+        }, { hypothesisId: SyncHypotheses.cursorStall, location: "main.syncNow.finally" });
         this.scheduleDebouncedSync();
       } else if (cursorUpdated && this.settings.backgroundSyncEnabled) {
         this.longpoll?.schedule();
@@ -840,7 +905,6 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   private createEngineDeps() {
-    const vaultId = this.app.vault.getName();
     const fs = new VaultAdapter(
       this.app.vault,
       this.settings.excludePatterns,
@@ -860,9 +924,10 @@ export default class DropboxSyncPlugin extends Plugin {
         void this.saveSettings();
       },
     });
+    // iOS uses vault files; elsewhere IndexedDB keyed by vaultInstanceId.
     const store: SyncStateStore = Platform.isIosApp
       ? new VaultFileStore(this.app.vault)
-      : new IndexedDBStore(vaultId);
+      : new IndexedDBStore(this.settings.vaultInstanceId);
 
     return { fs, remote, store };
   }
@@ -897,7 +962,9 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   private createEngineOptions() {
+    const syncLog = createSyncMonitorLog((msg, data, meta) => this.log(msg, data, meta));
     return {
+      log: syncLog,
       conflictStrategy: this.settings.conflictStrategy,
       conflictResolver: async (filePath: string, context?: ConflictContext) => {
         this.conflictIndex++;
@@ -914,19 +981,41 @@ export default class DropboxSyncPlugin extends Plugin {
       // re-ran reliably (e.g. background sync off), so both choices looked like Skip.
       onDeleteGuardTriggered: async (guard: DeleteGuardResult): Promise<boolean> => {
         if (this.deleteConfirmModal) {
+          // #region agent log
+          void this.log("delete guard: modal already open — treating as skip", {
+            deleteCount: guard.deleteItems.length,
+            sample: samplePaths(guard.deleteItems.map((i) => i.localPath)),
+          }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.onDeleteGuardTriggered" });
+          // #endregion
           return false;
         }
         const modal = new DeleteConfirmModal(this.app, guard.deleteItems);
         this.deleteConfirmModal = modal;
         try {
-          const approved = await modal.waitForConfirmation();
           const remote = guard.deleteItems.filter((i) => i.action.type === "deleteRemote").length;
           const local = guard.deleteItems.filter((i) => i.action.type === "deleteLocal").length;
+          // #region agent log
+          void this.log("delete guard: showing confirm modal", {
+            total: guard.deleteItems.length,
+            remote,
+            local,
+            threshold: this.settings.deleteThreshold,
+            sample: samplePaths(guard.deleteItems.map((i) => `${i.action.type}:${i.localPath}`)),
+          }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.onDeleteGuardTriggered" });
+          // #endregion
+          const approved = await modal.waitForConfirmation();
           void this.log(
             approved
               ? `delete guard: user approved ${guard.deleteItems.length} deletions`
               : `delete guard: user skipped ${guard.deleteItems.length} deletions`,
-            { remote, local, threshold: this.settings.deleteThreshold },
+            {
+              remote,
+              local,
+              threshold: this.settings.deleteThreshold,
+              approved,
+              sample: samplePaths(guard.deleteItems.map((i) => i.localPath)),
+            },
+            { hypothesisId: SyncHypotheses.guardSkip, location: "main.onDeleteGuardTriggered" },
           );
           return approved;
         } finally {
@@ -973,8 +1062,13 @@ export default class DropboxSyncPlugin extends Plugin {
         if (this.progressSection) {
           this.sectionProgress?.updateOperationProgress(this.progressSection, completed, total);
         }
-        if (completed % 25 === 0 || completed === total) {
-          void this.log(`execute: ${completed}/${total} (${failed} failed)`);
+        if (completed % 10 === 0 || completed === total || failed > 0) {
+          void this.log(`execute: ${completed}/${total} (${failed} failed)`, {
+            pct,
+            completed,
+            total,
+            failed,
+          }, { hypothesisId: SyncHypotheses.sync, location: "main.onProgress" });
         }
       },
     };
@@ -1004,9 +1098,20 @@ export default class DropboxSyncPlugin extends Plugin {
         if (!(file instanceof TFile)) return;
         if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
         const p = file.path.toLowerCase();
-        if (this.syncDeletedByEngine.delete(p)) return; // 싱크 엔진이 지운 거면 무시
+        if (this.syncDeletedByEngine.delete(p)) {
+          void this.log("vault delete ignored (engine-owned)", { path: p }, {
+            hypothesisId: SyncHypotheses.sync,
+            location: "main.vault.delete",
+          });
+          return;
+        }
         engine.trackDelete(p);
         this.engineMgr?.persistDeleteLog();
+        void this.log("vault delete tracked", {
+          path: p,
+          syncing: this.syncing,
+          pendingDeleteLog: engine.getDeleteLog().length,
+        }, { hypothesisId: SyncHypotheses.reInferDeletes, location: "main.vault.delete" });
         if (!this.syncing) this.scheduleDebouncedSync();
       }),
     );

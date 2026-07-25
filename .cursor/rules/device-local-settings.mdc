@@ -1,5 +1,5 @@
 ---
-description: Device-local plugin preferences — localStorage, not synced plugin settings
+description: Device-local plugin preferences — App localStorage, not synced plugin settings
 alwaysApply: true
 ---
 
@@ -13,7 +13,7 @@ Examples: companion-app connection flags, per-device input interpretation, UI to
 
 ## Implementation
 
-- Use a small storage helper that respects **`window.activeWindow.localStorage`** (Obsidian popouts) and a project-specific key prefix.
+- Use Obsidian's vault-scoped **`App.loadLocalStorage` / `App.saveLocalStorage`** (preferred by eslint-plugin-obsidianmd over raw `window.localStorage`). Bind `App` once in `Plugin.onload` via the `device-settings/` init helper before any reads.
 - Prefer a **versioned JSON blob** and typed accessors under a `device-settings/` module so new fields can be added with migrations later.
 - Same-tab updates do not fire the native `storage` event; emit a **custom window event** from the write path and subscribe from React hooks where live UI must refresh.
 - **Settings tab vs synced settings:** It is fine to expose device-only controls in the plugin settings UI as long as they only use device-local storage — do **not** persist those fields on the synced `PluginSettings` type.
@@ -21,3 +21,4 @@ Examples: companion-app connection flags, per-device input interpretation, UI to
 ## Do not
 
 - Add device-only preferences to synced plugin settings types — those sync with the vault.
+- Use raw `window.localStorage` / `window.activeWindow.localStorage` for vault-unique prefs when the App API is available.

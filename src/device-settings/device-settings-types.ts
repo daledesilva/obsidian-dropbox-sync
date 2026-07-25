@@ -1,5 +1,6 @@
 /**
- * Device-local blob stored in localStorage (not synced via plugin data.json).
+ * Device-local blob stored via App.loadLocalStorage / App.saveLocalStorage
+ * (vault-namespaced on this machine; not synced via plugin data.json).
  * Cursor ingest host/session must stay per-machine so a Mac LAN IP does not
  * sync into other devices' vault settings.
  */

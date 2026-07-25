@@ -1,16 +1,42 @@
+import type { App } from "obsidian";
 import {
   DEFAULT_CURSOR_DEBUG_PORT,
   DEFAULT_DEVICE_SETTINGS_V1,
   DEVICE_SETTINGS_STORAGE_KEY,
 } from "./device-settings-defaults";
-import { fetchLocally, saveLocally } from "./device-settings-storage";
+import {
+  clearLegacyRawLocalStorage,
+  fetchLegacyRawLocalStorage,
+  fetchLocally,
+  initDeviceSettingsStorage,
+  saveLocally,
+} from "./device-settings-storage";
 import type { DeviceSettingsV1 } from "./device-settings-types";
 
 /**
- * Same-tab localStorage writes do not fire the native `storage` event.
+ * Same-tab App.saveLocalStorage writes do not fire the native `storage` event.
  * Emit this so same-window listeners can refresh without a full reload.
  */
 const DEVICE_SETTINGS_CHANGED_EVENT = "dropbox-sync-device-settings-changed";
+
+/**
+ * Bind vault-scoped storage. Call once at the start of Plugin.onload so ingest
+ * and settings UI never read before App is available. Also copies any legacy
+ * raw-localStorage blob into App storage for this vault.
+ */
+export function initDeviceSettings(app: App): void {
+  initDeviceSettingsStorage(app);
+  // Prefer App storage; one-time hydrate from the old global key if empty.
+  if (fetchLocally(DEVICE_SETTINGS_STORAGE_KEY) != null) return;
+  const legacyRaw = fetchLegacyRawLocalStorage(DEVICE_SETTINGS_STORAGE_KEY);
+  if (typeof legacyRaw !== "string" || !legacyRaw) return;
+  try {
+    const migrated = mergeWithDefaults(JSON.parse(legacyRaw) as unknown);
+    saveLocally(DEVICE_SETTINGS_STORAGE_KEY, migrated);
+  } catch {
+    /* corrupt legacy — leave App storage empty; defaults apply on read */
+  }
+}
 
 function mergeWithDefaults(partial: unknown): DeviceSettingsV1 {
   const base = DEFAULT_DEVICE_SETTINGS_V1;
@@ -33,15 +59,33 @@ function mergeWithDefaults(partial: unknown): DeviceSettingsV1 {
   };
 }
 
+function coerceStoredValue(stored: unknown): DeviceSettingsV1 {
+  // App API stores objects; legacy path / early writes may still be JSON strings.
+  if (typeof stored === "string") {
+    try {
+      return mergeWithDefaults(JSON.parse(stored) as unknown);
+    } catch {
+      return mergeWithDefaults(null);
+    }
+  }
+  return mergeWithDefaults(stored);
+}
+
 /** Read merged device settings (never throws; corrupt storage yields defaults). */
 export function readDeviceSettings(): DeviceSettingsV1 {
-  const raw = fetchLocally(DEVICE_SETTINGS_STORAGE_KEY);
-  if (typeof raw !== "string") return mergeWithDefaults(null);
-  try {
-    return mergeWithDefaults(JSON.parse(raw) as unknown);
-  } catch {
-    return mergeWithDefaults(null);
+  const stored = fetchLocally(DEVICE_SETTINGS_STORAGE_KEY);
+  if (stored != null) return coerceStoredValue(stored);
+
+  // Fallback if init did not run yet or migration missed a vault.
+  const legacyRaw = fetchLegacyRawLocalStorage(DEVICE_SETTINGS_STORAGE_KEY);
+  if (typeof legacyRaw === "string" && legacyRaw) {
+    try {
+      return mergeWithDefaults(JSON.parse(legacyRaw) as unknown);
+    } catch {
+      return mergeWithDefaults(null);
+    }
   }
+  return mergeWithDefaults(null);
 }
 
 function writeDeviceSettings(settings: DeviceSettingsV1): void {
@@ -49,7 +93,9 @@ function writeDeviceSettings(settings: DeviceSettingsV1): void {
     ...settings,
     version: 1,
   };
-  saveLocally(DEVICE_SETTINGS_STORAGE_KEY, JSON.stringify(toStore));
+  saveLocally(DEVICE_SETTINGS_STORAGE_KEY, toStore);
+  // Drop the pre-App-API global key once vault-scoped storage is the source of truth.
+  clearLegacyRawLocalStorage(DEVICE_SETTINGS_STORAGE_KEY);
   notifyDeviceSettingsChanged();
 }
 
@@ -95,7 +141,7 @@ export function getCursorDebugIngestPath(): string {
 
 /**
  * Same-tab updates use a custom event; `storage` covers other windows/tabs
- * for the same vault host.
+ * when Obsidian's localStorage backing store notifies listeners.
  */
 export function subscribeDeviceSettingsChanged(onChange: () => void): () => void {
   const wrapped = (): void => {

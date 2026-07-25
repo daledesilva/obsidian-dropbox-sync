@@ -11,6 +11,7 @@ import {
 } from "./conflict-handlers";
 import type { ConflictHandlerDeps } from "./conflict-handlers";
 import type { CycleContext } from "./cycle-context";
+import { SyncHypotheses, type SyncMonitorLog } from "../debug/sync-monitor";
 
 export interface ExecutorDeps {
   fs: FileSystem;
@@ -43,6 +44,8 @@ export interface ExecutorConfig {
   ctx?: CycleContext;
   /** iOS/모바일 등 로컬 경로 규칙 적용 */
   strictLocalPaths?: boolean;
+  /** Structured sync monitor (optional; tests omit). */
+  log?: SyncMonitorLog;
   /** 라이브 리포트: 실행 항목 시작/종료 */
   onExecItem?: (
     localPath: string,
@@ -52,6 +55,9 @@ export interface ExecutorConfig {
     error?: string,
   ) => void;
 }
+
+/** Log items slower than this as stall candidates (permanent monitor). */
+const SLOW_ITEM_LOG_MS = 5_000;
 
 /** 내부 함수에서 사용하는 통합 컨텍스트 */
 type ExecutorContext = ExecutorDeps & ExecutorConfig;
@@ -116,6 +122,14 @@ export async function executePlan(
     ctx.onProgress?.(completed, total);
   };
 
+  ctx.log?.("executor batch start", {
+    executable: executable.length,
+    conflicts: conflicts.length,
+    deferred: deferred.length,
+    concurrency,
+    itemTimeoutMs,
+  }, { hypothesisId: SyncHypotheses.sync, location: "executor.executePlan" });
+
   // Pass 1: parallel batch. Timeouts free slots so other files keep moving.
   const pass1 = await runExecutableBatch(executable, ctx, concurrency, itemTimeoutMs, {
     // Only count successes/failures toward progress in pass 1; timeouts retry later.
@@ -125,6 +139,15 @@ export async function executePlan(
   });
   succeeded.push(...pass1.succeeded);
   failed.push(...pass1.failed);
+  if (pass1.timedOut.length > 0) {
+    // #region agent log
+    ctx.log?.("executor pass1 timeouts", {
+      count: pass1.timedOut.length,
+      sample: pass1.timedOut.slice(0, 8).map((i) => `${i.action.type}:${i.localPath}`),
+      itemTimeoutMs,
+    }, { hypothesisId: SyncHypotheses.itemStall, location: "executor.executePlan" });
+    // #endregion
+  }
 
   // Pass 2: push timed-out items to the back and retry once after faster work finishes.
   if (pass1.timedOut.length > 0 && !ctx.signal?.aborted) {
@@ -138,6 +161,13 @@ export async function executePlan(
         item,
         error: new ItemTimeoutError(`Timed out after ${itemTimeoutMs}ms (retry)`),
       });
+      // #region agent log
+      ctx.log?.("executor item timed out after retry", {
+        action: item.action.type,
+        path: item.localPath,
+        itemTimeoutMs,
+      }, { hypothesisId: SyncHypotheses.itemStall, location: "executor.executePlan" });
+      // #endregion
       bumpProgress();
     }
   } else if (pass1.timedOut.length > 0) {
@@ -203,17 +233,65 @@ async function runExecutableBatch(
 
   const tasks = items.map((item) => async () => {
     const actionType = item.action.type;
+    const isDelete = actionType === "deleteRemote" || actionType === "deleteLocal";
     ctx.onExecItem?.(item.localPath, actionType, "start");
     ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
+    if (isDelete) {
+      ctx.log?.("exec delete start", {
+        action: actionType,
+        path: item.localPath,
+      }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.item" });
+    }
     const start = Date.now();
     try {
       await raceWithTimeout(executeItem(item, ctx), itemTimeoutMs, ctx.signal);
+      const durationMs = Date.now() - start;
       ctx.onExecItem?.(item.localPath, actionType, "end", true);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: durationMs });
+      if (isDelete) {
+        ctx.log?.("exec delete ok", {
+          action: actionType,
+          path: item.localPath,
+          durationMs,
+        }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.item" });
+      } else if (durationMs >= SLOW_ITEM_LOG_MS) {
+        ctx.log?.("exec item slow", {
+          action: actionType,
+          path: item.localPath,
+          durationMs,
+        }, { hypothesisId: SyncHypotheses.itemStall, location: "executor.item" });
+      }
+      // Progress must advance as each item finishes — not after the whole batch
+      // (otherwise the explorer bar stays at 0/N until the end).
+      hooks.onSettled("success");
     } catch (e) {
       const errMsg = (e as Error).message;
+      const durationMs = Date.now() - start;
       ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
-      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
+      ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: durationMs });
+      if (isDelete || e instanceof ItemTimeoutError || durationMs >= SLOW_ITEM_LOG_MS) {
+        ctx.log?.("exec item failed", {
+          action: actionType,
+          path: item.localPath,
+          durationMs,
+          error: errMsg,
+          errorName: (e as Error).name,
+          timedOut: e instanceof ItemTimeoutError,
+        }, {
+          hypothesisId: e instanceof ItemTimeoutError
+            ? SyncHypotheses.itemStall
+            : isDelete
+              ? SyncHypotheses.deleteNotExecuted
+              : SyncHypotheses.itemStall,
+          location: "executor.item",
+        });
+      }
+      // Mirror success path: notify UI/timeout accounting before rethrowing to the pool.
+      if (e instanceof ItemTimeoutError) {
+        hooks.onSettled("timeout");
+      } else {
+        hooks.onSettled("failure");
+      }
       throw e;
     }
   });
@@ -222,18 +300,16 @@ async function runExecutableBatch(
     signal: ctx.signal,
   });
 
+  // Collect outcomes only — onSettled already ran per-item so the progress bar moves live.
   for (let i = 0; i < settled.length; i++) {
     const r = settled[i];
     if (!r) continue;
     if (r.status === "fulfilled") {
       succeeded.push(items[i]);
-      hooks.onSettled("success");
     } else if (r.reason instanceof ItemTimeoutError) {
       timedOut.push(items[i]);
-      hooks.onSettled("timeout");
     } else {
       failed.push({ item: items[i], error: r.reason as Error });
-      hooks.onSettled("failure");
     }
   }
 

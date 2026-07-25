@@ -88,6 +88,7 @@ Logs can help diagnose what's going wrong. First ensure **Settings > Dropbox Syn
 
 1. Open the **command palette** (Ctrl/Cmd+P) and search for "View sync logs"
 2. Go to **Settings > Dropbox Sync > Troubleshooting > View Logs**
+3. Or open the vault-root file `sync-debug-<deviceId>.log` in the file list (it lives at the vault root on purpose so you can find and share it)
 
 <!-- TODO: 스크린샷 — 로그 뷰어 모달 -->
 <!-- 파일: docs/images/log-viewer.png -->
@@ -95,3 +96,9 @@ Logs can help diagnose what's going wrong. First ensure **Settings > Dropbox Syn
 You can copy the logs to your clipboard to share when reporting issues.
 
 For live logs on an agent’s Mac during a Cursor Debug session (including from iPad over Wi‑Fi), see [Cursor Debug ingest](cursor-debug-ingest.md).
+
+## Testing: re-download everything (ignore local delete history)
+
+If you wipe the local vault to retest and the plugin tries to **delete those files on Dropbox**, it still has a local sync base (last-known file state). Clear **sync state** so the plugin behaves like a first install, then sync again.
+
+See [Plugin persistence](plugin-persistence.md) for where sync state lives (`vaultInstanceId` IndexedDB on desktop/Android, `.sync-state/` on iOS) and the safe reset steps. Leave `data.json` alone if you want to keep your Dropbox login.

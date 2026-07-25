@@ -24,6 +24,13 @@ export type CursorDebugIngestEntry = {
   runId?: string;
 };
 
+/** Optional tags so vault log + Wi‑Fi ingest share the same filterable metadata. */
+export type CursorDebugLogMeta = {
+  hypothesisId?: string;
+  location?: string;
+  runId?: string;
+};
+
 function normalizeIngestPath(path: string): string {
   const trimmed = path.trim();
   if (!trimmed) return "";
@@ -88,9 +95,14 @@ export function postCursorDebugIngest(entry: CursorDebugIngestEntry): void {
 
 /**
  * Map ordinary plugin log lines into Cursor Debug ingest entries.
- * hypothesisId "log" marks continuous logging vs ad-hoc instrumentation.
+ * Default hypothesisId "log" marks continuous logging; callers may override
+ * via meta (e.g. sync monitor tags: sync, H-A, H-B).
  */
-export function postCursorDebugLogLine(message: string, data?: unknown): void {
+export function postCursorDebugLogLine(
+  message: string,
+  data?: unknown,
+  meta?: CursorDebugLogMeta,
+): void {
   if (!isCursorDebugIngestConfigured()) return;
 
   let dataRecord: Record<string, unknown> | undefined;
@@ -109,9 +121,10 @@ export function postCursorDebugLogLine(message: string, data?: unknown): void {
   }
 
   postCursorDebugIngest({
-    hypothesisId: "log",
-    location: "main.log",
+    hypothesisId: meta?.hypothesisId ?? "log",
+    location: meta?.location ?? "main.log",
     message,
+    ...(meta?.runId ? { runId: meta.runId } : {}),
     ...(dataRecord ? { data: dataRecord } : {}),
   });
 }

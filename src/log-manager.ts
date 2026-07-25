@@ -6,9 +6,11 @@ export interface LogStorage {
 }
 
 /**
- * 동기화 로그 관리.
+ * Sync debug log writer for a vault-relative path supplied by the caller.
  *
- * 버퍼링하여 디스크 쓰기를 줄이고, 최대 줄 수를 초과하면 오래된 로그를 삭제한다.
+ * The product path is a vault-root `sync-debug-*.log` so users can see and share
+ * it in Obsidian — intentional, not an oversight vs plugin-folder storage.
+ * Buffers writes and trims to maxLines so disk I/O stays bounded.
  */
 export interface LogManagerOptions {
   maxLines?: number;

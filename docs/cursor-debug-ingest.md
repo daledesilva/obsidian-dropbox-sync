@@ -11,8 +11,8 @@ Debug logging and Cursor ingest are one pipeline with two destinations:
 | Piece | Role |
 |---|---|
 | **Debug logging** (synced `debugLoggingEnabled`) | Master switch. Default **on**. Off → `main.log()` is a no-op (no vault file, no console mirror, no Wi‑Fi POST) |
-| **Vault log** | `sync-debug-<deviceId>.log` in the vault root via `LogManager` |
-| **Device-local ingest fields** | Host, Port, Session ID, Ingest path in `localStorage` (`dropbox-sync-device-settings_v1`) — **not** vault `data.json` |
+| **Vault log** | `sync-debug-<deviceId>.log` at the **vault root** via `LogManager` — intentional so users can open/share it from the file list (not under `.obsidian/plugins`) |
+| **Device-local ingest fields** | Host, Port, Session ID, Ingest path via Obsidian `App.loadLocalStorage` / `App.saveLocalStorage` (key `dropbox-sync-device-settings_v1`) — **not** vault `data.json` |
 | **LAN relay** | `scripts/ingest-lan-relay.sh` (socat) exposes Cursor’s localhost-only ingest on the LAN |
 | **Cursor Debug session** | Owns the HTTP listener; shell scripts cannot start it |
 
@@ -63,20 +63,20 @@ Agent shortcut: `/debug-ingest` (see `.cursor/commands/debug-ingest.md` and `.cu
 ```mermaid
 flowchart TB
   Synced["Synced PluginSettings.debugLoggingEnabled"]
-  Device["Device-local localStorage blob"]
+  Device["Device-local App localStorage blob"]
   Synced --> GateLog["Gates all logging"]
   Device --> ResolveUrl["resolveCursorDebugIngestUrl"]
   ResolveUrl --> Post["requestUrl POST when URL resolves"]
 ```
 
 - **Synced:** turn logging on/off for the vault’s plugin settings (survives across devices as a preference).
-- **Device-local:** Mac LAN IP and Debug session values stay on this machine/profile so one device’s host does not overwrite another’s via Dropbox-synced `data.json`.
+- **Device-local:** Mac LAN IP and Debug session values use vault-scoped App localStorage on this machine so one device’s host does not overwrite another’s via Dropbox-synced `data.json`. Call `initDeviceSettings(app)` at the start of `onload` before any ingest reads.
 
 ## Technical details
 
 | Module | Role |
 |---|---|
-| `src/device-settings/` | Versioned device-local blob + read/patch helpers |
+| `src/device-settings/` | Versioned device-local blob via App localStorage + read/patch helpers |
 | `src/debug/cursor-debug-ingest.ts` | URL resolve + `requestUrl` POST + `postCursorDebugLogLine` |
 | `src/main.ts` `log()` / `sendDebugLogCanary()` | Gate + vault write + fire-and-forget ingest |
 | `src/ui/settings-tab.ts` | Troubleshooting toggle, ingest fields, Send test log |
@@ -120,3 +120,5 @@ Reusable Cursor templates (rule, command, scripts) also live under `_reference_i
 - **Ingest is fire-and-forget** from `main.log()` so vault flush is not delayed; failures are swallowed — verify with **Send test log**, do not treat silence as proof a code path did not run.
 - **Scripts cannot start Cursor’s listener** — only a Debug-mode agent session can.
 - **Existing installs** migrate missing `debugLoggingEnabled` to `true` so View logs keeps working after upgrade.
+- **Legacy raw `window.localStorage` blob** is copied into App localStorage once per vault when App storage is empty; the next write clears the old global key.
+- **Vault-root log path is product behavior**, not a packaging mistake — see [Plugin persistence](plugin-persistence.md).
