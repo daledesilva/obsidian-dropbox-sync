@@ -368,7 +368,10 @@ async function executeItem(
       } catch (err) {
         if (err instanceof RevConflictError) {
           try {
-            await dispatchConflict(item, conflictCtx);
+            const conflictResult = await dispatchConflict(item, conflictCtx);
+            if (conflictResult.conflictSiblingPath) {
+              item.conflictSiblingPath = conflictResult.conflictSiblingPath;
+            }
           } catch (conflictErr) {
             // Remote file was deleted — stale rev is useless.
             // Upload fresh (no rev) to recover from the loop.
@@ -413,7 +416,10 @@ async function executeItem(
     }
 
     case "conflict": {
-      await dispatchConflict(item, conflictCtx);
+      const conflictResult = await dispatchConflict(item, conflictCtx);
+      if (conflictResult.conflictSiblingPath) {
+        item.conflictSiblingPath = conflictResult.conflictSiblingPath;
+      }
       break;
     }
 

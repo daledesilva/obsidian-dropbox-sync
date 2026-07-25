@@ -62,6 +62,11 @@ export interface SyncPlanItem {
   pathLower: string;
   localPath: string;
   action: SyncAction;
+  /**
+   * Set after keep_both (or newest→keep_both) writes a remote snapshot sibling.
+   * Used by per-file status UI to open Compare without guessing the timestamp.
+   */
+  conflictSiblingPath?: string;
 }
 
 /** 동기화 계획 */

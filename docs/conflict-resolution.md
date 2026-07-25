@@ -17,6 +17,8 @@ notes/idea.conflict-20260306T143200.md ← the other device's version
 
 You can compare them at your own pace, merge what you need, and delete the `.conflict` file when done.
 
+When the conflicted note is open, the status bar shows a conflict icon. Click it for a short explanation and **Compare**, which opens your version and the Dropbox copy in a split (side-by-side on wide viewports, stacked on tall ones). See [Per-file status bar](per-file-status-bar.md).
+
 ### Keep newest
 
 The version that was edited most recently wins. The older version is overwritten.

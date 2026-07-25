@@ -98,6 +98,17 @@ export interface SyncEngineOptions {
   log?: SyncMonitorLog;
   /** deleteLocal 실행 직전 — vault delete 이벤트와 엔진 삭제를 구분 */
   onBeforeDeleteLocal?: (pathLower: string) => void;
+  /**
+   * Per-item execute lifecycle (background + manual).
+   * Used for per-file status bar; explorer activity still uses onActivityPath.
+   */
+  onExecItem?: (
+    localPath: string,
+    actionType: string,
+    event: "start" | "end",
+    ok?: boolean,
+    error?: string,
+  ) => void;
 }
 
 export interface CycleResult {
@@ -555,6 +566,8 @@ export class SyncEngine {
           execFailed++;
           this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
         }
+        // Forward for per-file status (must run for background cycles too).
+        this.options.onExecItem?.(localPath, actionType, event, ok, error);
       },
     });
     await this.liveReport?.phaseEnd(

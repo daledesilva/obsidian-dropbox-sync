@@ -12,6 +12,7 @@ import {
 import { DropboxSyncSettingTab } from "./ui/settings-tab";
 import { StatusBar } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
+import { ConflictCompareModal } from "./ui/conflict-compare-modal";
 import { ConfirmModal } from "./ui/confirm-modal";
 import { SyncCancelConfirmModal } from "./ui/sync-cancel-confirm-modal";
 import { DeleteConfirmModal } from "./ui/delete-confirm-modal";
@@ -19,6 +20,7 @@ import { IncompatiblePathsModal } from "./ui/incompatible-paths-modal";
 import { LogViewerModal } from "./ui/log-viewer-modal";
 import { SyncStatusModal } from "./ui/sync-status-modal";
 import { OnboardingModal } from "./ui/onboarding-modal";
+import { FileSyncStatusTracker } from "./sync/file-sync-status";
 import { VaultAdapter } from "./adapters/vault-adapter";
 import { DropboxAdapter, DropboxAuthError } from "./adapters/dropbox-adapter";
 import { IndexedDBStore, migrateLegacyIndexedDbIfNeeded } from "./adapters/indexeddb-store";
@@ -35,7 +37,7 @@ import { postCursorDebugLogLine, type CursorDebugLogMeta } from "./debug/cursor-
 import { createSyncMonitorLog, SyncHypotheses, samplePaths } from "./debug/sync-monitor";
 import { registerDemoCommands } from "./debug/demo-commands";
 import { initDeviceSettings } from "./device-settings/device-settings";
-import type { SyncEngine } from "./sync/engine";
+import { isConflictFile, type SyncEngine } from "./sync/engine";
 
 import { fetchFileFromRemote } from "./deep-link";
 import {
@@ -73,6 +75,9 @@ import {
 export default class DropboxSyncPlugin extends Plugin {
   settings: PluginSettings = DEFAULT_SETTINGS;
   private statusBar: StatusBar | null = null;
+  /** Per-path UI status for the active-file status bar (session-only). */
+  private fileSyncStatus = new FileSyncStatusTracker();
+  private unsubscribeFileSyncStatus: (() => void) | null = null;
   private sectionProgress: SyncSectionProgress | null = null;
   /**
    * Section whose explorer segment fill follows executor onProgress.
@@ -209,6 +214,9 @@ export default class DropboxSyncPlugin extends Plugin {
 
     this.addSettingTab(new DropboxSyncSettingTab(this.app, this));
     this.statusBar = new StatusBar(this.addStatusBarItem());
+    this.unsubscribeFileSyncStatus = this.fileSyncStatus.subscribe(() => {
+      this.refreshStatusBarForActiveFile();
+    });
 
     // 커맨드 등록
     this.addCommand({ id: "sync-now", name: "Sync now", callback: () => this.openSyncScopeModal() });
@@ -247,8 +255,18 @@ export default class DropboxSyncPlugin extends Plugin {
       evt.preventDefault();
       this.showContextMenu(evt);
     });
-    this.statusBar?.onClick(() => this.showStatusModal());
+    this.statusBar?.onClick(() => this.handleStatusBarClick());
     this.statusBar?.onContextMenu((evt) => this.showContextMenu(evt));
+    this.registerEvent(
+      this.app.workspace.on("active-leaf-change", () => {
+        this.refreshStatusBarForActiveFile();
+      }),
+    );
+    this.registerEvent(
+      this.app.workspace.on("file-open", () => {
+        this.refreshStatusBarForActiveFile();
+      }),
+    );
 
     this.app.workspace.onLayoutReady(async () => {
       if (this.settings.syncName) {
@@ -256,6 +274,7 @@ export default class DropboxSyncPlugin extends Plugin {
         this.registerVaultEvents();
       }
       this.applySyncState();
+      this.refreshStatusBarForActiveFile();
       void this.showOnboardingIfNeeded();
     });
   }
@@ -266,6 +285,9 @@ export default class DropboxSyncPlugin extends Plugin {
     this.longpoll?.stop();
     this.sectionProgress?.destroy();
     this.sectionProgress = null;
+    this.unsubscribeFileSyncStatus?.();
+    this.unsubscribeFileSyncStatus = null;
+    this.fileSyncStatus.destroy();
     this.statusBar?.destroy();
   }
 
@@ -412,8 +434,8 @@ export default class DropboxSyncPlugin extends Plugin {
     // Do not clear syncing/ribbon here — syncNow's finally owns cleanup so a
     // follow-up sync cannot start while an aborted cycle is still unwinding
     // (which previously left the ribbon spinning or cleared a newer run's spin).
-    // Still out of sync until a later run finishes successfully.
-    this.statusBar?.markPending("stopping");
+    // In-flight file icons go back to pending until a later run finishes.
+    this.fileSyncStatus.requeueSyncing("Sync stopping — file not fully synced yet");
     new Notice("Dropbox Sync: stopping…", 2000);
   }
 
@@ -468,11 +490,6 @@ export default class DropboxSyncPlugin extends Plugin {
     if (!this.scopeModalOpen) {
       setRibbonSyncing(this.ribbonEl, true);
     }
-    // Background: keep/show out-of-sync until success. Manual progress is the explorer panel.
-    if (!manual) {
-      this.statusBar?.markPending();
-    }
-
     let cursorUpdated = false;
     let needsResyncAfterRename = false;
     let outcome: SyncOutcome = "up_to_date";
@@ -599,7 +616,7 @@ export default class DropboxSyncPlugin extends Plugin {
             endMessage = "Dropbox Sync: files renamed. Syncing again…";
             noticeDuration = 5000;
             this.lastSyncSummary = "renamed — resyncing";
-            this.statusBar?.update("success");
+            this.fileSyncStatus.applySyncResult(cycleResult.result);
             engine.setDeferCursorUpdate(false);
             return;
           }
@@ -670,7 +687,7 @@ export default class DropboxSyncPlugin extends Plugin {
           endMessage = "Dropbox Sync: files renamed. Syncing again…";
           noticeDuration = 5000;
           this.lastSyncSummary = "renamed — resyncing";
-          this.statusBar?.update("success");
+          this.fileSyncStatus.applySyncResult(result);
           return;
         }
 
@@ -739,7 +756,7 @@ export default class DropboxSyncPlugin extends Plugin {
         outcome = "aborted";
         endMessage = "Dropbox Sync: cancelled";
         noticeDuration = 3000;
-        this.statusBar?.markPending("cancelled");
+        this.fileSyncStatus.requeueSyncing("Sync cancelled — file not fully synced yet");
         return;
       }
       if (e instanceof DropboxAuthError) {
@@ -760,7 +777,7 @@ export default class DropboxSyncPlugin extends Plugin {
         endMessage = "Dropbox sync: token expired. Please reconnect in settings.";
         noticeDuration = 8000;
         this.lastSyncSummary = "auth expired";
-        this.statusBar?.update("error", "auth expired");
+        this.fileSyncStatus.failSyncing("Dropbox auth expired — reconnect in settings");
         return;
       }
       try {
@@ -776,7 +793,7 @@ export default class DropboxSyncPlugin extends Plugin {
       endMessage = `Dropbox Sync error: ${errorMessage}`;
       noticeDuration = 8000;
       this.lastSyncSummary = "sync failed";
-      this.statusBar?.update("error", "sync failed");
+      this.fileSyncStatus.failSyncing("Sync failed for this file");
     } finally {
       const endedAt = Date.now();
       setRibbonSyncing(this.ribbonEl, false);
@@ -957,8 +974,7 @@ export default class DropboxSyncPlugin extends Plugin {
         isSyncing: () => this.syncing,
         isEnabled: () => this.settings.backgroundSyncEnabled && !!this.engineMgr?.store,
         onChanges: () => {
-          // Remote delta detected — show out-of-sync until this (or a follow-up) run finishes.
-          this.statusBar?.markPending();
+          // Remote delta → sync; per-file icons update when the plan marks paths syncing.
           void this.syncNow();
         },
         log: (msg, data) => this.log(msg, data),
@@ -1100,6 +1116,8 @@ export default class DropboxSyncPlugin extends Plugin {
       strictLocalPaths: Platform.isIosApp || Platform.isMobile,
       onPathIssues: (issues: PathGuardIssue[]) => this.handlePathIssues(issues),
       onPlanReady: async (plan: SyncPlan) => {
+        // Per-file status bar: every actionable path becomes syncing for this cycle.
+        this.fileSyncStatus.markPlanSyncing(plan.items);
         if (this.interactiveUi) {
           // Flip Scanning → Syncing once the plan exists (execute follows).
           if (this.progressSection) {
@@ -1111,6 +1129,22 @@ export default class DropboxSyncPlugin extends Plugin {
         // plan.items excludes noops — count is the actionable change volume.
         if (plan.items.length <= threshold) return;
         this.promoteBackgroundToInteractive(plan.items.length, threshold);
+      },
+      onExecItem: (localPath: string, _actionType: string, event: "start" | "end", ok?: boolean, error?: string) => {
+        if (event === "start") {
+          this.fileSyncStatus.markSyncing(
+            localPath,
+            "This file is currently syncing with Dropbox",
+          );
+          return;
+        }
+        // Terminal outcomes are applied from SyncResult; only surface live errors early.
+        if (event === "end" && ok === false) {
+          this.fileSyncStatus.markError(
+            localPath,
+            error ? `Sync failed: ${error}` : "Sync failed for this file",
+          );
+        }
       },
       onScanProgress: (completed: number, total: number) => {
         // Local list/hash fill while the section is still marked Scanning….
@@ -1158,6 +1192,12 @@ export default class DropboxSyncPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (this.syncing || !(file instanceof TFile)) return;
         if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
+        if (!isConflictFile(file.path)) {
+          this.fileSyncStatus.markPending(
+            file.path,
+            "This file has local changes that have not synced to Dropbox yet",
+          );
+        }
         this.scheduleDebouncedSync();
       }),
     );
@@ -1167,6 +1207,7 @@ export default class DropboxSyncPlugin extends Plugin {
         if (!(file instanceof TFile)) return;
         if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
         const p = file.path.toLowerCase();
+        this.fileSyncStatus.clearPath(file.path);
         if (this.syncDeletedByEngine.delete(p)) {
           void this.log("vault delete ignored (engine-owned)", { path: p }, {
             hypothesisId: SyncHypotheses.sync,
@@ -1188,12 +1229,19 @@ export default class DropboxSyncPlugin extends Plugin {
     this.registerEvent(
       this.app.vault.on("rename", (file, oldPath) => {
         if (!(file instanceof TFile)) return;
+        this.fileSyncStatus.renamePath(oldPath, file.path);
         const triggersSync = vaultRenameShouldTriggerSync(oldPath, file.path, excludes);
         if (triggersSync && !this.suppressRenameDeleteTracking) {
           engine.trackDelete(oldPath.toLowerCase());
           this.engineMgr?.persistDeleteLog();
         }
-        if (!this.syncing && triggersSync) this.scheduleDebouncedSync();
+        if (!this.syncing && triggersSync) {
+          this.fileSyncStatus.markPending(
+            file.path,
+            "This file has local changes that have not synced to Dropbox yet",
+          );
+          this.scheduleDebouncedSync();
+        }
       }),
     );
 
@@ -1201,6 +1249,13 @@ export default class DropboxSyncPlugin extends Plugin {
       this.app.vault.on("create", (file) => {
         if (this.syncing || !(file instanceof TFile)) return;
         if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
+        // keep_both siblings are not sync targets — don't badge them as pending uploads.
+        if (!isConflictFile(file.path)) {
+          this.fileSyncStatus.markPending(
+            file.path,
+            "This file has not synced to Dropbox yet",
+          );
+        }
         if (this.settings.syncOnCreateDeleteRename) this.scheduleDebouncedSync();
       }),
     );
@@ -1253,8 +1308,6 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private scheduleDebouncedSync(): void {
     if (!this.settings.backgroundSyncEnabled) return;
-    // Vault changed — out-of-sync icon until a successful background sync clears it.
-    this.statusBar?.markPending();
     this.clearDebounceTimer();
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
@@ -1277,6 +1330,69 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   // ── Private: UI ──
+
+  /**
+   * Status bar is a view of FileSyncStatusTracker for getActiveFile() only.
+   * Empty leaf / idle synced file → hidden; tab switches re-run this.
+   */
+  private refreshStatusBarForActiveFile(): void {
+    void this.refreshStatusBarForActiveFileAsync();
+  }
+
+  private async refreshStatusBarForActiveFileAsync(): Promise<void> {
+    const file = this.app.workspace.getActiveFile();
+    if (!file) {
+      this.statusBar?.setActiveFileStatus(null);
+      return;
+    }
+    const path = file.path;
+    const existing = this.fileSyncStatus.get(path);
+    if (existing) {
+      this.statusBar?.setActiveFileStatus(existing);
+      return;
+    }
+
+    // Never-synced: pending on open without hashing the file (avoids tab-switch cost).
+    // Skip .conflict-* siblings — they are keep_both artifacts, not sync targets.
+    const store = this.engineMgr?.store;
+    if (
+      store
+      && !isConflictFile(path)
+      && vaultEventShouldTriggerSync(path, this.settings.excludePatterns)
+    ) {
+      try {
+        const entry = await store.getEntry(path.toLowerCase());
+        if (this.app.workspace.getActiveFile()?.path !== path) return;
+        if (!entry) {
+          this.fileSyncStatus.markPending(
+            path,
+            "This file has not synced to Dropbox yet",
+          );
+          return;
+        }
+      } catch {
+        /* store unavailable — leave icon hidden */
+      }
+    }
+
+    if (this.app.workspace.getActiveFile()?.path !== path) return;
+    this.statusBar?.setActiveFileStatus(null);
+  }
+
+  /** Conflict → compare modal; other states keep the vault Sync status modal. */
+  private handleStatusBarClick(): void {
+    if (this.statusBar?.lastStatus === "conflict") {
+      const file = this.app.workspace.getActiveFile();
+      if (file) {
+        new ConflictCompareModal(this.app, {
+          localPath: file.path,
+          conflictSiblingPath: this.statusBar.conflictSiblingPath,
+        }).open();
+        return;
+      }
+    }
+    this.showStatusModal();
+  }
 
   private showStatusModal(): void {
     new SyncStatusModal(
@@ -1399,24 +1515,9 @@ export default class DropboxSyncPlugin extends Plugin {
         const detail = err ? { message: err.message, name: err.name, stack: err.stack?.split("\n").slice(0, 3).join(" | ") } : err;
         void this.log(`FAIL ${f.item.action.type} ${f.item.localPath}`, detail);
       }
-      this.statusBar?.update("error", `${result.failed.length} failed`);
-    } else {
-      // Green tick only when we were out of sync or actually changed something.
-      // Quiet interval runs that find nothing stay icon-free.
-      const wasPending =
-        this.statusBar?.lastStatus === "pending"
-        || this.statusBar?.lastStatus === "syncing"
-        || this.statusBar?.lastStatus === "error";
-      const hadWork =
-        result.succeeded.length > 0
-        || !!(deletesSkipped && deletesSkipped > 0)
-        || !!(pathsSkipped && pathsSkipped > 0);
-      if (wasPending || hadWork) {
-        this.statusBar?.update("success", feedback.summary);
-      } else if (this.statusBar?.lastStatus !== "success") {
-        this.statusBar?.update("hidden");
-      }
     }
+    // Per-file icons: apply path outcomes (vault-wide status bar updates removed).
+    this.fileSyncStatus.applySyncResult(result);
 
     this.lastSyncSummary = feedback.summary;
     return feedback;

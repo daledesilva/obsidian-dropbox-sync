@@ -65,11 +65,16 @@ async function readLocalWithHash(
 
 // ── Conflict Handlers ──
 
+/** Outcome from a conflict handler (sibling path when keep_both wrote one). */
+export interface ConflictHandlerResult {
+  conflictSiblingPath?: string;
+}
+
 /** keep_both: 원격을 .conflict 파일로 보존, 로컬을 원격에 업로드 */
 export async function handleConflictKeepBoth(
   item: SyncPlanItem,
   deps: ConflictHandlerDeps,
-): Promise<void> {
+): Promise<ConflictHandlerResult> {
   const { fs, remote, store } = deps;
   const { pathLower, localPath } = item;
 
@@ -81,13 +86,14 @@ export async function handleConflictKeepBoth(
   const entry = await remote.upload(localPath, localData);
 
   await updateSyncState(store, pathLower, localPath, localHash, entry.hash ?? localHash, entry.rev);
+  return { conflictSiblingPath: conflictPath };
 }
 
 /** newest: mtime 비교하여 더 최신 버전으로 통일. 동률 시 keep_both fallback */
 export async function handleConflictNewest(
   item: SyncPlanItem,
   deps: ConflictHandlerDeps,
-): Promise<void> {
+): Promise<ConflictHandlerResult> {
   const { fs, remote, store } = deps;
   const { pathLower, localPath } = item;
 
@@ -98,8 +104,7 @@ export async function handleConflictNewest(
   const remoteMtime = result.metadata.serverModified;
 
   if (localMtime === remoteMtime) {
-    await handleConflictKeepBoth(item, deps);
-    return;
+    return handleConflictKeepBoth(item, deps);
   }
 
   if (localMtime > remoteMtime) {
@@ -110,19 +115,19 @@ export async function handleConflictNewest(
     await fs.write(localPath, result.data, result.metadata.serverModified);
     await updateSyncState(store, pathLower, localPath, result.verifiedHash, result.verifiedHash, result.metadata.rev);
   }
+  return {};
 }
 
 /** manual: conflictResolver 콜백으로 사용자에게 위임. 없으면 keep_both fallback */
 export async function handleConflictManual(
   item: SyncPlanItem,
   deps: ConflictHandlerDeps,
-): Promise<void> {
+): Promise<ConflictHandlerResult> {
   const { fs, remote, store } = deps;
   const { pathLower, localPath } = item;
 
   if (!deps.conflictResolver) {
-    await handleConflictKeepBoth(item, deps);
-    return;
+    return handleConflictKeepBoth(item, deps);
   }
 
   const { data: localData, hash: localHash } = await readLocalWithHash(fs, localPath);
@@ -163,10 +168,14 @@ export async function handleConflictManual(
     const entry = await remote.upload(localPath, merged);
     await updateSyncState(store, pathLower, localPath, mergedHash, entry.hash ?? mergedHash, entry.rev);
   }
+  return {};
 }
 
 /** 전략 → 핸들러 디스패치 맵 */
-type ConflictHandler = (item: SyncPlanItem, deps: ConflictHandlerDeps) => Promise<void>;
+type ConflictHandler = (
+  item: SyncPlanItem,
+  deps: ConflictHandlerDeps,
+) => Promise<ConflictHandlerResult>;
 
 const CONFLICT_HANDLERS: Record<ConflictStrategy, ConflictHandler> = {
   keep_both: handleConflictKeepBoth,
@@ -178,18 +187,61 @@ const CONFLICT_HANDLERS: Record<ConflictStrategy, ConflictHandler> = {
 export function dispatchConflict(
   item: SyncPlanItem,
   deps: ConflictHandlerDeps,
-): Promise<void> {
+): Promise<ConflictHandlerResult> {
   const strategy = deps.conflictStrategy ?? "keep_both";
   return CONFLICT_HANDLERS[strategy](item, deps);
 }
 
 /**
- * 충돌 파일 경로 생성 (timestamp 포함으로 반복 충돌 시 덮어쓰기 방지).
- * test.md → test.conflict-2026-03-05T1035.md
+ * keep_both sibling path (timestamp avoids overwrite on repeated conflicts).
+ * test.md → test.conflict-2026-03-05T1035.md — returned to UI via SyncPlanItem.conflictSiblingPath.
  */
 export function makeConflictPath(path: string): string {
   const ts = new Date().toISOString().replace(/[:.]/g, "").slice(0, 15);
   const lastDot = path.lastIndexOf(".");
   if (lastDot === -1) return `${path}.conflict-${ts}`;
   return `${path.slice(0, lastDot)}.conflict-${ts}${path.slice(lastDot)}`;
+}
+
+/**
+ * Prefix used to discover keep_both siblings for `originalPath`
+ * (e.g. notes/a.md → notes/a.conflict-).
+ */
+export function conflictSiblingStemPrefix(originalPath: string): string {
+  const lastDot = originalPath.lastIndexOf(".");
+  const lastSlash = originalPath.lastIndexOf("/");
+  const hasExt = lastDot > lastSlash;
+  return hasExt
+    ? `${originalPath.slice(0, lastDot)}.conflict-`
+    : `${originalPath}.conflict-`;
+}
+
+/** True when candidate is a .conflict-TIMESTAMP sibling of originalPath. */
+export function isConflictSiblingOf(candidate: string, originalPath: string): boolean {
+  const prefix = conflictSiblingStemPrefix(originalPath);
+  if (!candidate.toLowerCase().startsWith(prefix.toLowerCase())) return false;
+  const lastDot = originalPath.lastIndexOf(".");
+  const lastSlash = originalPath.lastIndexOf("/");
+  const hasExt = lastDot > lastSlash;
+  const ext = hasExt ? originalPath.slice(lastDot) : "";
+  if (ext) {
+    if (!candidate.toLowerCase().endsWith(ext.toLowerCase())) return false;
+    const mid = candidate.slice(prefix.length, candidate.length - ext.length);
+    return /^\d{4}-\d{2}-\d{2}t\d{4}$/i.test(mid);
+  }
+  const mid = candidate.slice(prefix.length);
+  return /^\d{4}-\d{2}-\d{2}t\d{4}$/i.test(mid);
+}
+
+/** Newest keep_both sibling for originalPath among vault paths (lexicographic timestamp). */
+export function findNewestConflictSibling(
+  vaultPaths: string[],
+  originalPath: string,
+): string | null {
+  let best: string | null = null;
+  for (const path of vaultPaths) {
+    if (!isConflictSiblingOf(path, originalPath)) continue;
+    if (!best || path.localeCompare(best) > 0) best = path;
+  }
+  return best;
 }

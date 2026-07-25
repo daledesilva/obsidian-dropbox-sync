@@ -612,7 +612,7 @@
   color: var(--text-success, var(--text-normal));
 }
 
-/* ── Status Bar (icon-only: out of sync → green tick → hidden) ── */
+/* ── Status Bar (per-open-file refresh-cw) ── */
 
 .dbx-sync-statusbar {
   display: inline-flex;
@@ -633,15 +633,23 @@
   display: none;
 }
 
-.dbx-sync-statusbar-pending {
-  color: var(--text-muted);
+/* Feature/accent colour — same family as ribbon interactive chrome. */
+.dbx-sync-statusbar-pending,
+.dbx-sync-statusbar-syncing {
+  color: var(--interactive-accent);
+}
+
+/* Match ribbon: only the glyph spins while a cycle is in flight. */
+.dbx-sync-statusbar-syncing > svg {
+  animation: dbx-sync-spin 1s linear infinite;
 }
 
 .dbx-sync-statusbar-success {
-  color: var(--text-success, var(--color-green));
+  color: var(--text-success);
 }
 
-.dbx-sync-statusbar-error {
+.dbx-sync-statusbar-error,
+.dbx-sync-statusbar-conflict {
   color: var(--text-error);
 }
 

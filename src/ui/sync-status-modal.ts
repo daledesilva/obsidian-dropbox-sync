@@ -131,6 +131,7 @@ export class SyncStatusModal extends Modal {
       case "syncing": return "Syncing…";
       case "success": return this.info.detail ?? "Synced";
       case "error": return this.info.detail ?? "Error";
+      case "conflict": return this.info.detail ?? "Conflict";
     }
   }
 

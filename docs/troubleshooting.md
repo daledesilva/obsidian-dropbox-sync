@@ -14,9 +14,9 @@ Your files and settings are preserved — only the connection needs to be renewe
 
 A few things to check:
 
-1. Look at the **status bar** at the bottom of Obsidian — it shows the current sync state
-2. If it says "Dropbox: off", sync is disabled. Go to Settings and toggle it on.
-3. If it says "error", right-click the sync icon in the sidebar and choose a menu option, or check the logs (see below)
+1. Look at the **status bar** at the bottom of Obsidian — it shows sync state for the **currently open file** (see [Per-file status bar](per-file-status-bar.md)). No icon usually means that file is idle/synced, or no file is open.
+2. If automatic sync is off, go to Settings and enable background sync (or run Sync now from the ribbon).
+3. If the status bar shows an error for the open file, click it for details, or right-click the ribbon sync icon / check the logs (see below)
 4. Try clicking the **sync icon** in the left sidebar to trigger a manual sync
 
 <!-- TODO: 스크린샷 — 우클릭 메뉴 (Sync Now / Start Sync / Settings) -->
