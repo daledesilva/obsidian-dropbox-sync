@@ -3,7 +3,8 @@ import { SyncInterruptInfoModal } from "./sync-interrupt-info-modal";
 
 /**
  * Confirm before aborting an in-flight sync (explorer panel Cancel / ribbon).
- * Includes a one-line vault-safety note with an info icon into the longer interrupt modal.
+ * Modal chrome title is "Stop Syncing"; body explains resume-from-where-left-off.
+ * Safety line + info icon opens the longer interrupt-info modal.
  */
 export class SyncCancelConfirmModal extends Modal {
   private confirmed = false;
@@ -16,14 +17,16 @@ export class SyncCancelConfirmModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
     contentEl.empty();
-    contentEl.createEl("h3", { text: "Cancel sync?" });
+    // Use the modal title bar — not an h3 inside the body.
+    this.setTitle("Stop Syncing");
     contentEl.createEl("p", {
-      text: "Sync will stop now. Unfinished files stay as they are until the next sync.",
+      text:
+        "Cancelling the sync won't break your vault. You can cancel any time or simply close Obsidian. Syncing will resume from where it left off when run again.",
     });
 
-    // Safety line + accent circle-i opens the fuller interrupt-info modal.
+    // Plugin half-sync risk + accent circle-i opens the fuller interrupt-info modal.
     const safety = contentEl.createDiv({ cls: "dbx-sync-cancel-safety" });
-    safety.createSpan({ text: "Cancelling won't break your vault." });
+    safety.createSpan({ text: "Half synced plugins may stop working until fully synced" });
     const infoBtn = safety.createSpan({
       cls: "dbx-sync-cancel-safety-info",
       attr: {
@@ -45,18 +48,19 @@ export class SyncCancelConfirmModal extends Modal {
       new SyncInterruptInfoModal(this.app).open();
     });
 
+    // Resume (dismiss) first; Stop Syncing (abort) second — swapped vs the old order.
     new Setting(contentEl)
       .addButton((btn) =>
+        btn.setButtonText("Resume").onClick(() => this.close()),
+      )
+      .addButton((btn) =>
         btn
-          .setButtonText("Cancel sync")
+          .setButtonText("Stop Syncing")
           .setWarning()
           .onClick(() => {
             this.confirmed = true;
             this.close();
           }),
-      )
-      .addButton((btn) =>
-        btn.setButtonText("Keep syncing").onClick(() => this.close()),
       );
   }
 

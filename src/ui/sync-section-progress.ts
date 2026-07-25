@@ -1,19 +1,26 @@
 import { Notice, setIcon, type App, type WorkspaceLeaf } from "obsidian";
 import {
+  ACTION_SUMMARY_SEPARATOR,
+  actionSummaryModalTitle,
   formatActionSummaryPart,
   formatActionSummaryValue,
   type ActionSummaryPart,
+  type ActionSummaryPaths,
   type ActionSummaryType,
 } from "../sync/sync-reporter";
 import type { VaultSection } from "../sync/sync-scope";
+import { ActionPathsModal } from "./action-paths-modal";
 import { SyncCancelConfirmModal } from "./sync-cancel-confirm-modal";
 
 export type SectionProgressState = "pending" | "active" | "success" | "partial" | "failed";
 
 export type SectionProgressPhase = "idle" | "scan" | "sync";
 
+/** Vault section bars plus the trailing deferred-deletes segment. */
+export type ProgressSegmentId = VaultSection | "deletions";
+
 export interface SectionProgressSegment {
-  section: VaultSection;
+  section: ProgressSegmentId;
   state: SectionProgressState;
   description: string;
   /** scan = local list/hash; sync = plan execute. Drives detail copy for counts. */
@@ -27,15 +34,18 @@ export interface SectionProgressSegment {
    * Populated from scan/execute activity so the count link can peek at recent work.
    */
   recentPaths: string[];
-  /** Succeeded conflict paths for this section — conflict summary text becomes a toggle link. */
+  /** Succeeded conflict paths — retained for callers; chips use summaryPaths. */
   conflictPaths: string[];
   /** Structured action counts for white icons + normal-coloured values in the panel. */
   summaryParts: ActionSummaryPart[];
+  /** Succeeded paths per action type — opened by summary chips. */
+  summaryPaths: ActionSummaryPaths;
 }
 
 export interface SectionProgressResultOptions {
   conflictPaths?: string[];
   summaryParts?: ActionSummaryPart[];
+  summaryPaths?: ActionSummaryPaths;
 }
 
 /**
@@ -67,8 +77,10 @@ export function isFileExplorerVisible(app: App): boolean {
  * top-to-bottom, older rows faded). Once opened, the peek follows onto later active
  * segments until collapsed. Count clicks use detailEl delegation so live number
  * re-renders do not drop the hit target.
- * A conflict summary is also a link that expands a scrollable path list (max 50vh).
- * Expanded footer: accent-styled Cancel (centered); interrupt info lives in the confirm modal.
+ * Finished summaries use accent chips (upload/download/deletes/conflicts); chip click
+ * opens a path-list modal. The Deletions detail text line is omitted when not actively
+ * deleting (counts already appear as trash chips on vault-section lines).
+ * Expanded footer: accent-styled Cancel (centered); the Cancel row collapses when complete.
  */
 export class SyncSectionProgress {
   private rootEl: HTMLElement | null = null;
@@ -84,9 +96,9 @@ export class SyncSectionProgress {
   private headerActionEl: HTMLElement | null = null;
   private isMinimized = false;
   private segments: SectionProgressSegment[] = [];
-  private fillEls = new Map<VaultSection, HTMLElement>();
+  private fillEls = new Map<ProgressSegmentId, HTMLElement>();
   /** Live `completed/total` text nodes — updated in place so the count link stays clickable. */
-  private countTextEls = new Map<VaultSection, HTMLElement>();
+  private countTextEls = new Map<ProgressSegmentId, HTMLElement>();
   private layoutHandler: (() => void) | null = null;
   /**
    * When true for this run, emit Notices for segment start/end because the explorer
@@ -96,16 +108,12 @@ export class SyncSectionProgress {
   /** Pending end message to combine with the next segment start into one Notice. */
   private pendingEndedNotice: string | null = null;
   /** Section whose recent-path peek is open under its detail count link. */
-  private recentPathsExpandedSection: VaultSection | null = null;
+  private recentPathsExpandedSection: ProgressSegmentId | null = null;
   /**
    * When the user opens the recent-path peek, keep showing it on later active segments
    * until they collapse it (or the run ends / is interrupted).
    */
   private recentPathsFollowActive = false;
-  /** Section whose conflict path list is expanded under the conflict summary link. */
-  private conflictsExpandedSection: VaultSection | null = null;
-  /** Custom hover tip for recent paths (native title cannot style path vs name). */
-  private pathTooltipEl: HTMLElement | null = null;
 
   /**
    * @param onCancel Confirmed cancel from the panel — typically aborts the in-flight sync.
@@ -127,13 +135,13 @@ export class SyncSectionProgress {
       recentPaths: [],
       conflictPaths: [],
       summaryParts: [],
+      summaryPaths: {},
     }));
     // Sticky for the run: closed at start keeps Notices even if the user opens explorer later.
     this.segmentNoticesEnabled = !isFileExplorerVisible(this.app);
     this.pendingEndedNotice = null;
     this.recentPathsExpandedSection = null;
     this.recentPathsFollowActive = false;
-    this.conflictsExpandedSection = null;
     this.mount();
     this.render();
   }
@@ -180,12 +188,33 @@ export class SyncSectionProgress {
     return this.segmentNoticesEnabled || !isFileExplorerVisible(this.app);
   }
 
-  markActive(section: VaultSection): void {
+  /**
+   * Append a trailing Deletions bar once deletes are known during a manual run.
+   * Idempotent — later sections that also have deletes do not add another cell.
+   */
+  ensureDeletionsSegment(): void {
+    if (this.segments.some((s) => s.section === "deletions")) return;
+    this.segments.push({
+      section: "deletions",
+      state: "pending",
+      description: "Queued…",
+      phase: "idle",
+      completed: 0,
+      total: 0,
+      recentPaths: [],
+      conflictPaths: [],
+      summaryParts: [],
+      summaryPaths: {},
+    });
+    this.render();
+  }
+
+  markActive(section: ProgressSegmentId): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
     seg.state = "active";
     seg.phase = "sync";
-    seg.description = "Syncing…";
+    seg.description = section === "deletions" ? "Deleting…" : "Syncing…";
     // Reset counts so scan totals do not leak into execute fill until onProgress.
     seg.completed = 0;
     seg.total = 0;
@@ -197,7 +226,7 @@ export class SyncSectionProgress {
   }
 
   /** Show the segment as active before plan/execute (local+remote scan). */
-  markScanning(section: VaultSection): void {
+  markScanning(section: ProgressSegmentId): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
     seg.state = "active";
@@ -216,7 +245,7 @@ export class SyncSectionProgress {
    * Prefer in-place fill + count text updates so the count-link hit target is not destroyed
    * while numbers tick (avoids dropped clicks during live re-renders).
    */
-  updateOperationProgress(section: VaultSection, completed: number, total: number): void {
+  updateOperationProgress(section: ProgressSegmentId, completed: number, total: number): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg || seg.state !== "active") return;
     const hadCountLink = seg.total > 0;
@@ -245,7 +274,7 @@ export class SyncSectionProgress {
    * Record a path the active section is currently working on (scan hash or execute start).
    * Keeps newest-first latest paths (up to 3) for the detail count-link peek.
    */
-  recordActivityPath(section: VaultSection, path: string): void {
+  recordActivityPath(section: ProgressSegmentId, path: string): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg || seg.state !== "active") return;
     const trimmed = path.trim();
@@ -260,7 +289,7 @@ export class SyncSectionProgress {
   }
 
   markResult(
-    section: VaultSection,
+    section: ProgressSegmentId,
     state: Exclude<SectionProgressState, "pending" | "active">,
     description: string,
     options?: SectionProgressResultOptions,
@@ -271,6 +300,9 @@ export class SyncSectionProgress {
     seg.description = description;
     seg.conflictPaths = options?.conflictPaths ? [...options.conflictPaths] : [];
     seg.summaryParts = options?.summaryParts ? [...options.summaryParts] : [];
+    seg.summaryPaths = options?.summaryPaths
+      ? cloneSummaryPaths(options.summaryPaths)
+      : {};
     // Finished segments show a full bar in their outcome color.
     if (seg.total <= 0) {
       seg.total = 1;
@@ -286,8 +318,35 @@ export class SyncSectionProgress {
     this.render();
   }
 
+  /**
+   * Patch a finished vault-section detail line after deferred deletes run.
+   * Trash chips/paths appear only once deletes have actually succeeded.
+   */
+  updateSummaryParts(
+    section: VaultSection,
+    summaryParts: ActionSummaryPart[],
+    description?: string,
+    summaryPaths?: ActionSummaryPaths,
+  ): void {
+    const seg = this.segments.find((s) => s.section === section);
+    if (!seg) return;
+    seg.summaryParts = [...summaryParts];
+    if (summaryPaths) {
+      seg.summaryPaths = cloneSummaryPaths(summaryPaths);
+      seg.conflictPaths = [...(summaryPaths.conflict ?? [])];
+    }
+    if (description !== undefined) {
+      seg.description = description;
+    } else if (summaryParts.length > 0) {
+      seg.description = summaryParts
+        .map(formatActionSummaryPart)
+        .join(ACTION_SUMMARY_SEPARATOR);
+    }
+    this.render();
+  }
+
   /** Mark the active/pending segment as failed and leave later ones as skipped. */
-  markInterrupted(section: VaultSection | null, description: string): void {
+  markInterrupted(section: ProgressSegmentId | null, description: string): void {
     let hit = section === null;
     for (const seg of this.segments) {
       if (section && seg.section === section) {
@@ -305,7 +364,6 @@ export class SyncSectionProgress {
     }
     this.recentPathsExpandedSection = null;
     this.recentPathsFollowActive = false;
-    this.conflictsExpandedSection = null;
     this.render();
   }
 
@@ -328,40 +386,9 @@ export class SyncSectionProgress {
     this.pendingEndedNotice = null;
     this.recentPathsExpandedSection = null;
     this.recentPathsFollowActive = false;
-    this.conflictsExpandedSection = null;
-    this.hidePathTooltip();
     this.fillEls.clear();
     this.countTextEls.clear();
     this.segments = [];
-  }
-
-  private hidePathTooltip(): void {
-    this.pathTooltipEl?.remove();
-    this.pathTooltipEl = null;
-  }
-
-  /**
-   * Styled hover tip: faint directory + bright file name (same split as the row).
-   * Positioned near the row; native `title` cannot do two colours.
-   */
-  private showPathTooltip(anchor: HTMLElement, path: string): void {
-    this.hidePathTooltip();
-    const tip = document.body.createDiv({
-      cls: "dbx-sync-explorer-progress-path-tooltip",
-    });
-    appendSplitPath(tip, path);
-    const rect = anchor.getBoundingClientRect();
-    tip.style.left = `${Math.max(8, rect.left)}px`;
-    tip.style.top = `${rect.bottom + 4}px`;
-    // Keep tip on-screen horizontally after layout.
-    requestAnimationFrame(() => {
-      const tipRect = tip.getBoundingClientRect();
-      const overflowRight = tipRect.right - (window.innerWidth - 8);
-      if (overflowRight > 0) {
-        tip.style.left = `${Math.max(8, rect.left - overflowRight)}px`;
-      }
-    });
-    this.pathTooltipEl = tip;
   }
 
   /** Confirm cancel in a modal, then invoke the plugin abort callback. */
@@ -374,15 +401,11 @@ export class SyncSectionProgress {
   }
 
   /** Toggle the recent-path peek under a section's accent count link. */
-  private toggleRecentPaths(section: VaultSection): void {
+  private toggleRecentPaths(section: ProgressSegmentId): void {
     this.recentPathsExpandedSection =
       this.recentPathsExpandedSection === section ? null : section;
     // Opening opts into following the active segment; collapsing opts out.
     this.recentPathsFollowActive = this.recentPathsExpandedSection !== null;
-    // Only one expand pane at a time under the detail lines.
-    if (this.recentPathsExpandedSection) {
-      this.conflictsExpandedSection = null;
-    }
     this.renderDetail();
   }
 
@@ -390,24 +413,21 @@ export class SyncSectionProgress {
    * If the user already expanded the path peek this run, pin it to the newly active
    * section so segment transitions keep showing live files without another tap.
    */
-  private adoptRecentPathsPeekForActiveSection(section: VaultSection): void {
+  private adoptRecentPathsPeekForActiveSection(section: ProgressSegmentId): void {
     if (!this.recentPathsFollowActive) return;
     this.recentPathsExpandedSection = section;
-    this.conflictsExpandedSection = null;
   }
 
-  /** Toggle the conflict path list under a section's conflict summary link. */
-  private toggleConflicts(section: VaultSection): void {
-    this.conflictsExpandedSection =
-      this.conflictsExpandedSection === section ? null : section;
-    if (this.conflictsExpandedSection) {
-      this.recentPathsExpandedSection = null;
-      // Conflict list lives in detail — restore if the footer was minimized.
-      if (this.isMinimized) {
-        this.expandPanel();
-      }
-    }
-    this.renderDetail();
+  /** Open the path-list modal for one finished summary chip. */
+  private openSummaryChipModal(
+    section: ProgressSegmentId,
+    actionType: ActionSummaryType,
+  ): void {
+    const seg = this.segments.find((s) => s.section === section);
+    if (!seg) return;
+    const paths = seg.summaryPaths[actionType] ?? [];
+    if (paths.length === 0) return;
+    new ActionPathsModal(this.app, actionSummaryModalTitle(actionType), paths).open();
   }
 
   /** True when no segment is still pending or active. */
@@ -443,8 +463,9 @@ export class SyncSectionProgress {
       this.titleEl.setText(isComplete ? "Sync completed" : "Syncing...");
     }
     this.rootEl?.toggleClass("dbx-sync-explorer-progress-complete", isComplete);
-    // Cancel only while a run is in progress — hide once the panel shows Sync completed.
+    // Cancel only while a run is in progress — hide the whole row so min-height collapses.
     this.cancelBtnEl?.toggleClass("dbx-sync-explorer-progress-cancel-hidden", isComplete);
+    this.infoRowEl?.toggleClass("dbx-sync-explorer-progress-info-row-hidden", isComplete);
     if (isComplete && this.isMinimized) {
       // Always show the finished summary; dismiss is only via the X.
       this.expandPanel();
@@ -516,7 +537,7 @@ export class SyncSectionProgress {
         if (!(target instanceof Element)) return;
         if (
           target.closest(".dbx-sync-explorer-progress-count-link")
-          || target.closest(".dbx-sync-explorer-progress-conflict-link")
+          || target.closest(".dbx-sync-explorer-progress-summary-chip")
         ) {
           event.preventDefault();
           event.stopPropagation();
@@ -597,7 +618,7 @@ export class SyncSectionProgress {
   }
 
   /**
-   * Count / conflict toggles live on detailEl (not on the ticking number text) so progress
+   * Count / chip clicks live on detailEl (not on the ticking number text) so progress
    * re-renders cannot replace the listener mid-press. pointerdown fires before the next
    * paint tick that might rewrite the count string.
    */
@@ -607,7 +628,7 @@ export class SyncSectionProgress {
 
     const countLink = target.closest(".dbx-sync-explorer-progress-count-link");
     if (countLink instanceof HTMLElement && this.detailEl.contains(countLink)) {
-      const section = countLink.dataset.section as VaultSection | undefined;
+      const section = countLink.dataset.section as ProgressSegmentId | undefined;
       if (!section) return;
       event.preventDefault();
       event.stopPropagation();
@@ -615,22 +636,28 @@ export class SyncSectionProgress {
       return;
     }
 
-    const conflictLink = target.closest(".dbx-sync-explorer-progress-conflict-link");
-    if (conflictLink instanceof HTMLElement && this.detailEl.contains(conflictLink)) {
-      const section = conflictLink.dataset.section as VaultSection | undefined;
-      if (!section) return;
+    const summaryChip = target.closest(".dbx-sync-explorer-progress-summary-chip");
+    if (summaryChip instanceof HTMLElement && this.detailEl.contains(summaryChip)) {
+      const section = summaryChip.dataset.section as ProgressSegmentId | undefined;
+      const actionType = summaryChip.dataset.actionType as ActionSummaryType | undefined;
+      if (!section || !actionType) return;
       event.preventDefault();
       event.stopPropagation();
-      this.toggleConflicts(section);
+      this.openSummaryChipModal(section, actionType);
     }
   }
 
   private renderDetail(): void {
     if (!this.detailEl) return;
-    this.hidePathTooltip();
     this.detailEl.empty();
     this.countTextEls.clear();
     for (const seg of this.segments) {
+      // Deletions counts already appear as trash chips on vault-section lines —
+      // only show this detail line while the trailing delete phase is active.
+      if (seg.section === "deletions" && seg.state !== "active") {
+        continue;
+      }
+
       const line = this.detailEl.createDiv({
         cls: "dbx-sync-explorer-progress-detail-line",
         attr: { "data-section": seg.section },
@@ -670,21 +697,6 @@ export class SyncSectionProgress {
       if (this.recentPathsExpandedSection === seg.section) {
         this.appendRecentPathsPeek(this.detailEl, seg);
       }
-
-      if (this.conflictsExpandedSection === seg.section && seg.conflictPaths.length > 0) {
-        // Caps at half the viewport; short lists stay content-sized (no forced scroll).
-        const conflictList = this.detailEl.createDiv({
-          cls: "dbx-sync-explorer-progress-conflicts",
-          attr: { "data-section": seg.section },
-        });
-        for (const path of seg.conflictPaths) {
-          conflictList.createDiv({
-            cls: "dbx-sync-explorer-progress-conflict-path",
-            text: path,
-            attr: { title: path },
-          });
-        }
-      }
     }
   }
 
@@ -692,7 +704,7 @@ export class SyncSectionProgress {
    * Rebuild only the open recent-path peek for a section (oldest→newest, bottom = newest).
    * Leaves the count-link host alone so live path updates do not steal clicks.
    */
-  private renderRecentPathsPeek(section: VaultSection): void {
+  private renderRecentPathsPeek(section: ProgressSegmentId): void {
     if (!this.detailEl) return;
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
@@ -741,18 +753,13 @@ export class SyncSectionProgress {
       appendSplitPath(pathEl, path);
       // Newest (bottom) full opacity; the older two above are much more faded.
       pathEl.style.opacity = String(recentPathOpacity(displayIndex, pathCount));
-      pathEl.addEventListener("mouseenter", (event) => {
-        event.stopPropagation();
-        this.showPathTooltip(pathEl, path);
-      });
-      pathEl.addEventListener("mouseleave", () => this.hidePathTooltip());
     });
     return peek;
   }
 
   /**
-   * Finished-line copy: action icons render white via Lucide; counts keep muted colour.
-   * Conflict parts are a link that expands the path list without minimizing the footer.
+   * Finished-line copy: accent chips (icons + count). Chip click opens a path modal.
+   * Trailing prose after the parts string (e.g. skipped counts) stays as plain text.
    */
   private renderFinishedDescription(line: HTMLElement, seg: SectionProgressSegment): void {
     if (seg.summaryParts.length === 0) {
@@ -760,45 +767,52 @@ export class SyncSectionProgress {
       return;
     }
 
-    const partsSummary = seg.summaryParts.map(formatActionSummaryPart).join(" ");
+    const partsSummary = seg.summaryParts
+      .map(formatActionSummaryPart)
+      .join(ACTION_SUMMARY_SEPARATOR);
     let trailing = "";
     if (seg.description.startsWith(partsSummary)) {
       trailing = seg.description.slice(partsSummary.length);
     }
 
-    seg.summaryParts.forEach((part, index) => {
-      if (index > 0) {
-        line.createSpan({ text: " " });
+    const chips = line.createDiv({ cls: "dbx-sync-explorer-progress-summary-chips" });
+    for (const part of seg.summaryParts) {
+      const paths = seg.summaryPaths[part.type] ?? [];
+      const chip = chips.createEl("a", {
+        cls: "dbx-sync-explorer-progress-summary-chip",
+        href: "#",
+        attr: {
+          "data-section": seg.section,
+          "data-action-type": part.type,
+          role: "button",
+          "aria-label": `${actionSummaryModalTitle(part.type)} (${part.count})`,
+        },
+      });
+      // Chips without paths stay non-interactive (should not happen for counted parts).
+      if (paths.length === 0) {
+        chip.addClass("dbx-sync-explorer-progress-summary-chip-disabled");
+        chip.setAttr("aria-disabled", "true");
       }
-      if (part.type === "conflict" && seg.conflictPaths.length > 0) {
-        // Click handled via detailEl pointerdown delegation (data-section).
-        const conflictLink = line.createEl("a", {
-          cls: "dbx-sync-explorer-progress-conflict-link",
-          href: "#",
-          attr: {
-            "data-section": seg.section,
-            "aria-expanded": String(this.conflictsExpandedSection === seg.section),
-            "aria-label": "Show conflicted files",
-          },
-        });
-        appendSummaryIcons(conflictLink, part.type);
-        conflictLink.createSpan({
-          text: formatActionSummaryValue(part),
-          cls: "dbx-sync-explorer-progress-summary-value",
-        });
-        return;
-      }
-      appendSummaryIcons(line, part.type);
-      line.createSpan({
+      appendSummaryIcons(chip, part.type);
+      chip.createSpan({
         text: formatActionSummaryValue(part),
         cls: "dbx-sync-explorer-progress-summary-value",
       });
-    });
+    }
 
     if (trailing) {
       line.createSpan({ text: trailing });
     }
   }
+}
+
+/** Shallow-clone path arrays so segment state is not shared with caller maps. */
+function cloneSummaryPaths(paths: ActionSummaryPaths): ActionSummaryPaths {
+  const cloned: ActionSummaryPaths = {};
+  for (const [type, list] of Object.entries(paths) as [ActionSummaryType, string[] | undefined][]) {
+    if (list && list.length > 0) cloned[type] = [...list];
+  }
+  return cloned;
 }
 
 /** Lucide icons for panel summary — CSS forces pure white (emoji cannot). */
@@ -865,7 +879,7 @@ function splitVaultPath(path: string): { dirPrefix: string; fileName: string } {
 }
 
 /**
- * Render path as one continuous run (faint dir + bright name) for the peek / tooltip.
+ * Render path as one continuous run (faint dir + bright name) for the recent-path peek.
  * CSS on the row uses rtl truncation so overflow ellipsis clips the start of the path
  * and short lines sit flush right with no gap between dir and name.
  */
@@ -896,7 +910,7 @@ function recentPathOpacity(displayIndex: number, count: number): number {
   return 0.38;
 }
 
-function shortLabel(section: VaultSection): string {
+function shortLabel(section: ProgressSegmentId): string {
   switch (section) {
     case "notes":
       // Ticket: segment label is "Files" (vault notes + other in-scope files), not "Notes".
@@ -907,6 +921,8 @@ function shortLabel(section: VaultSection): string {
       return "Plugins";
     case "workspaces":
       return "Workspaces";
+    case "deletions":
+      return "Deletions";
   }
 }
 

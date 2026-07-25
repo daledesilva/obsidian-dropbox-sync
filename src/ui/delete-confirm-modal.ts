@@ -4,8 +4,9 @@ import type { SyncPlanItem } from "../types";
 const DOCS_BASE = "https://github.com/zeakd/obsidian-dropbox-sync/blob/main/docs";
 
 /**
- * 대량 삭제 확인 모달.
- * 삭제 대상 목록을 보여주고 사용자 확인을 받는다.
+ * Bulk delete confirmation modal.
+ * Optional sectionLabel clarifies successive prompts in the deferred Deletions phase
+ * (e.g. "Files", then "Settings", then "Plugins").
  */
 export class DeleteConfirmModal extends Modal {
   private confirmed = false;
@@ -14,6 +15,8 @@ export class DeleteConfirmModal extends Modal {
   constructor(
     app: App,
     private deleteItems: SyncPlanItem[],
+    /** Vault section short label for successive end-of-sync prompts. */
+    private sectionLabel?: string,
   ) {
     super(app);
   }
@@ -21,7 +24,10 @@ export class DeleteConfirmModal extends Modal {
   onOpen(): void {
     const { contentEl } = this;
 
-    contentEl.createEl("h3", { text: "Delete protection" });
+    const title = this.sectionLabel
+      ? `Delete protection — ${this.sectionLabel}`
+      : "Delete protection";
+    contentEl.createEl("h3", { text: title });
     contentEl.createEl("p", {
       text: `${this.deleteItems.length} files will be deleted. Continue?`,
     });

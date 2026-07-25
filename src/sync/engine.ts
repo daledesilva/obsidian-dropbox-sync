@@ -1,10 +1,17 @@
 import type { FileSystem, RemoteStorage, SyncStateStore } from "../adapters/interfaces";
-import type { PathGuardIssue, PathIssueResolution, RemoteEntry, SyncPlan, SyncResult } from "../types";
+import type {
+  PathGuardIssue,
+  PathIssueResolution,
+  RemoteEntry,
+  SyncPlan,
+  SyncPlanItem,
+  SyncResult,
+} from "../types";
 import { checkPathGuard } from "./path-guard";
 import { createPlan } from "./planner";
 import type { ConflictStrategy, ConflictResolver, DeleteGuardResult } from "../types";
 import { executePlan } from "./executor";
-import { checkDeleteGuard } from "./guards";
+import { checkDeleteGuard, splitPlanDeletes } from "./guards";
 import { DropboxAdapter, DropboxCursorResetError } from "../adapters/dropbox-adapter";
 import { isExcluded } from "../exclude";
 import { CycleContext } from "./cycle-context";
@@ -94,6 +101,12 @@ export interface SyncEngineOptions {
    */
   deferCursorUpdate?: boolean;
   /**
+   * When true, strip all deleteLocal/deleteRemote from execute and return them
+   * as pendingDeletes (no delete-protection modal). Manual multi-section sync
+   * confirms and runs those deletes in a trailing Deletions progress segment.
+   */
+  deferDeletes?: boolean;
+  /**
    * Structured sync monitor (vault file + Wi‑Fi ingest). Optional so unit tests
    * need not supply logging.
    */
@@ -118,6 +131,11 @@ export interface CycleResult {
   result: SyncResult;
   /** 삭제 가드에 의해 스킵된 항목 수 */
   deletesSkipped?: number;
+  /**
+   * Deletes held back when deferDeletes is on (manual section loop).
+   * Confirmed/executed later via executeDeletePlan.
+   */
+  pendingDeletes?: SyncPlanItem[];
   /** 활성 파일 보호로 건너뛴 항목 수 */
   deferredCount?: number;
   /** 경로 rename 적용됨 — 재동기화 필요 */
@@ -151,6 +169,8 @@ export class SyncEngine {
   private syncScope: SyncScope = "everything";
   private sectionFilter: VaultSection[] | null = null;
   private configDir = ".obsidian";
+  /** Newest Dropbox cursor from the last cycle fetch — used after deferred deletes. */
+  private lastFetchedCursor: string | null = null;
 
   constructor(
     private deps: SyncEngineDeps,
@@ -181,12 +201,21 @@ export class SyncEngine {
   }
 
   /**
+   * Hold deletes out of section execute for the manual Deletions progress segment.
+   * Preserved across applyOptions like deferCursorUpdate.
+   */
+  setDeferDeletes(defer: boolean): void {
+    this.options.deferDeletes = defer;
+  }
+
+  /**
    * Refresh options each sync cycle (callbacks + settings) without dropping
-   * in-flight deferCursorUpdate used by multi-section manual runs.
+   * in-flight deferCursorUpdate / deferDeletes used by multi-section manual runs.
    */
   applyOptions(options: SyncEngineOptions): void {
     const deferCursorUpdate = this.options.deferCursorUpdate;
-    this.options = { ...options, deferCursorUpdate };
+    const deferDeletes = this.options.deferDeletes;
+    this.options = { ...options, deferCursorUpdate, deferDeletes };
   }
 
   private log(
@@ -398,6 +427,8 @@ export class SyncEngine {
       signal,
       ctx,
     );
+    // Keep for executeDeletePlan after a deferred-deletes manual run.
+    this.lastFetchedCursor = latestCursor;
     await this.liveReport?.phaseEnd(
       `${inScopeDeltaCount} in-scope remote entry/entries (${deltaEntries.length} delta total)`,
     );
@@ -528,10 +559,30 @@ export class SyncEngine {
     // Host may promote large background syncs to interactive UI before execute.
     await this.options.onPlanReady?.(plan);
 
-    // 7. 삭제 가드 적용
-    const { planToExecute, deletesSkipped } = await this.applyDeleteGuard(plan, ctx);
-    if (this.lastDiagnostics?.deleteGuard?.triggered) {
-      emitDiagnosticsPhaseLines(this.liveReport, "guard", this.lastDiagnostics);
+    // 7. Delete handling: either defer all deletes (manual section loop) or apply
+    // the immediate delete-protection guard (background / single-cycle).
+    let planToExecute = plan;
+    let deletesSkipped = 0;
+    let pendingDeletes: SyncPlanItem[] | undefined;
+    if (this.options.deferDeletes) {
+      const split = splitPlanDeletes(plan);
+      planToExecute = split.nonDeletePlan;
+      pendingDeletes = split.deleteItems.length > 0 ? split.deleteItems : undefined;
+      if (pendingDeletes) {
+        this.log("deferDeletes: holding deletes for trailing Deletions segment", {
+          deleteCount: pendingDeletes.length,
+          deleteRemote: pendingDeletes.filter((i) => i.action.type === "deleteRemote").length,
+          deleteLocal: pendingDeletes.filter((i) => i.action.type === "deleteLocal").length,
+          sample: samplePaths(pendingDeletes.map((i) => `${i.action.type}:${i.localPath}`)),
+        }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.deferDeletes" });
+      }
+    } else {
+      const guardResult = await this.applyDeleteGuard(plan, ctx);
+      planToExecute = guardResult.planToExecute;
+      deletesSkipped = guardResult.deletesSkipped;
+      if (this.lastDiagnostics?.deleteGuard?.triggered) {
+        emitDiagnosticsPhaseLines(this.liveReport, "guard", this.lastDiagnostics);
+      }
     }
 
     // 7b. 경로 호환성 가드
@@ -683,6 +734,7 @@ export class SyncEngine {
         plan,
         result,
         deletesSkipped,
+        pendingDeletes,
         deferredCount,
         pathsSkipped: pathsSkipped || undefined,
         cycleReport: report,
@@ -694,10 +746,106 @@ export class SyncEngine {
       plan,
       result,
       deletesSkipped,
+      pendingDeletes,
       deferredCount,
       pathsSkipped: pathsSkipped || undefined,
       diagnostics: this.lastDiagnostics ?? undefined,
     };
+  }
+
+  /**
+   * Persist lastFetchedCursor after a deferred-deletes manual run.
+   * Caller must clear deferCursorUpdate first; finalizeState still refuses
+   * when the delete log / failures would leave sync incomplete.
+   */
+  async commitDeferredCursor(): Promise<void> {
+    if (!this.lastFetchedCursor) return;
+    await this.finalizeState(
+      this.deps.store,
+      { succeeded: [], failed: [], deferred: [] },
+      this.lastFetchedCursor,
+      0,
+    );
+  }
+
+  /**
+   * Execute a delete-only plan held from a deferDeletes cycle.
+   * Clears succeeded intents from the delete log and may advance the cursor
+   * when deferCursorUpdate is false and finalize conditions pass.
+   */
+  async executeDeletePlan(
+    deleteItems: SyncPlanItem[],
+    signal?: AbortSignal,
+  ): Promise<SyncResult> {
+    const { fs, remote, store } = this.deps;
+    if (deleteItems.length === 0) {
+      return { succeeded: [], failed: [], deferred: [] };
+    }
+
+    this.attachAbortSignal(signal);
+    try {
+      signal?.throwIfAborted();
+      const deletePlan: SyncPlan = {
+        items: deleteItems,
+        stats: {
+          upload: 0,
+          download: 0,
+          deleteLocal: deleteItems.filter((i) => i.action.type === "deleteLocal").length,
+          deleteRemote: deleteItems.filter((i) => i.action.type === "deleteRemote").length,
+          conflict: 0,
+          noop: 0,
+        },
+      };
+
+      // Path-guard deletes here — they were skipped during the deferred content cycle.
+      let planToRun = deletePlan;
+      const pathGuard = checkPathGuard(planToRun, this.options.strictLocalPaths ?? false);
+      if (!pathGuard.passed) {
+        planToRun = pathGuard.filteredPlan;
+        this.log("executeDeletePlan: path guard filtered deletes", {
+          blocked: pathGuard.issues.length,
+          remaining: planToRun.items.length,
+        }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.executeDeletePlan" });
+      }
+
+      if (planToRun.items.length === 0) {
+        return { succeeded: [], failed: [], deferred: [] };
+      }
+
+      let execFailed = 0;
+      const result = await executePlan(planToRun, { fs, remote, store }, {
+        conflictStrategy: this.options.conflictStrategy,
+        conflictResolver: this.options.conflictResolver,
+        isFileActive: this.options.isFileActive,
+        signal,
+        concurrency: this.options.concurrency,
+        log: this.options.log,
+        onProgress: (completed, total) => {
+          this.options.onProgress?.(completed, total, execFailed);
+        },
+        onBeforeDeleteLocal: this.options.onBeforeDeleteLocal,
+        strictLocalPaths: this.options.strictLocalPaths,
+        onExecItem: (localPath, actionType, event, ok, error) => {
+          if (event === "start") {
+            this.options.onActivityPath?.(localPath);
+          }
+          if (event === "end" && !ok) {
+            execFailed++;
+          }
+          this.options.onExecItem?.(localPath, actionType, event, ok, error);
+        },
+      });
+
+      const cursor =
+        this.lastFetchedCursor
+        ?? (await store.getMeta("cursor"))
+        ?? "";
+      // deletesSkipped=0: caller already decided approve vs skip before calling.
+      await this.finalizeState(store, result, cursor, 0);
+      return result;
+    } finally {
+      this.attachAbortSignal(undefined);
+    }
   }
 
   // ── private helpers ──

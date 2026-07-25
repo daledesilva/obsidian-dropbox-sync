@@ -145,6 +145,12 @@
   display: none;
 }
 
+/* Collapse the Cancel row entirely when the run finishes (removes min-height gap). */
+.dbx-sync-explorer-progress-info-row-hidden,
+.dbx-sync-explorer-progress-complete .dbx-sync-explorer-progress-info-row {
+  display: none;
+}
+
 .dbx-sync-cancel-safety {
   display: flex;
   align-items: center;
@@ -240,9 +246,11 @@
 }
 
 .dbx-sync-explorer-progress-detail-line {
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 6px;
+  min-width: 0;
 }
 
 /* "Files:" / "Settings:" — quieter than the values that follow. */
@@ -267,12 +275,47 @@
   color: var(--text-faint);
 }
 
-/* Action glyphs in the result line — pure white; counts keep muted detail colour. */
+/* Finished summary chips — same accent wash as Cancel; no middle-dot separators. */
+.dbx-sync-explorer-progress-summary-chips {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+
+.dbx-sync-explorer-progress-summary-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  color: var(--text-accent);
+  background-color: color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+  border-radius: var(--button-radius, var(--radius-s, 4px));
+  padding: 2px 8px;
+  cursor: pointer;
+  font-size: var(--font-ui-smaller);
+  line-height: 1.2;
+  text-decoration: none;
+  user-select: none;
+}
+
+.dbx-sync-explorer-progress-summary-chip:hover {
+  color: var(--text-accent-hover, var(--text-accent));
+  background-color: color-mix(in srgb, var(--interactive-accent) 25%, transparent);
+  text-decoration: none;
+}
+
+.dbx-sync-explorer-progress-summary-chip-disabled {
+  cursor: default;
+  opacity: 0.7;
+  pointer-events: none;
+}
+
+/* Action glyphs inside chips — pure white; counts keep accent colour with the chip. */
 .dbx-sync-explorer-progress-summary-icons {
   display: inline-flex;
   align-items: center;
   gap: 1px;
-  margin-right: 2px;
   vertical-align: -0.15em;
   color: #ffffff;
 }
@@ -290,7 +333,11 @@
   stroke: #ffffff;
 }
 
-/* Transfer counts after ↑/↓ — quieter than the icons / section labels. */
+/* Counts inside chips inherit accent; keep class for structure. */
+.dbx-sync-explorer-progress-summary-chip .dbx-sync-explorer-progress-summary-value {
+  color: inherit;
+}
+
 .dbx-sync-explorer-progress-summary-value {
   color: var(--text-faint);
 }
@@ -333,76 +380,21 @@
   color: var(--text-faint, var(--text-muted));
 }
 
-/* Hover tip: full path (no crop), same faint path + bright name colours. */
-.dbx-sync-explorer-progress-path-tooltip {
-  position: fixed;
-  z-index: 1000;
-  display: block;
-  max-width: min(90vw, 36em);
-  padding: 4px 8px;
-  border-radius: var(--radius-s, 4px);
-  background: var(--background-modifier-message);
-  box-shadow: var(--shadow-s);
-  font-size: var(--font-ui-smaller);
-  line-height: 1.35;
-  pointer-events: none;
-  white-space: normal;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-inner {
-  direction: ltr;
-  unicode-bidi: isolate;
-  white-space: normal;
-}
-
-.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-dir {
-  color: var(--text-faint);
-}
-
-.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-name {
-  color: #ffffff;
-}
-
-.dbx-sync-explorer-progress-conflict-link {
-  color: var(--text-accent);
-  text-decoration: underline;
-  text-underline-offset: 2px;
-  cursor: pointer;
-}
-
-.dbx-sync-explorer-progress-conflict-link:hover {
-  color: var(--text-accent-hover, var(--interactive-accent-hover, var(--text-accent)));
-}
-
-/* Keep the ban icon white inside the accent-coloured conflict link. */
-.dbx-sync-explorer-progress-conflict-link .dbx-sync-explorer-progress-summary-icons,
-.dbx-sync-explorer-progress-conflict-link .dbx-sync-explorer-progress-summary-icon,
-.dbx-sync-explorer-progress-conflict-link .dbx-sync-explorer-progress-summary-icon svg {
-  color: #ffffff;
-  stroke: #ffffff;
-}
-
-.dbx-sync-explorer-progress-conflict-link .dbx-sync-explorer-progress-summary-value {
-  color: var(--text-accent);
-}
-
-/*
- * Conflict path list: grow with content, but never past half the viewport.
- * Overflow scroll only kicks in when the list exceeds that cap.
- */
-.dbx-sync-explorer-progress-conflicts {
-  margin: 4px 0 2px 0.75em;
-  max-height: 50vh;
+/* Chip path-list modal — scroll when many files; short lists stay content-sized. */
+.dbx-sync-action-paths-list {
+  margin: 0.5em 0 1em;
+  max-height: 55vh;
   overflow-x: hidden;
   overflow-y: auto;
-  font-size: var(--font-ui-smaller);
+  font-size: var(--font-ui-small);
   color: var(--text-muted);
-  line-height: 1.35;
+  line-height: 1.4;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: var(--radius-s, 4px);
+  padding: 6px 10px;
 }
 
-.dbx-sync-explorer-progress-conflict-path {
+.dbx-sync-action-paths-path {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -603,6 +595,14 @@
 }
 
 /* ── Status Bar (per-open-file refresh-cw) ── */
+
+/*
+ * Dropbox Sync replaces Obsidian Sync for this vault — hide core Sync’s status icon.
+ * No public API hides another plugin’s status item; Obsidian tags it plugin-sync.
+ */
+.status-bar-item.plugin-sync {
+  display: none;
+}
 
 .dbx-sync-statusbar {
   display: inline-flex;

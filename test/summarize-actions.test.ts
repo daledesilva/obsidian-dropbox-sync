@@ -25,7 +25,7 @@ describe("summarizeActions", () => {
       make("deleteLocal"),
     ];
     expect(summarizeActions(items)).toBe(
-      "\u21911 \u21931 \u{1F6AB} 1 conflict \u2193\u{1F5D1}1 \u2191\u{1F5D1}1",
+      "\u21911 \u2022 \u21931 \u2022 \u{1F6AB} 1 conflict \u2022 \u2193\u{1F5D1}1 \u2022 \u2191\u{1F5D1}1",
     );
   });
 

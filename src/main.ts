@@ -25,7 +25,21 @@ import { VaultAdapter } from "./adapters/vault-adapter";
 import { DropboxAdapter, DropboxAuthError } from "./adapters/dropbox-adapter";
 import { IndexedDBStore, migrateLegacyIndexedDbIfNeeded } from "./adapters/indexeddb-store";
 import { VaultFileStore } from "./adapters/vault-file-store";
-import type { ConflictContext, DeleteGuardResult, PathGuardIssue, PathIssueResolution, SyncResult } from "./types";
+import type {
+  ConflictContext,
+  DeleteGuardResult,
+  PathGuardIssue,
+  PathIssueResolution,
+  SyncPlanItem,
+  SyncResult,
+} from "./types";
+import { checkDeleteGuard } from "./sync/guards";
+import {
+  groupSucceededPathsByAction,
+  mergeActionSummaryParts,
+  mergeActionSummaryPaths,
+  summarizeActionParts,
+} from "./sync/sync-reporter";
 import { applyPathRenames } from "./sync/path-rename";
 import type { RemoteStorage, SyncStateStore } from "./adapters/interfaces";
 import { obsidianHttpClient } from "./http-client.plugin";
@@ -57,9 +71,11 @@ import {
   isFileExplorerVisible,
   outcomeToSectionState,
   SyncSectionProgress,
+  type ProgressSegmentId,
 } from "./ui/sync-section-progress";
 import {
   SYNC_SCOPE_LABELS,
+  classifyVaultPath,
   type VaultSection,
   vaultEventShouldTriggerSync,
   vaultRenameShouldTriggerSync,
@@ -82,10 +98,10 @@ export default class DropboxSyncPlugin extends Plugin {
   private unsubscribeFileSyncStatus: (() => void) | null = null;
   private sectionProgress: SyncSectionProgress | null = null;
   /**
-   * Section whose explorer segment fill follows executor onProgress.
-   * Set only during manual sequential section loops; null for background sync.
+   * Segment whose explorer fill follows executor onProgress (vault section or
+   * trailing "deletions"). Null for quiet background sync.
    */
-  private progressSection: VaultSection | null = null;
+  private progressSection: ProgressSegmentId | null = null;
   private syncing = false;
   private syncTimerId: number | null = null;
   private abortController: AbortController | null = null;
@@ -649,8 +665,10 @@ export default class DropboxSyncPlugin extends Plugin {
       this.conflictTotal = 0;
 
       // Manual: one section at a time (notes → settings → plugins → workspaces) with
-      // explorer progress segments. Background keeps a single multi-section cycle
-      // unless the plan exceeds largeSyncInteractiveThreshold (then progress UI attaches).
+      // explorer progress segments. Deletes are deferred to a trailing Deletions
+      // segment so confirmations run back-to-back after non-delete work finishes.
+      // Background keeps a single multi-section cycle unless the plan exceeds
+      // largeSyncInteractiveThreshold (then progress UI attaches).
       if (manual && manualSections && manualSections.length > 0) {
         // Created before prune above — local binding keeps the loop null-safe for tsc.
         const sectionProgress = this.sectionProgress;
@@ -664,13 +682,18 @@ export default class DropboxSyncPlugin extends Plugin {
         let aggregatedPathsSkipped = 0;
         let lastPlan: SyncPlan | undefined;
         let lastDiagnostics: typeof diagnostics;
+        /** Per-section deletes held until the trailing Deletions progress segment. */
+        const pendingDeletesBySection: { section: VaultSection; items: SyncPlanItem[] }[] = [];
+
+        // Hold cursor for the whole content pass — commit after deletions (or immediately
+        // when no deletes were deferred).
+        engine.setDeferDeletes(true);
+        engine.setDeferCursorUpdate(true);
 
         for (let i = 0; i < manualSections.length; i++) {
           const section = manualSections[i];
           currentManualSection = section;
           this.progressSection = section;
-          const isLast = i === manualSections.length - 1;
-          engine.setDeferCursorUpdate(!isLast);
           engine.setSyncSections([section], configDir);
           sectionProgress.markScanning(section);
           sectionProgress.notifySegmentTransition(
@@ -689,8 +712,15 @@ export default class DropboxSyncPlugin extends Plugin {
           aggregatedDeletesSkipped += cycleResult.deletesSkipped ?? 0;
           aggregatedPathsSkipped += cycleResult.pathsSkipped ?? 0;
 
+          const sectionPending = cycleResult.pendingDeletes ?? [];
+          if (sectionPending.length > 0) {
+            pendingDeletesBySection.push({ section, items: sectionPending });
+            // Show Deletions as soon as any section plans deletes.
+            sectionProgress.ensureDeletionsSegment();
+          }
+
           await this.log(
-            `section ${section}: plan ${cycleResult.plan.items.length}, ok ${cycleResult.result.succeeded.length}, fail ${cycleResult.result.failed.length}`,
+            `section ${section}: plan ${cycleResult.plan.items.length}, ok ${cycleResult.result.succeeded.length}, fail ${cycleResult.result.failed.length}, pendingDeletes ${sectionPending.length}`,
           );
           if (cycleResult.diagnostics) {
             await this.log(`sync diagnostics (${section})`, formatDiagnosticsForLog(cycleResult.diagnostics));
@@ -709,10 +739,12 @@ export default class DropboxSyncPlugin extends Plugin {
             noticeDuration = 5000;
             this.lastSyncSummary = "renamed — resyncing";
             this.fileSyncStatus.applySyncResult(cycleResult.result);
+            engine.setDeferDeletes(false);
             engine.setDeferCursorUpdate(false);
             return;
           }
 
+          // Non-delete feedback only — trash icons appear after the Deletions phase.
           const sectionFeedback = buildSyncResultFeedback(
             cycleResult.result,
             cycleResult.deletesSkipped,
@@ -725,6 +757,7 @@ export default class DropboxSyncPlugin extends Plugin {
             {
               conflictPaths: sectionFeedback.conflictPaths,
               summaryParts: sectionFeedback.summaryParts,
+              summaryPaths: sectionFeedback.summaryPaths,
             },
           );
           // Hold end text so the next markScanning can combine into one Notice.
@@ -734,8 +767,101 @@ export default class DropboxSyncPlugin extends Plugin {
           );
         }
 
+        // Trailing Deletions: confirm over-threshold sections back-to-back, then execute.
+        if (pendingDeletesBySection.length > 0) {
+          this.progressSection = "deletions";
+          sectionProgress.markActive("deletions");
+          sectionProgress.notifySegmentTransition(
+            null,
+            "Deletions: Confirming…",
+          );
+          liveReport?.line("## Deletions");
+
+          let deletionFailed = 0;
+          let deletionSucceeded = 0;
+          let deletionPhaseSkipped = 0;
+
+          for (const { section, items } of pendingDeletesBySection) {
+            const sectionLabel = deferredDeleteSectionLabel(section);
+            const approved = await this.confirmDeferredSectionDeletes(items, sectionLabel);
+            if (!approved) {
+              aggregatedDeletesSkipped += items.length;
+              deletionPhaseSkipped += items.length;
+              liveReport?.line(
+                `${sectionLabel}: skipped ${items.length} deletion(s) by protection`,
+              );
+              await this.log(`deferred deletes skipped (${section})`, {
+                count: items.length,
+                sample: samplePaths(items.map((i) => i.localPath)),
+              }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.deferredDeletes" });
+              continue;
+            }
+
+            const deleteResult = await engine.executeDeletePlan(
+              items,
+              this.abortController.signal,
+            );
+            aggregatedSucceeded.push(...deleteResult.succeeded);
+            aggregatedFailed.push(...deleteResult.failed);
+            aggregatedDeferredItems.push(...deleteResult.deferred);
+            deletionSucceeded += deleteResult.succeeded.length;
+            deletionFailed += deleteResult.failed.length;
+            this.fileSyncStatus.applySyncResult(deleteResult);
+
+            // Trash icons/paths on the Files/Settings/… detail line only after deletes run.
+            const deleteParts = summarizeActionParts(deleteResult.succeeded);
+            if (deleteParts.length > 0) {
+              const sectionNonDeleteSucceeded = aggregatedSucceeded.filter((item) => {
+                if (
+                  item.action.type === "deleteLocal"
+                  || item.action.type === "deleteRemote"
+                ) {
+                  return false;
+                }
+                return classifyVaultPath(item.localPath, configDir) === section;
+              });
+              const merged = mergeActionSummaryParts(
+                summarizeActionParts(sectionNonDeleteSucceeded),
+                deleteParts,
+              );
+              const mergedPaths = mergeActionSummaryPaths(
+                groupSucceededPathsByAction(sectionNonDeleteSucceeded),
+                groupSucceededPathsByAction(deleteResult.succeeded),
+              );
+              sectionProgress.updateSummaryParts(section, merged, undefined, mergedPaths);
+            }
+
+            liveReport?.line(
+              `${sectionLabel}: deleted ${deleteResult.succeeded.length}`
+              + (deleteResult.failed.length ? `, ${deleteResult.failed.length} failed` : ""),
+            );
+          }
+
+          const deletionsState =
+            deletionFailed > 0
+              ? "failed"
+              : deletionPhaseSkipped > 0
+                ? "partial"
+                : "success";
+          const deletionsSummary =
+            deletionFailed > 0
+              ? `${deletionFailed} failed, ${deletionSucceeded} ok`
+              : deletionPhaseSkipped > 0
+                ? `${deletionSucceeded} deleted, ${deletionPhaseSkipped} skipped`
+                : deletionSucceeded > 0
+                  ? `${deletionSucceeded} deleted`
+                  : "skipped";
+          sectionProgress.markResult("deletions", deletionsState, deletionsSummary);
+          sectionProgress.notifySegmentTransition(
+            `Deletions: ${deletionsSummary}`,
+            null,
+          );
+        }
+
         sectionProgress.finishSegmentNotices();
+        engine.setDeferDeletes(false);
         engine.setDeferCursorUpdate(false);
+        await engine.commitDeferredCursor();
         this.engineMgr?.persistDeleteLog();
 
         plan = lastPlan;
@@ -758,6 +884,7 @@ export default class DropboxSyncPlugin extends Plugin {
           cursorUpdated = true;
         }
       } else {
+        engine.setDeferDeletes(false);
         engine.setDeferCursorUpdate(false);
         engine.setSyncSections(getEnabledBackgroundSections(this.settings), configDir);
         const cycleResult = await engine.runCycle(this.abortController.signal);
@@ -794,6 +921,7 @@ export default class DropboxSyncPlugin extends Plugin {
             {
               conflictPaths: sectionFeedback.conflictPaths,
               summaryParts: sectionFeedback.summaryParts,
+              summaryPaths: sectionFeedback.summaryPaths,
             },
           );
           // Remaining promoted segments share the overall outcome for this single cycle.
@@ -806,11 +934,16 @@ export default class DropboxSyncPlugin extends Plugin {
               {
                 conflictPaths: sectionFeedback.conflictPaths,
                 summaryParts: sectionFeedback.summaryParts,
+                summaryPaths: sectionFeedback.summaryPaths,
               },
             );
           }
+          const progressLabel =
+            this.progressSection && this.progressSection !== "deletions"
+              ? SYNC_SCOPE_LABELS[this.progressSection]
+              : "Sync";
           this.sectionProgress.notifySegmentTransition(
-            `${SYNC_SCOPE_LABELS[this.progressSection]}: ${sectionFeedback.summary}`,
+            `${progressLabel}: ${sectionFeedback.summary}`,
             null,
           );
           this.sectionProgress.finishSegmentNotices();
@@ -831,7 +964,9 @@ export default class DropboxSyncPlugin extends Plugin {
       const errMsg = e instanceof Error ? e.message : String(e);
       void this.log("sync error", e instanceof Error ? e : { message: errMsg });
       try {
-        this.getOrCreateEngine().setDeferCursorUpdate(false);
+        const eng = this.getOrCreateEngine();
+        eng.setDeferDeletes(false);
+        eng.setDeferCursorUpdate(false);
       } catch {
         /* engine may be unavailable after clearSyncHistory mid-failure */
       }
@@ -908,6 +1043,8 @@ export default class DropboxSyncPlugin extends Plugin {
 
       const engine = this.getOrCreateEngine();
       engine.setLiveReport(null);
+      // Clear manual-run flags so a later background cycle does not inherit them.
+      engine.setDeferDeletes(false);
       if (liveReport) {
         await liveReport.finalize(reportInput);
       } else if (manual && createReport) {
@@ -1549,6 +1686,57 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   /**
+   * Confirm deferred deletes for one vault section during the trailing Deletions
+   * segment. Under-threshold (or protection off) auto-approves; over-threshold
+   * opens DeleteConfirmModal with the section label so successive prompts are clear.
+   */
+  private async confirmDeferredSectionDeletes(
+    deleteItems: SyncPlanItem[],
+    sectionLabel: string,
+  ): Promise<boolean> {
+    const guard = checkDeleteGuard(
+      {
+        items: deleteItems,
+        stats: {
+          upload: 0,
+          download: 0,
+          deleteLocal: deleteItems.filter((i) => i.action.type === "deleteLocal").length,
+          deleteRemote: deleteItems.filter((i) => i.action.type === "deleteRemote").length,
+          conflict: 0,
+          noop: 0,
+        },
+      },
+      this.settings.deleteThreshold,
+      this.settings.deleteProtection,
+    );
+    if (guard.passed) return true;
+
+    if (this.deleteConfirmModal) {
+      void this.log("deferred delete guard: modal already open — treating as skip", {
+        sectionLabel,
+        deleteCount: deleteItems.length,
+      }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.confirmDeferredSectionDeletes" });
+      return false;
+    }
+
+    const modal = new DeleteConfirmModal(this.app, deleteItems, sectionLabel);
+    this.deleteConfirmModal = modal;
+    try {
+      const approved = await modal.waitForConfirmation();
+      void this.log(
+        approved
+          ? `deferred delete guard: approved ${deleteItems.length} (${sectionLabel})`
+          : `deferred delete guard: skipped ${deleteItems.length} (${sectionLabel})`,
+        { sectionLabel, approved, threshold: this.settings.deleteThreshold },
+        { hypothesisId: SyncHypotheses.guardSkip, location: "main.confirmDeferredSectionDeletes" },
+      );
+      return approved;
+    } finally {
+      this.deleteConfirmModal = null;
+    }
+  }
+
+  /**
    * Drop orphan delete-log paths (no sync base entry and no local file).
    * Load base keys + local paths once — per-path getEntry + getFiles().some
    * was O(n²) and stalled iPad sync start with thousands of delete intents.
@@ -1635,5 +1823,19 @@ export default class DropboxSyncPlugin extends Plugin {
     if (!cursor) return null;
     const result = await remote.listChanges(cursor);
     return { pendingChanges: result.entries.length };
+  }
+}
+
+/** Short labels matching explorer progress segments (Files, not "Notes & files"). */
+function deferredDeleteSectionLabel(section: VaultSection): string {
+  switch (section) {
+    case "notes":
+      return "Files";
+    case "settings":
+      return "Settings";
+    case "plugins":
+      return "Plugins";
+    case "workspaces":
+      return "Workspaces";
   }
 }

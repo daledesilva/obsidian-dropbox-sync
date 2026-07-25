@@ -2,10 +2,12 @@ import { Notice, Platform, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
 import {
+  groupSucceededPathsByAction,
   listConflictPaths,
   summarizeActionParts,
   summarizeActions,
   type ActionSummaryPart,
+  type ActionSummaryPaths,
 } from "../sync/sync-reporter";
 import {
   formatDiagnosticsMarkdown,
@@ -74,13 +76,15 @@ export interface SyncResultFeedback {
   summary: string;
   endMessage: string;
   noticeDuration: number;
-  /** Succeeded conflict paths — explorer panel can expand these under a link. */
+  /** Succeeded conflict paths — kept for callers that only need conflicts. */
   conflictPaths: string[];
   /**
    * Icon/count parts for the explorer panel (white icons + normal value colour).
    * Empty when the summary is prose (failed / up to date) rather than action icons.
    */
   summaryParts: ActionSummaryPart[];
+  /** Succeeded paths per action type — chip modals list these. */
+  summaryPaths: ActionSummaryPaths;
 }
 
 /** Status bar + notice message from engine result. */
@@ -91,6 +95,7 @@ export function buildSyncResultFeedback(
 ): SyncResultFeedback {
   const conflictPaths = listConflictPaths(result.succeeded);
   const summaryParts = summarizeActionParts(result.succeeded);
+  const summaryPaths = groupSucceededPathsByAction(result.succeeded);
   if (result.failed.length > 0) {
     const summary = `${result.failed.length} failed, ${result.succeeded.length} ok`;
     const first = result.failed[0];
@@ -107,6 +112,7 @@ export function buildSyncResultFeedback(
       conflictPaths,
       // Prose summary — panel renders plain text, not icon parts.
       summaryParts: [],
+      summaryPaths: {},
     };
   }
   if (pathsSkipped && pathsSkipped > 0) {
@@ -118,6 +124,7 @@ export function buildSyncResultFeedback(
       noticeDuration: 6000,
       conflictPaths,
       summaryParts,
+      summaryPaths,
     };
   }
   if (deletesSkipped && deletesSkipped > 0) {
@@ -129,6 +136,7 @@ export function buildSyncResultFeedback(
       noticeDuration: 5000,
       conflictPaths,
       summaryParts,
+      summaryPaths,
     };
   }
   if (result.succeeded.length > 0) {
@@ -140,6 +148,7 @@ export function buildSyncResultFeedback(
       noticeDuration: 5000,
       conflictPaths,
       summaryParts,
+      summaryPaths,
     };
   }
   return {
@@ -149,6 +158,7 @@ export function buildSyncResultFeedback(
     noticeDuration: 4000,
     conflictPaths,
     summaryParts: [],
+    summaryPaths: {},
   };
 }
 
