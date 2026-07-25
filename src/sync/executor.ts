@@ -1,5 +1,10 @@
 import { dropboxContentHashBrowser } from "../hash.browser";
-import type { FileSystem, RemoteStorage, SyncStateStore } from "../adapters/interfaces";
+import type {
+  FileSystem,
+  RemoteDeleteBatchEntryResult,
+  RemoteStorage,
+  SyncStateStore,
+} from "../adapters/interfaces";
 import { RevConflictError, type ConflictResolver, type ConflictStrategy, type SyncPlan, type SyncPlanItem, type SyncResult } from "../types";
 import { assertValidSyncPath } from "./path-assert";
 import { runWithConcurrency } from "./concurrency";
@@ -16,6 +21,7 @@ import {
   SyncHypotheses,
   type SyncMonitorLog,
 } from "../debug/sync-monitor";
+import { coalesceDeleteRemote } from "./delete-coalesce";
 
 export interface ExecutorDeps {
   fs: FileSystem;
@@ -38,6 +44,11 @@ export interface ExecutorConfig {
   onConflictCount?: (count: number) => void;
   /** deleteLocal 실행 직전 호출. vault 이벤트에서 구분하기 위해 pathLower 전달. */
   onBeforeDeleteLocal?: (pathLower: string) => void;
+  /**
+   * Non-deleted remote file path_lowers for this cycle — used to coalesce
+   * complete deleteRemote subtrees into folder deletes before delete_batch.
+   */
+  existingRemotePathLowers?: Iterable<string>;
   /**
    * Per-item soft timeout (ms). Timed-out items free their concurrency slot and are
    * retried once at the end so slow/hanging files do not stall the rest of the plan.
@@ -109,6 +120,17 @@ export async function executePlan(
     }
   }
 
+  // Peel deleteRemote into a dedicated batch/coalesce pass (no per-item soft timeout).
+  const deleteRemoteItems: SyncPlanItem[] = [];
+  const nonDeleteRemoteExecutable: SyncPlanItem[] = [];
+  for (const item of executable) {
+    if (item.action.type === "deleteRemote") {
+      deleteRemoteItems.push(item);
+    } else {
+      nonDeleteRemoteExecutable.push(item);
+    }
+  }
+
   const concurrency = ctx.concurrency ?? 1;
   const itemTimeoutMs = ctx.itemTimeoutMs ?? DEFAULT_ITEM_TIMEOUT_MS;
   let completed = 0;
@@ -128,19 +150,51 @@ export async function executePlan(
 
   ctx.log?.("executor batch start", {
     executable: executable.length,
+    deleteRemote: deleteRemoteItems.length,
     conflicts: conflicts.length,
     deferred: deferred.length,
     concurrency,
     itemTimeoutMs,
   }, { hypothesisId: SyncHypotheses.sync, location: "executor.executePlan" });
 
-  // Pass 1: parallel batch. Timeouts free slots so other files keep moving.
-  const pass1 = await runExecutableBatch(executable, ctx, concurrency, itemTimeoutMs, {
-    // Only count successes/failures toward progress in pass 1; timeouts retry later.
-    onSettled: (kind) => {
-      if (kind !== "timeout") bumpProgress();
+  // Remote deletes first: folder coalesce + delete_batch, then expand to file items.
+  if (deleteRemoteItems.length > 0 && !ctx.signal?.aborted) {
+    const blockingPathLowers = [
+      ...nonDeleteRemoteExecutable.map((item) => item.pathLower),
+      ...conflicts.map((item) => item.pathLower),
+      ...deferred.map((item) => item.pathLower),
+    ];
+    const remoteDeleteResult = await executeDeleteRemoteBatch(
+      deleteRemoteItems,
+      ctx,
+      blockingPathLowers,
+      { onItemSettled: () => bumpProgress() },
+    );
+    succeeded.push(...remoteDeleteResult.succeeded);
+    failed.push(...remoteDeleteResult.failed);
+  } else if (deleteRemoteItems.length > 0) {
+    for (const item of deleteRemoteItems) {
+      failed.push({
+        item,
+        error: new Error("Aborted before deleteRemote batch"),
+      });
+      bumpProgress();
+    }
+  }
+
+  // Pass 1: parallel batch for non-deleteRemote work. Timeouts free slots so other files keep moving.
+  const pass1 = await runExecutableBatch(
+    nonDeleteRemoteExecutable,
+    ctx,
+    concurrency,
+    itemTimeoutMs,
+    {
+      // Only count successes/failures toward progress in pass 1; timeouts retry later.
+      onSettled: (kind) => {
+        if (kind !== "timeout") bumpProgress();
+      },
     },
-  });
+  );
   succeeded.push(...pass1.succeeded);
   failed.push(...pass1.failed);
   if (pass1.timedOut.length > 0) {
@@ -215,6 +269,198 @@ export async function executePlan(
   }
 
   return { succeeded, failed, deferred };
+}
+
+/**
+ * Coalesce complete remote delete subtrees into folder deletes, then run
+ * remote.deleteBatch. Results are expanded back to the original file-level
+ * SyncPlanItems so delete-log clearing and UI counts stay unchanged.
+ * On whole-batch transport/job failure, falls back to per-item remote.delete.
+ */
+async function executeDeleteRemoteBatch(
+  deleteRemoteItems: SyncPlanItem[],
+  ctx: ExecutorContext,
+  blockingPathLowers: Iterable<string>,
+  hooks: { onItemSettled: () => void },
+): Promise<{
+  succeeded: SyncPlanItem[];
+  failed: { item: SyncPlanItem; error: Error }[];
+}> {
+  const succeeded: SyncPlanItem[] = [];
+  const failed: { item: SyncPlanItem; error: Error }[] = [];
+
+  const settleItem = async (
+    item: SyncPlanItem,
+    ok: boolean,
+    error?: Error,
+  ): Promise<void> => {
+    const actionType = "deleteRemote";
+    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.ctx?.emit({
+      type: "exec_start",
+      ts: Date.now(),
+      pathLower: item.pathLower,
+      action: actionType,
+    });
+    if (ok) {
+      try {
+        await ctx.store.deleteEntry(item.pathLower);
+      } catch (storeErr) {
+        const err = storeErr instanceof Error ? storeErr : new Error(String(storeErr));
+        ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+        failed.push({ item, error: err });
+        hooks.onItemSettled();
+        return;
+      }
+      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.ctx?.emit({
+        type: "exec_end",
+        ts: Date.now(),
+        pathLower: item.pathLower,
+        action: actionType,
+        ok: true,
+        duration: 0,
+      });
+      succeeded.push(item);
+    } else {
+      const err = error ?? new Error("deleteRemote failed");
+      ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+      ctx.ctx?.emit({
+        type: "exec_end",
+        ts: Date.now(),
+        pathLower: item.pathLower,
+        action: actionType,
+        ok: false,
+        error: err.message,
+        duration: 0,
+      });
+      failed.push({ item, error: err });
+    }
+    hooks.onItemSettled();
+  };
+
+  /** Per-item delete_v2 fallback — executeItem owns store cleanup + not_found soft-ok. */
+  const fallbackPerItem = async (items: SyncPlanItem[]): Promise<void> => {
+    for (const item of items) {
+      if (ctx.signal?.aborted) {
+        await settleItem(item, false, new Error("Aborted during deleteRemote fallback"));
+        continue;
+      }
+      const actionType = "deleteRemote";
+      ctx.onExecItem?.(item.localPath, actionType, "start");
+      try {
+        await executeItem(item, ctx);
+        ctx.onExecItem?.(item.localPath, actionType, "end", true);
+        succeeded.push(item);
+        hooks.onItemSettled();
+      } catch (itemErr) {
+        const err = itemErr instanceof Error ? itemErr : new Error(String(itemErr));
+        ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+        failed.push({ item, error: err });
+        hooks.onItemSettled();
+      }
+    }
+  };
+
+  const coalesce = coalesceDeleteRemote({
+    deleteRemoteItems,
+    existingRemotePathLowers: ctx.existingRemotePathLowers ?? [],
+    blockingPathLowers,
+  });
+
+  // Folders first, then remaining files — never both a folder and its children.
+  const requestPaths = [
+    ...coalesce.folderPaths,
+    ...coalesce.remainingFileItems.map((item) => item.localPath),
+  ];
+  const folderSet = new Set(coalesce.folderPaths.map((p) => p.toLowerCase()));
+  const fileItemByPath = new Map(
+    coalesce.remainingFileItems.map((item) => [item.pathLower, item]),
+  );
+
+  ctx.log?.("exec deleteRemote batch start", {
+    fileItems: deleteRemoteItems.length,
+    folderPaths: coalesce.folderPaths.length,
+    remainingFiles: coalesce.remainingFileItems.length,
+    requestPaths: requestPaths.length,
+  }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteBatch" });
+
+  let batchResults: RemoteDeleteBatchEntryResult[];
+  try {
+    batchResults = await ctx.remote.deleteBatch(requestPaths);
+  } catch (e) {
+    ctx.log?.("exec deleteRemote batch failed — falling back to per-item", {
+      error: e instanceof Error ? e.message : String(e),
+      count: deleteRemoteItems.length,
+    }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteBatch" });
+    await fallbackPerItem(deleteRemoteItems);
+    return { succeeded, failed };
+  }
+
+  // Expand folder too_many_files into a follow-up file batch.
+  const expandFileItems: SyncPlanItem[] = [];
+  const pendingFileSettlements: Array<{
+    item: SyncPlanItem;
+    result: RemoteDeleteBatchEntryResult;
+  }> = [];
+
+  for (let i = 0; i < requestPaths.length; i++) {
+    const path = requestPaths[i]!;
+    const pathLower = path.toLowerCase();
+    const result = batchResults[i] ?? {
+      path,
+      ok: false,
+      error: new Error("Missing delete_batch result entry"),
+    };
+
+    if (folderSet.has(pathLower)) {
+      const covered = coalesce.folderToCoveredItems.get(pathLower) ?? [];
+      if (result.ok) {
+        for (const item of covered) {
+          await settleItem(item, true);
+        }
+      } else if (result.tooManyFiles) {
+        expandFileItems.push(...covered);
+      } else {
+        for (const item of covered) {
+          await settleItem(item, false, result.error);
+        }
+      }
+      continue;
+    }
+
+    const item = fileItemByPath.get(pathLower);
+    if (!item) continue;
+    pendingFileSettlements.push({ item, result });
+  }
+
+  for (const { item, result } of pendingFileSettlements) {
+    await settleItem(item, result.ok, result.error);
+  }
+
+  if (expandFileItems.length > 0 && !ctx.signal?.aborted) {
+    ctx.log?.("exec deleteRemote expanding too_many_files folders", {
+      count: expandFileItems.length,
+    }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteBatch" });
+    try {
+      const expandResults = await ctx.remote.deleteBatch(
+        expandFileItems.map((item) => item.localPath),
+      );
+      for (let i = 0; i < expandFileItems.length; i++) {
+        const item = expandFileItems[i]!;
+        const result = expandResults[i] ?? {
+          path: item.localPath,
+          ok: false,
+          error: new Error("Missing delete_batch expand result"),
+        };
+        await settleItem(item, result.ok, result.error);
+      }
+    } catch {
+      await fallbackPerItem(expandFileItems);
+    }
+  }
+
+  return { succeeded, failed };
 }
 
 type BatchSettleKind = "success" | "failure" | "timeout";

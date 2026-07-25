@@ -250,6 +250,101 @@ describe("executePlan", () => {
     expect(result.succeeded).toHaveLength(1);
     expect(remote.has("test.md")).toBe(false);
     expect(await store.getEntry("test.md")).toBeNull();
+    expect(remote.deleteBatchCallCount).toBe(1);
+  });
+
+  test("deleteRemote: many files use deleteBatch and return original items", async () => {
+    const paths = ["a.md", "b.md", "c.md", "d.md"];
+    for (const path of paths) {
+      await remote.upload(path, new TextEncoder().encode(path));
+      await store.setEntry({
+        pathLower: path,
+        localPath: path,
+        baseLocalHash: "h",
+        baseRemoteHash: "h",
+        rev: "r",
+        lastSynced: 1000,
+      });
+    }
+
+    const plan = mkPlan(
+      ...paths.map((path) => ({
+        pathLower: path,
+        localPath: path,
+        action: { type: "deleteRemote" as const, reason: "deleted_on_local" },
+      })),
+    );
+
+    const result = await executePlan(plan, deps, {
+      existingRemotePathLowers: paths,
+    });
+    expect(result.succeeded).toHaveLength(4);
+    expect(result.succeeded.map((i) => i.pathLower).sort()).toEqual([...paths].sort());
+    expect(remote.deleteBatchCallCount).toBe(1);
+    for (const path of paths) {
+      expect(remote.has(path)).toBe(false);
+      expect(await store.getEntry(path)).toBeNull();
+    }
+  });
+
+  test("deleteRemote: folder coalesce deletes prefix and clears all covered store entries", async () => {
+    const paths = ["notes/a.md", "notes/b.md", "notes/c.md"];
+    for (const path of paths) {
+      await remote.upload(path, new TextEncoder().encode(path));
+      await store.setEntry({
+        pathLower: path,
+        localPath: path,
+        baseLocalHash: "h",
+        baseRemoteHash: "h",
+        rev: "r",
+        lastSynced: 1000,
+      });
+    }
+
+    const plan = mkPlan(
+      ...paths.map((path) => ({
+        pathLower: path,
+        localPath: path,
+        action: { type: "deleteRemote" as const, reason: "deleted_on_local" },
+      })),
+    );
+
+    const result = await executePlan(plan, deps, {
+      existingRemotePathLowers: paths,
+    });
+
+    expect(remote.deleteBatchCallCount).toBe(1);
+    expect(remote.lastDeleteBatchPaths).toEqual(["notes"]);
+    expect(result.succeeded).toHaveLength(3);
+    expect(result.succeeded.map((i) => i.pathLower).sort()).toEqual([...paths].sort());
+    for (const path of paths) {
+      expect(remote.has(path)).toBe(false);
+      expect(await store.getEntry(path)).toBeNull();
+    }
+  });
+
+  test("deleteRemote: already-absent path soft-succeeds via batch", async () => {
+    await store.setEntry({
+      pathLower: "stale.md",
+      localPath: "stale.md",
+      baseLocalHash: "h",
+      baseRemoteHash: "h",
+      rev: "r",
+      lastSynced: 1000,
+    });
+
+    const plan = mkPlan({
+      pathLower: "stale.md",
+      localPath: "stale.md",
+      action: { type: "deleteRemote", reason: "deleted_on_local" },
+    });
+
+    const result = await executePlan(plan, deps, {
+      existingRemotePathLowers: [],
+    });
+    expect(result.succeeded).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
+    expect(await store.getEntry("stale.md")).toBeNull();
   });
 
   // ── conflict ──

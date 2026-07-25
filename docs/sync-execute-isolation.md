@@ -47,16 +47,31 @@ sequenceDiagram
 | `executePlan` (`src/sync/executor.ts`) | Two-pass parallel batch + serial conflicts |
 | `ItemTimeoutError` / `raceWithTimeout` | Soft timeout; does **not** cancel underlying I/O, only frees the concurrency slot |
 | `DEFAULT_ITEM_TIMEOUT_MS` | `90_000`; override via `itemTimeoutMs` (`0` disables) |
-| `concurrency` | Plugin sets `3` in engine options |
+| `concurrency` | Plugin sets `8` in engine options (`src/main.ts`) |
 | `cancelCurrentSync` | Abort + status/notice only |
 | `syncNow` `finally` | Always clears ribbon + `syncing` when that run ends |
 
 Progress: `hooks.onSettled` runs **as each task finishes** inside the worker (success / failure / timeout), so explorer `onProgress` can move during the batch. First-pass timeouts do not bump `completed` until the retry (or abort path marks them failed) so the denominator stays “each item once.” Collecting settled results after the pool joins must **not** call `onSettled` again (double-count).
 
+### Executor concurrency
+
+Parallel plan items (uploads, downloads, local deletes, etc.) share one worker pool. The plugin raises concurrency from the historical value of `3` to `8` so many-small-file syncs (especially plugin/config trees) can keep more Dropbox content calls in flight.
+
+Each upload is still one `/files/upload` (bytes + namespace commit). Higher concurrency does not batch commits; it only widens the pool. Dropbox may respond with `429` / `too_many_write_operations` when too many writes hit the same namespace at once — the adapter retries those with backoff.
+
+```mermaid
+flowchart LR
+  Plan[Executable plan items] --> Pool[Worker pool concurrency 8]
+  Pool --> Upload["/files/upload per file"]
+  Pool --> Download["/files/download per file"]
+  Pool --> Other[Other non-batch actions]
+```
+
 ## Technical Gotchas
 
 - **Soft timeout ≠ cancel network.** A timed-out Dropbox request may still complete in the background; the executor has already moved on. That is intentional so one hung call cannot stall the vault.
 - **Conflicts are not timed out the same way.** Manual conflict modals are serial after the parallel batch and wait for the user.
+- **Concurrency vs write locks.** Raising the pool helps latency-bound vaults; if logs fill with `429` / `too_many_write_operations`, lower concurrency or add upload-session `finish_batch` rather than pushing the pool much higher.
 - **Never clear `syncing` in cancel.** Early clear previously allowed a new sync to start before the old `finally`, which could leave the ribbon spinning or strip the new run’s spin.
 - **UI-throwing catch must not leave `up_to_date`.** If progress chrome throws while opening the footer, log and set `outcome = "error"` before further UI updates; a second throw in `markInterrupted` previously skipped error assignment and reported a false instant success.
 - **Confirm modal does not abort until confirmed.** Closing with Keep syncing leaves the engine untouched.

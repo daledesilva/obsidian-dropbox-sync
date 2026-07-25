@@ -1334,7 +1334,9 @@ export default class DropboxSyncPlugin extends Plugin {
       isFileActive: (path: string) => this.app.workspace.getActiveFile()?.path === path,
       excludePatterns: this.settings.excludePatterns,
       includeHiddenFilesAndFolders: this.settings.includeHiddenFilesAndFolders,
-      concurrency: 3,
+      // Higher parallelism for many-small-file sync (e.g. plugins); Dropbox write-lock
+      // contention may appear as 429s — back off or add finish_batch if that shows up.
+      concurrency: 8,
       onConflictCount: (count: number) => {
         this.conflictTotal = count;
         this.conflictIndex = 0;

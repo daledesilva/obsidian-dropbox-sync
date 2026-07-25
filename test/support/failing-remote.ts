@@ -3,7 +3,10 @@ import type {
   ListChangesResult,
   DownloadResult,
 } from "@/types";
-import type { RemoteStorage } from "@/adapters/interfaces";
+import type {
+  RemoteDeleteBatchEntryResult,
+  RemoteStorage,
+} from "@/adapters/interfaces";
 
 /**
  * 실패를 주입할 수 있는 RemoteStorage 래퍼.
@@ -26,7 +29,7 @@ export class FailingRemoteStorage implements RemoteStorage {
   injectFailure(opts: {
     after: number;
     error?: Error;
-    method?: "upload" | "download" | "delete" | "listChanges";
+    method?: "upload" | "download" | "delete" | "deleteBatch" | "listChanges";
   }): void {
     this.failAfter = opts.after;
     this.failError = opts.error ?? new Error("Network error");
@@ -41,7 +44,10 @@ export class FailingRemoteStorage implements RemoteStorage {
 
   private checkFail(method: string): void {
     if (this.failAfter === null) return;
-    if (this.failMethod && this.failMethod !== method) return;
+    if (this.failMethod && this.failMethod !== method) {
+      // deleteBatch is the mass-delete path; honor injectFailure({ method: "delete" }).
+      if (!(this.failMethod === "delete" && method === "deleteBatch")) return;
+    }
 
     this.callCount++;
     if (this.callCount > this.failAfter) {
@@ -71,6 +77,11 @@ export class FailingRemoteStorage implements RemoteStorage {
   async delete(path: string): Promise<void> {
     this.checkFail("delete");
     return this.inner.delete(path);
+  }
+
+  async deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]> {
+    this.checkFail("deleteBatch");
+    return this.inner.deleteBatch(paths);
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {

@@ -26,6 +26,18 @@ export interface FileSystem {
   computeHash(path: string): Promise<string>;
 }
 
+/** Per-path result from {@link RemoteStorage.deleteBatch}. */
+export interface RemoteDeleteBatchEntryResult {
+  path: string;
+  ok: boolean;
+  error?: Error;
+  /**
+   * Dropbox `too_many_files` on a folder entry — executor should expand to
+   * covered file paths and re-batch those files.
+   */
+  tooManyFiles?: boolean;
+}
+
 /** 원격 스토리지 추상화 (Dropbox) */
 export interface RemoteStorage {
   listChanges(cursor?: string): Promise<ListChangesResult>;
@@ -36,6 +48,12 @@ export interface RemoteStorage {
     rev?: string,
   ): Promise<RemoteEntry>;
   delete(path: string): Promise<void>;
+  /**
+   * Delete many files/folders in one or more batch RPCs.
+   * Paths are vault-relative (same as {@link delete}). Results match input order.
+   * Folder paths recursively delete contents on Dropbox.
+   */
+  deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]>;
   move(from: string, to: string): Promise<RemoteEntry>;
 }
 

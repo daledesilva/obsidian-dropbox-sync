@@ -171,6 +171,11 @@ export class SyncEngine {
   private configDir = ".obsidian";
   /** Newest Dropbox cursor from the last cycle fetch — used after deferred deletes. */
   private lastFetchedCursor: string | null = null;
+  /**
+   * Non-deleted remote path_lowers from the last cycle remote map — reused by
+   * executeDeletePlan so deferred Deletions can still coalesce folder deletes.
+   */
+  private lastExistingRemotePathLowers: string[] = [];
 
   constructor(
     private deps: SyncEngineDeps,
@@ -449,6 +454,10 @@ export class SyncEngine {
     // 4. base + delta 병합 → 전체 원격 상태
     const fullRemoteMap = this.buildFullRemoteState(baseEntries, deltaEntries);
     this.filterRemoteMapByScope(fullRemoteMap);
+    // Snapshot for delete_batch folder coalesce (including deferred Deletions segment).
+    this.lastExistingRemotePathLowers = [...fullRemoteMap.entries()]
+      .filter(([, entry]) => !entry.deleted)
+      .map(([pathLower]) => pathLower);
 
     if (this.lastDiagnostics) {
       this.lastDiagnostics.syncState.baseInScope = baseEntries.length;
@@ -646,6 +655,7 @@ export class SyncEngine {
       signal,
       concurrency: this.options.concurrency,
       log: this.options.log,
+      existingRemotePathLowers: this.lastExistingRemotePathLowers,
       onProgress: (completed, total) => {
         if (completed % 10 === 0 || completed === total) {
           this.liveReport?.progressLine(
@@ -820,6 +830,8 @@ export class SyncEngine {
         signal,
         concurrency: this.options.concurrency,
         log: this.options.log,
+        // Reuse the cycle remote snapshot so deferred deletes still folder-coalesce.
+        existingRemotePathLowers: this.lastExistingRemotePathLowers,
         onProgress: (completed, total) => {
           this.options.onProgress?.(completed, total, execFailed);
         },

@@ -1,5 +1,5 @@
 import type { HttpClient } from "../http-client";
-import type { RemoteStorage } from "./interfaces";
+import type { RemoteDeleteBatchEntryResult, RemoteStorage } from "./interfaces";
 import type {
   RemoteEntry,
   ListChangesResult,
@@ -17,6 +17,31 @@ import { delay, runAbortable, throwIfAborted } from "../abort-utils";
 
 const API_BASE = "https://api.dropboxapi.com/2";
 const CONTENT_BASE = "https://content.dropboxapi.com/2";
+/** Stone max_items for files/delete_batch entries. */
+const DELETE_BATCH_MAX_ENTRIES = 1000;
+/** Initial poll interval for delete_batch/check; doubles up to a cap. */
+const DELETE_BATCH_POLL_MS = 500;
+const DELETE_BATCH_POLL_MAX_MS = 8_000;
+
+type DropboxDeleteBatchLaunch =
+  | { ".tag": "complete"; entries: DropboxDeleteBatchResultEntry[] }
+  | { ".tag": "async_job_id"; async_job_id: string };
+
+type DropboxDeleteBatchJobStatus =
+  | { ".tag": "in_progress" }
+  | { ".tag": "complete"; entries: DropboxDeleteBatchResultEntry[] }
+  | { ".tag": "failed"; failed?: { ".tag"?: string } };
+
+type DropboxDeleteBatchResultEntry =
+  | { ".tag": "success"; metadata?: unknown }
+  | {
+      ".tag": "failure";
+      failure: {
+        ".tag"?: string;
+        path_lookup?: { ".tag"?: string };
+        path_write?: { ".tag"?: string };
+      };
+    };
 
 /** HTTP 헤더용 ASCII-safe JSON. 비ASCII 문자를 \uXXXX 이스케이프. */
 function headerSafeJson(obj: object): string {
@@ -174,6 +199,112 @@ export class DropboxAdapter implements RemoteStorage {
     await this.rpcCall("/files/delete_v2", {
       path: this.toRemotePath(path),
     });
+  }
+
+  /**
+   * Batch-delete files/folders via /files/delete_batch (+ poll check).
+   * Folder paths recursively delete contents. path_lookup/not_found is soft-ok
+   * (same policy as single deleteRemote). too_many_files is surfaced per entry
+   * so the executor can expand a folder back to file paths.
+   */
+  async deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]> {
+    if (paths.length === 0) return [];
+
+    const results: RemoteDeleteBatchEntryResult[] = [];
+    for (let offset = 0; offset < paths.length; offset += DELETE_BATCH_MAX_ENTRIES) {
+      const chunk = paths.slice(offset, offset + DELETE_BATCH_MAX_ENTRIES);
+      const chunkResults = await this.deleteBatchChunk(chunk);
+      results.push(...chunkResults);
+    }
+    return results;
+  }
+
+  private async deleteBatchChunk(
+    paths: string[],
+  ): Promise<RemoteDeleteBatchEntryResult[]> {
+    const launch = await this.rpcCall<DropboxDeleteBatchLaunch>(
+      "/files/delete_batch",
+      {
+        entries: paths.map((path) => ({ path: this.toRemotePath(path) })),
+      },
+    );
+
+    let entries: DropboxDeleteBatchResultEntry[];
+    if (launch[".tag"] === "complete") {
+      entries = launch.entries;
+    } else if (launch[".tag"] === "async_job_id") {
+      entries = await this.pollDeleteBatchJob(launch.async_job_id);
+    } else {
+      throw new Error(
+        `Unexpected delete_batch launch: ${JSON.stringify(launch).slice(0, 200)}`,
+      );
+    }
+
+    if (entries.length !== paths.length) {
+      throw new Error(
+        `delete_batch result count mismatch: requested ${paths.length}, got ${entries.length}`,
+      );
+    }
+
+    return paths.map((path, index) =>
+      this.mapDeleteBatchEntry(path, entries[index]!),
+    );
+  }
+
+  private async pollDeleteBatchJob(
+    asyncJobId: string,
+  ): Promise<DropboxDeleteBatchResultEntry[]> {
+    let waitMs = DELETE_BATCH_POLL_MS;
+    for (;;) {
+      throwIfAborted(this.abortSignal);
+      const status = await this.rpcCall<DropboxDeleteBatchJobStatus>(
+        "/files/delete_batch/check",
+        { async_job_id: asyncJobId },
+      );
+      if (status[".tag"] === "complete") {
+        return status.entries;
+      }
+      if (status[".tag"] === "failed") {
+        const tag = status.failed?.[".tag"] ?? "unknown";
+        throw new Error(`Dropbox delete_batch job failed: ${tag}`);
+      }
+      // in_progress — back off and poll again (no per-item soft timeout).
+      await delay(waitMs, this.abortSignal);
+      waitMs = Math.min(waitMs * 2, DELETE_BATCH_POLL_MAX_MS);
+    }
+  }
+
+  private mapDeleteBatchEntry(
+    path: string,
+    entry: DropboxDeleteBatchResultEntry,
+  ): RemoteDeleteBatchEntryResult {
+    if (entry[".tag"] === "success") {
+      return { path, ok: true };
+    }
+
+    const failure = entry.failure;
+    const failureTag = failure?.[".tag"] ?? "";
+    // Soft-success: remote already gone (stale delete intents).
+    if (
+      failureTag === "path_lookup"
+      && failure.path_lookup?.[".tag"] === "not_found"
+    ) {
+      return { path, ok: true };
+    }
+    if (failureTag === "too_many_files") {
+      return {
+        path,
+        ok: false,
+        tooManyFiles: true,
+        error: new Error(`Dropbox delete_batch too_many_files: ${path}`),
+      };
+    }
+    const summary = JSON.stringify(failure).slice(0, 200);
+    return {
+      path,
+      ok: false,
+      error: new Error(`Dropbox delete_batch entry failed: ${summary}`),
+    };
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {

@@ -7,7 +7,13 @@ import {
   type ListChangesResult,
   type DownloadResult,
 } from "../types";
-import type { FileListOptions, FileSystem, RemoteStorage, SyncStateStore } from "./interfaces";
+import type {
+  FileListOptions,
+  FileSystem,
+  RemoteDeleteBatchEntryResult,
+  RemoteStorage,
+  SyncStateStore,
+} from "./interfaces";
 
 // re-export for backward compat
 export { RevConflictError };
@@ -116,6 +122,10 @@ interface ChangeLogEntry {
 }
 
 export class MemoryRemoteStorage implements RemoteStorage {
+  /** Test helper: number of deleteBatch invocations. */
+  deleteBatchCallCount = 0;
+  /** Test helper: paths passed to the last deleteBatch call. */
+  lastDeleteBatchPaths: string[] = [];
   private files = new Map<string, RemoteFile>();
   private changeLog: ChangeLogEntry[] = [];
   private seq = 0;
@@ -196,6 +206,36 @@ export class MemoryRemoteStorage implements RemoteStorage {
       deleted: true,
       hash: null,
     });
+  }
+
+  /**
+   * Test double for Dropbox delete_batch: exact file delete, or folder-prefix
+   * delete when no exact file exists at the path.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
+  async deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]> {
+    this.deleteBatchCallCount++;
+    this.lastDeleteBatchPaths = [...paths];
+    const results: RemoteDeleteBatchEntryResult[] = [];
+    for (const path of paths) {
+      const pathLower = path.toLowerCase();
+      const exact = this.files.get(pathLower);
+      if (exact && !exact.deleted) {
+        await this.delete(path);
+        results.push({ path, ok: true });
+        continue;
+      }
+      // Folder (or already-absent) path: mark-delete every file under prefix.
+      const prefix = pathLower.endsWith("/") ? pathLower : `${pathLower}/`;
+      for (const [key, file] of this.files) {
+        if (!file.deleted && key.startsWith(prefix)) {
+          await this.delete(file.pathDisplay);
+        }
+      }
+      // Match Dropbox soft-success: absent path is ok.
+      results.push({ path, ok: true });
+    }
+    return results;
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {
