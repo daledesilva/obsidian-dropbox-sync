@@ -1,8 +1,9 @@
-import { App, Modal, Setting } from "obsidian";
+import { App, Modal, Notice, Setting } from "obsidian";
 
 /**
  * Read-only list of paths affected by one sync summary chip
  * (uploads, downloads, local/cloud deletions, conflicts).
+ * Copy joins the full path list with newlines for paste into editors / spreadsheets.
  */
 export class ActionPathsModal extends Modal {
   constructor(
@@ -34,9 +35,24 @@ export class ActionPathsModal extends Modal {
       });
     }
 
-    new Setting(contentEl).addButton((btn) =>
-      btn.setButtonText("Close").setCta().onClick(() => this.close()),
-    );
+    // One path per line so the clipboard paste is usable in editors / spreadsheets.
+    new Setting(contentEl)
+      .addButton((btn) =>
+        btn
+          .setButtonText("Copy to clipboard")
+          .setCta()
+          .onClick(async () => {
+            await navigator.clipboard.writeText(this.paths.join("\n"));
+            new Notice(
+              this.paths.length === 1
+                ? "Path copied to clipboard"
+                : "Paths copied to clipboard",
+            );
+          }),
+      )
+      .addButton((btn) =>
+        btn.setButtonText("Close").onClick(() => this.close()),
+      );
   }
 
   onClose(): void {

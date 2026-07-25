@@ -15,7 +15,7 @@ Long syncs need visible structure: which vault section is running, whether the r
 - **Live execute fill.** Progress `completed/total` advances as each plan item finishes (not only after the whole concurrent batch), so large downloads do not sit at `0/N` until the end.
 - **Recent-path peek.** On an active segment with a known total, the accent `completed/total` count is a link that toggles up to **three** activity paths. Display order is **oldest on top → newest at bottom**; the two older rows are much more faded than the current file. Paths use continuous RTL/LTR truncation (ellipsis clips the start; dir faint, filename bright) so long vault paths stay readable. Opening the peek opts into **follow-active**: when the next section becomes active, its peek opens automatically until the user collapses it.
 - **Cancel sync...** (centered under the detail) opens the cancel confirm modal — accent text on a faded accent wash (not error/danger). Interrupt-safety detail lives in that modal via a circle-**i** info control next to the vault-safety line (not on the footer itself). Ribbon/panel confirm copy uses **Stop Syncing** / **Resume**.
-- **Finished summary chips.** When a vault section finishes with action counts, the detail line shows **accent chips** (same wash as Cancel) for upload / download / local delete / cloud delete / conflict — Lucide icons + count, **no** middle-dot separators. Clicking a chip opens a read-only path-list modal (`ActionPathsModal`) titled **Uploaded Files**, **Downloaded Files**, **Local Deletions**, **Cloud Deletions**, or **Conflicted Files**. Trailing prose after the parts string (e.g. skipped counts) stays plain text beside the chips. Conflicts no longer expand an inline list under the footer.
+- **Finished summary chips.** When a vault section finishes with action counts, the detail line shows **accent chips** (same wash as Cancel) for upload / download / local delete / cloud delete / conflict — Lucide icons + count, **no** middle-dot separators. Clicking a chip opens a read-only path-list modal (`ActionPathsModal`) titled **Uploaded Files**, **Downloaded Files**, **Local Deletions**, **Cloud Deletions**, or **Conflicted Files**. The modal has **Copy to clipboard** (one path per line, same pattern as the log viewer) plus **Close**. Trailing prose after the parts string (e.g. skipped counts) stays plain text beside the chips. Conflicts no longer expand an inline list under the footer.
 - **Trailing Deletions bar, not a finished Deletions text line.** Manual multi-section sync defers deletes into a **Deletions** progress segment; after that phase, trash chips (and their paths) merge onto the matching Files/Settings/… detail lines. The **Deletions:** detail text line is shown only while that segment is **active** — when finished it is omitted so delete counts are not duplicated.
 - **Obsidian Sync status icon hidden.** Plugin CSS hides `.status-bar-item.plugin-sync` so core Sync does not compete with Dropbox Sync in the desktop status bar (no public API to hide another plugin’s status item).
 - **Ribbon while syncing.** The refresh icon spins; a non-rotating stop square sits in the center. Clicking asks **Stop Syncing** / **Resume** before aborting.
@@ -86,6 +86,7 @@ flowchart TD
   Patch --> Chips
   Chips --> Click[Chip pointerdown]
   Click --> Modal[ActionPathsModal with titled path list]
+  Modal --> Copy[Copy to clipboard joins paths with newlines]
 ```
 
 ## Technical details
@@ -99,7 +100,7 @@ flowchart TD
 | Manual `syncNow` pre-prune mount (`src/main.ts`) | Creates/shows the footer before `pruneStaleDeleteLog` so long prune stays visible |
 | `deferDeletes` / `pendingDeletes` / `executeDeletePlan` | Manual section loop holds deletes until a trailing Deletions segment; trash chips merge afterward |
 | `summaryPaths` / `groupSucceededPathsByAction` | Paths per action type for chip modals; `mergeActionSummaryPaths` after deferred deletes |
-| `ActionPathsModal` | Read-only scrollable path list opened from a summary chip |
+| `ActionPathsModal` | Read-only scrollable path list from a summary chip; **Copy to clipboard** writes `paths.join("\n")` and shows a Notice |
 | `actionSummaryModalTitle` | Chip → modal title mapping (Local Deletions = `deleteLocal`, Cloud Deletions = `deleteRemote`) |
 | `onActivityPath` / `recordActivityPath` | Newest scan or execute path into the count-link peek (storage newest-first, display reversed) |
 | `appendSplitPath` + `.dbx-sync-explorer-progress-path-inner` | RTL row + LTR inner so peek paths ellipsis from the left without a dir/name gap |
@@ -132,4 +133,5 @@ Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility 
 - **Do not show a finished Deletions detail line.** Delete counts already appear as trash chips on vault-section lines after `updateSummaryParts`; a second `Deletions: N deleted` line duplicates them. `renderDetail` skips the deletions segment unless `state === "active"`.
 - **Hide the whole Cancel info-row when complete.** Hiding only the button left `min-height: 24px` + `margin-top` empty space under the summary.
 - **Chip clicks need `summaryPaths`.** Counts alone are not enough for modals; deferred deletes must call `mergeActionSummaryPaths` when patching section chips or delete chips open empty.
+- **Path modal copy is newline-joined full list.** Clipboard text is every path in `summaryPaths` for that chip (no 20-cap), one per line — keep that format so paste stays usable in editors / spreadsheets. Match the log viewer’s Copy CTA + Notice pattern rather than inventing a second clipboard UX.
 - **Hiding Sync is CSS-only.** There is no Plugin API to remove core Sync’s status item; `.status-bar-item.plugin-sync` matches Obsidian’s own class. Do not disable the Sync core plugin via internals from this plugin.
