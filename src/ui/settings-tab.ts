@@ -26,6 +26,13 @@ import {
 } from "../device-settings/device-settings";
 import { DEFAULT_CURSOR_DEBUG_PORT } from "../device-settings/device-settings-defaults";
 import { isCursorDebugIngestConfigured } from "../debug/cursor-debug-ingest";
+import {
+  clearIngestConnection,
+  connect as connectCursorDebugIngest,
+  connectedButtonLabel,
+  hasCachedIngestConnection,
+  tryAutoConnect,
+} from "../debug/cursor-debug-discover";
 
 const DOCS_BASE = "https://github.com/zeakd/obsidian-dropbox-sync/blob/main/docs";
 
@@ -152,13 +159,37 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       .addToggle((toggle) =>
         toggle.setValue(this.plugin.settings.debugLoggingEnabled).onChange(async (value) => {
           this.plugin.settings.debugLoggingEnabled = value;
+          // Turning debug off ends the ingest “session” on this device — clear
+          // cached host/path so we do not POST to a dead relay after restart.
+          if (!value) {
+            clearIngestConnection();
+          }
           await this.plugin.saveSettings();
+          if (value) {
+            await tryAutoConnect();
+          }
           this.display();
         }),
       );
 
     if (this.plugin.settings.debugLoggingEnabled) {
       this.renderCursorDebugIngestSettings(containerEl);
+      // Silent refresh when Troubleshooting opens — onload / toggle-on notify instead
+      // so opening settings does not re-toast every time.
+      const before = readDeviceSettings();
+      void tryAutoConnect({ notify: false }).then((result) => {
+        if (!result.ok) return;
+        const after = readDeviceSettings();
+        if (
+          before.cursorDebugSessionId !== after.cursorDebugSessionId
+          || before.cursorDebugIngestPath !== after.cursorDebugIngestPath
+          || before.cursorDebugHost !== after.cursorDebugHost
+          || before.cursorDebugServerName !== after.cursorDebugServerName
+          || !hasCachedIngestConnection()
+        ) {
+          this.display();
+        }
+      });
     }
 
     new Setting(containerEl)
@@ -173,17 +204,20 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
   }
 
   /**
-   * Device-local Cursor Debug target. Host/session must not live in synced
-   * data.json — each machine needs its own Mac LAN IP and Debug session path.
+   * Device-local Cursor Debug target. Prefer Connect / auto-connect over paste.
+   * Host/session must not live in synced data.json.
    */
   private renderCursorDebugIngestSettings(containerEl: HTMLElement): void {
     const device = readDeviceSettings();
+    const isLinked = hasCachedIngestConnection();
     const ingestDocs = document.createDocumentFragment();
     ingestDocs.appendText(
-      "Live Cursor Debug ingest (device-local). Start a Cursor Debug session, run ",
+      "Live Cursor Debug ingest (device-local). On the Mac: write the offer (via /debug-ingest), run ",
     );
     ingestDocs.createEl("code", { text: "bash scripts/ingest-lan-relay.sh" });
-    ingestDocs.appendText(" on the Mac, then paste host / session / path. See ");
+    ingestDocs.appendText(
+      ". This computer auto-connects when Debug logging is on; other devices tap Connect. See ",
+    );
     const ingestLink = ingestDocs.createEl("a", {
       text: "Cursor Debug ingest",
       href: `${DOCS_BASE}/cursor-debug-ingest.md`,
@@ -194,63 +228,38 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     new Setting(containerEl).setName("Cursor Debug ingest").setDesc(ingestDocs).setHeading();
 
     new Setting(containerEl)
-      .setName("Host")
+      .setName("Connect")
       .setDesc(
-        Platform.isMobile
-          ? "Mac LAN IP (required on mobile). Run print-debug-ingest-settings.sh on the Mac."
-          : "Leave empty to use 127.0.0.1 on desktop. Set Mac LAN IP for remote devices.",
+        isLinked
+          ? "Connected for this Debug era. Turn Debug logging off to clear."
+          : Platform.isMobile
+            ? "Finds the Mac offer sidecar on Wi‑Fi (localhost, cache, then short LAN probe)."
+            : "Looks for the offer on this computer (127.0.0.1). Usually auto-connects when Debug logging turns on.",
       )
-      .addText((text) =>
-        text
-          .setPlaceholder("192.168.x.x")
-          .setValue(device.cursorDebugHost)
-          .onChange((value) => {
-            patchDeviceSettings({ cursorDebugHost: value.trim() });
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Port")
-      .setDesc(`Cursor ingest port (default ${DEFAULT_CURSOR_DEBUG_PORT}). Must match the LAN relay.`)
-      .addText((text) =>
-        text
-          .setPlaceholder(String(DEFAULT_CURSOR_DEBUG_PORT))
-          .setValue(String(device.cursorDebugPort))
-          .onChange((value) => {
-            const parsed = Number.parseInt(value.trim(), 10);
-            if (Number.isFinite(parsed) && parsed > 0 && parsed < 65536) {
-              patchDeviceSettings({ cursorDebugPort: parsed });
+      .addButton((btn) => {
+        btn.setButtonText(isLinked ? connectedButtonLabel() : "Connect");
+        if (isLinked) {
+          btn.setDisabled(true);
+        } else {
+          btn.onClick(async () => {
+            btn.setDisabled(true);
+            btn.setButtonText("Connecting…");
+            const result = await connectCursorDebugIngest();
+            if (result.ok) {
+              // Success Notice is shown inside connect() (~8s).
+              this.display();
+              return;
             }
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Session ID")
-      .setDesc("Short slug from the Cursor Debug session (X-Debug-Session-Id / debug-<slug>.log).")
-      .addText((text) =>
-        text
-          .setPlaceholder("e7cde3")
-          .setValue(device.cursorDebugSessionId)
-          .onChange((value) => {
-            patchDeviceSettings({ cursorDebugSessionId: value.trim() });
-          }),
-      );
-
-    new Setting(containerEl)
-      .setName("Ingest path")
-      .setDesc("Path from Cursor Debug, e.g. /ingest/<uuid>. Not the same as the session slug.")
-      .addText((text) =>
-        text
-          .setPlaceholder("/ingest/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
-          .setValue(device.cursorDebugIngestPath)
-          .onChange((value) => {
-            patchDeviceSettings({ cursorDebugIngestPath: value.trim() });
-          }),
-      );
+            btn.setDisabled(false);
+            btn.setButtonText("Connect");
+            new Notice(result.reason);
+          });
+        }
+      });
 
     const canaryDesc = isCursorDebugIngestConfigured()
       ? "Writes a canary line to the vault log and POSTs to Cursor ingest."
-      : "Writes a canary line to the vault log. Fill host + ingest path to also POST to Cursor.";
+      : "Writes a canary line to the vault log. Connect (or Advanced fields) to also POST to Cursor.";
 
     new Setting(containerEl)
       .setName("Send test log")
@@ -268,6 +277,66 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
               : "Test log written to vault (Cursor ingest not configured).",
           );
         }),
+      );
+
+    // Emergency manual paste — Connect should be enough for normal Debug sessions.
+    const advanced = containerEl.createEl("details", { cls: "dbx-debug-ingest-advanced" });
+    advanced.createEl("summary", { text: "Advanced" });
+    const advancedBody = advanced.createDiv({ cls: "dbx-debug-ingest-advanced-body" });
+
+    new Setting(advancedBody)
+      .setName("Host")
+      .setDesc(
+        Platform.isMobile
+          ? "Mac LAN IP (filled by Connect)."
+          : "Filled by Connect. Empty host falls back to 127.0.0.1 for desktop POSTs.",
+      )
+      .addText((text) =>
+        text
+          .setPlaceholder("192.168.x.x")
+          .setValue(device.cursorDebugHost)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugHost: value.trim() });
+          }),
+      );
+
+    new Setting(advancedBody)
+      .setName("Port")
+      .setDesc(`Cursor ingest port (default ${DEFAULT_CURSOR_DEBUG_PORT}). Must match the LAN relay.`)
+      .addText((text) =>
+        text
+          .setPlaceholder(String(DEFAULT_CURSOR_DEBUG_PORT))
+          .setValue(String(device.cursorDebugPort))
+          .onChange((value) => {
+            const parsed = Number.parseInt(value.trim(), 10);
+            if (Number.isFinite(parsed) && parsed > 0 && parsed < 65536) {
+              patchDeviceSettings({ cursorDebugPort: parsed });
+            }
+          }),
+      );
+
+    new Setting(advancedBody)
+      .setName("Session ID")
+      .setDesc("Short slug from the Cursor Debug session (X-Debug-Session-Id / debug-<slug>.log).")
+      .addText((text) =>
+        text
+          .setPlaceholder("e7cde3")
+          .setValue(device.cursorDebugSessionId)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugSessionId: value.trim() });
+          }),
+      );
+
+    new Setting(advancedBody)
+      .setName("Ingest path")
+      .setDesc("Path from Cursor Debug, e.g. /ingest/<uuid>. Not the same as the session slug.")
+      .addText((text) =>
+        text
+          .setPlaceholder("/ingest/xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx")
+          .setValue(device.cursorDebugIngestPath)
+          .onChange((value) => {
+            patchDeviceSettings({ cursorDebugIngestPath: value.trim() });
+          }),
       );
   }
 

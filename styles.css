@@ -301,39 +301,31 @@
   line-height: 1.3;
 }
 
+/*
+ * One continuous path line, flush right. Row is rtl so text-overflow ellipsis
+ * clips the start of the path; the inner span stays LTR so characters read normally.
+ */
 .dbx-sync-explorer-progress-recent-path {
-  display: flex;
-  align-items: baseline;
+  display: block;
   min-width: 0;
   overflow: hidden;
   white-space: nowrap;
+  text-overflow: ellipsis;
+  direction: rtl;
   cursor: default;
 }
 
-/*
- * Leading ellipsis on the folder: rtl container + ltr text so overflow clips
- * the start of the path and the file name (sibling) stays fully readable.
- */
+.dbx-sync-explorer-progress-path-inner {
+  direction: ltr;
+  unicode-bidi: isolate;
+}
+
 .dbx-sync-explorer-progress-path-dir {
-  flex: 1 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  direction: rtl;
-  text-align: left;
   color: var(--text-faint);
 }
 
-.dbx-sync-explorer-progress-path-dir-text {
-  direction: ltr;
-  unicode-bidi: embed;
-}
-
 .dbx-sync-explorer-progress-path-name {
-  flex: 0 0 auto;
   color: #ffffff;
-  white-space: nowrap;
 }
 
 .dbx-sync-explorer-progress-recent-empty {
@@ -359,19 +351,18 @@
   word-break: break-word;
 }
 
-.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-dir {
-  display: inline;
+.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-inner {
   direction: ltr;
-  overflow: visible;
-  text-overflow: unset;
+  unicode-bidi: isolate;
   white-space: normal;
+}
+
+.dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-dir {
   color: var(--text-faint);
 }
 
 .dbx-sync-explorer-progress-path-tooltip .dbx-sync-explorer-progress-path-name {
-  display: inline;
   color: #ffffff;
-  white-space: normal;
 }
 
 .dbx-sync-explorer-progress-conflict-link {

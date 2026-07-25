@@ -4,3 +4,5 @@ dist/
 *.js.map
 .DS_Store
 data.json
+.cursor/debug-ingest-offer.json
+.cursor/debug-*.log

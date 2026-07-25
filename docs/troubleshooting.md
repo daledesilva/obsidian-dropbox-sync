@@ -95,7 +95,7 @@ Logs can help diagnose what's going wrong. First ensure **Settings > Dropbox Syn
 
 You can copy the logs to your clipboard to share when reporting issues.
 
-For live logs on an agent’s Mac during a Cursor Debug session (including from iPad over Wi‑Fi), see [Cursor Debug ingest](cursor-debug-ingest.md).
+For live logs on an agent’s Mac during a Cursor Debug session (including from iPad over Wi‑Fi), see [Cursor Debug ingest](cursor-debug-ingest.md). With Debug logging on, desktop auto-connects to the Mac offer sidecar; on iPad tap **Connect** under Troubleshooting, then **Send test log**.
 
 ## Testing: re-download everything (ignore local delete history)
 

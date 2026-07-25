@@ -5,7 +5,7 @@ alwaysApply: false
 
 # Cursor Debug structured ingest (Obsidian plugin)
 
-**This project already has a permanent Wi‑Fi → Cursor Debug ingest pipeline.** When the user asks to debug on iPad/mobile, watch live logs, or set up ingest, follow this rule and `/debug-ingest` — do not invent a parallel logging channel.
+**This project already has a permanent Wi‑Fi → Cursor Debug ingest pipeline** with Connect / discovery. When the user asks to debug on iPad/mobile, watch live logs, or set up ingest, follow this rule and `/debug-ingest` — do not invent a parallel logging channel.
 
 Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or any target where a **Cursor Debug** agent session is active and you need **runtime evidence**.
 
@@ -16,13 +16,16 @@ Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or a
 | Do | Don't |
 |----|--------|
 | `main.log()` / `postCursorDebugIngest()` via Obsidian **`requestUrl`** | `fetch('http://127.0.0.1:7662/…')` inside the plugin |
-| Runtime **device-local** Host / Port / Session ID / Ingest path (Settings → Troubleshooting) | Bake session id into the build as the primary workflow |
+| **Write offer + start relay**, then Connect / auto-connect | Tell the user to paste four Advanced fields as the primary workflow |
 | Read `.cursor/debug-<sessionId>.log` on the host after reproduction | Guess fixes from code alone |
-| Gate on **Debug logging** — when off, `log()` must no-op | Leave ingest POSTs running when logging is disabled |
+| Gate on **Debug logging** — when off, `log()` no-ops and ingest cache clears | Leave ingest POSTs running when logging is disabled |
 
-**Mobile + Wi‑Fi:** run `bash scripts/ingest-lan-relay.sh` (socat). Print pasteable host/port with `bash scripts/print-debug-ingest-settings.sh`. See `docs/cursor-debug-ingest.md`.
+**Mobile + Wi‑Fi:**  
+1. `bash scripts/write-debug-ingest-offer.sh --session <id> --path /ingest/<uuid> --port <port>`  
+2. `bash scripts/ingest-lan-relay.sh` (socat + offer sidecar on **:7663**)  
+3. Plugin: Debug logging on → **Connect** on mobile / auto on same Mac  
 
-**Android + USB:** use **`adb reverse tcp:<ingest-port> tcp:<ingest-port>`** when a project USB bootstrap script exists; iOS has no adb reverse — use LAN relay.
+**Android + USB:** use **`adb reverse tcp:<ingest-port> tcp:<ingest-port>`** when a project USB bootstrap script exists; iOS has no adb reverse — use LAN relay. Offer discovery still needs Wi‑Fi or localhost.
 
 **Agent command:** `/debug-ingest` (`.cursor/commands/debug-ingest.md`).
 
@@ -37,11 +40,11 @@ Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or a
 
 ## Agent duties
 
-1. Confirm ingest relay (LAN) or **`adb reverse`** (USB) as appropriate.
-2. Ensure **Debug logging** is on and device-local ingest fields match the active Debug session (path UUID ≠ session slug).
+1. Write **debug-ingest-offer.json** then start the relay (sidecar + socat).
+2. Ensure **Debug logging** is on; same Mac should auto-connect; mobile taps **Connect**.
 3. **Remind deploy path** (local `dist/` copy vs release + commit).
 4. Clear **only** the session log file (`.cursor/debug-<sessionId>.log`) before each reproduction run.
 5. Prefer **Send test log** in settings to verify the pipeline before diagnosing the real bug.
 6. Read the log file after reproduction; cite line evidence before fixing.
 
-Remove temporary ad-hoc ingest call sites after verified fix. Keep `src/debug/cursor-debug-ingest.ts` and the gated `main.log()` integration.
+Remove temporary ad-hoc ingest call sites after verified fix. Keep `src/debug/cursor-debug-ingest.ts`, `src/debug/cursor-debug-discover.ts`, and the gated `main.log()` integration.

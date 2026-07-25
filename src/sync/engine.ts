@@ -27,7 +27,9 @@ import {
 import { classifyVaultPath } from "./sync-scope";
 import {
   countByActionType,
+  hasNestedOtherFilesPath,
   samplePaths,
+  summarizeDeleteRemotePathShapes,
   SyncHypotheses,
   type SyncMonitorLog,
 } from "../debug/sync-monitor";
@@ -207,6 +209,15 @@ export class SyncEngine {
   trackDelete(pathLower: string): void {
     this.deletedPaths.add(pathLower);
     this.deleteIntentSources.set(pathLower, "event");
+    // #region agent log
+    // If vault events emit nested Files/Other/Files paths, they are being created live.
+    if (hasNestedOtherFilesPath(pathLower)) {
+      this.log("trackDelete nested Files/Other/Files path", {
+        path: pathLower,
+        source: "event",
+      }, { hypothesisId: SyncHypotheses.pathShape, location: "engine.trackDelete" });
+    }
+    // #endregion
   }
 
   /** 잘못 기록된 삭제 의도 제거 (경로 rename 등) */
@@ -217,12 +228,23 @@ export class SyncEngine {
 
   /** 저장된 삭제 로그에서 복원 */
   restoreDeleteLog(paths: string[]): void {
+    let nestedOtherFiles = 0;
     for (const p of paths) {
       this.deletedPaths.add(p);
       if (!this.deleteIntentSources.has(p)) {
         this.deleteIntentSources.set(p, "persisted");
       }
+      if (hasNestedOtherFilesPath(p)) nestedOtherFiles++;
     }
+    // #region agent log
+    if (nestedOtherFiles > 0) {
+      this.log("restoreDeleteLog contains nested Files/Other/Files paths", {
+        totalRestored: paths.length,
+        nestedOtherFiles,
+        sample: samplePaths(paths.filter((p) => hasNestedOtherFilesPath(p))),
+      }, { hypothesisId: SyncHypotheses.pathShape, location: "engine.restoreDeleteLog" });
+    }
+    // #endregion
   }
 
   /** Drop all delete intents (settings “Clear sync history”). */
@@ -474,6 +496,34 @@ export class SyncEngine {
         plan.items.filter((i) => i.action.type === "deleteLocal").map((i) => i.localPath),
       ),
     }, { hypothesisId: SyncHypotheses.sync, location: "engine.plan" });
+
+    // #region agent log
+    // H-path: confirm Files/Other vs Files/Other/Files dual paths are stale history
+    // (persisted/inferred intents for missing remotes) vs newly invented this cycle.
+    {
+      const localPathLowers = new Set(localFiles.map((f) => f.path.toLowerCase()));
+      const remotePathLowers = new Set(fullRemoteMap.keys());
+      const shapeSummary = summarizeDeleteRemotePathShapes({
+        deleteRemotePaths: plan.items
+          .filter((i) => i.action.type === "deleteRemote")
+          .map((i) => i.localPath),
+        deleteLogPaths: this.deletedPaths,
+        intentSource: (pathLower) => this.deleteIntentSources.get(pathLower),
+        remotePathLowers,
+        localPathLowers,
+      });
+      if (
+        shapeSummary.nestedOtherFilesCount > 0
+        || shapeSummary.pairCount > 0
+        || shapeSummary.sample.length > 0
+      ) {
+        this.log("deleteRemote path-shape analysis", shapeSummary, {
+          hypothesisId: SyncHypotheses.pathShape,
+          location: "engine.plan.pathShape",
+        });
+      }
+    }
+    // #endregion
 
     // Host may promote large background syncs to interactive UI before execute.
     await this.options.onPlanReady?.(plan);
@@ -871,6 +921,16 @@ export class SyncEngine {
         if (sample.length < 8) {
           sample.push(base.localPath);
         }
+        // #region agent log
+        if (hasNestedOtherFilesPath(base.pathLower) || hasNestedOtherFilesPath(base.localPath)) {
+          this.log("inferred delete with nested Files/Other/Files path", {
+            pathLower: base.pathLower,
+            localPath: base.localPath,
+            inRemote: fullRemoteMap.has(base.pathLower),
+            source: "inferred",
+          }, { hypothesisId: SyncHypotheses.pathShape, location: "engine.inferMissingDeletes" });
+        }
+        // #endregion
       }
     }
     return { count, sample, skippedPluginInfer, skippedNotesInfer };

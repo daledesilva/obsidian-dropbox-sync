@@ -37,6 +37,7 @@ import { postCursorDebugLogLine, type CursorDebugLogMeta } from "./debug/cursor-
 import { createSyncMonitorLog, SyncHypotheses, samplePaths } from "./debug/sync-monitor";
 import { registerDemoCommands } from "./debug/demo-commands";
 import { initDeviceSettings } from "./device-settings/device-settings";
+import { tryAutoConnect } from "./debug/cursor-debug-discover";
 import { isConflictFile, type SyncEngine } from "./sync/engine";
 
 import { fetchFileFromRemote } from "./deep-link";
@@ -53,6 +54,7 @@ import {
 import { SyncLiveReport } from "./ui/sync-live-report";
 import { SyncScopeModal } from "./ui/sync-scope-modal";
 import {
+  isFileExplorerVisible,
   outcomeToSectionState,
   SyncSectionProgress,
 } from "./ui/sync-section-progress";
@@ -211,6 +213,58 @@ export default class DropboxSyncPlugin extends Plugin {
       this.app.vault.adapter,
       () => `sync-debug-${this.settings.deviceId || "unknown"}.log`,
     );
+
+    // Same-computer auto-join when Debug logging is already on at launch.
+    // Localhost only — mobile still uses Connect (or a prior cache).
+    if (this.settings.debugLoggingEnabled) {
+      // #region agent log
+      fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Debug-Session-Id": "7bd7db",
+        },
+        body: JSON.stringify({
+          sessionId: "7bd7db",
+          hypothesisId: "H-onload",
+          location: "main.ts:onload",
+          message: "scheduling tryAutoConnect on load",
+          data: { debugLoggingEnabled: true },
+          timestamp: Date.now(),
+        }),
+      }).catch(() => {});
+      // #endregion
+      void tryAutoConnect().then((result) => {
+        // #region agent log
+        fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Debug-Session-Id": "7bd7db",
+          },
+          body: JSON.stringify({
+            sessionId: "7bd7db",
+            hypothesisId: "H-onload",
+            location: "main.ts:onload",
+            message: "tryAutoConnect settled after load",
+            data: {
+              ok: result.ok,
+              via: result.ok ? result.via : undefined,
+              reason: result.ok ? undefined : result.reason,
+            },
+            timestamp: Date.now(),
+          }),
+        }).catch(() => {});
+        // #endregion
+        if (result.ok) {
+          void this.log("cursor debug ingest auto-connected", {
+            via: result.via,
+            serverName: result.offer.serverName,
+            host: result.offer.host,
+          });
+        }
+      });
+    }
 
     this.addSettingTab(new DropboxSyncSettingTab(this.app, this));
     this.statusBar = new StatusBar(this.addStatusBarItem());
@@ -530,12 +584,58 @@ export default class DropboxSyncPlugin extends Plugin {
     }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
 
     try {
+      // Manual progress footer must mount before prune/scan work — a large delete
+      // log (thousands of paths) made prune take so long the ribbon spun with no panel.
+      if (manual && manualSections && manualSections.length > 0) {
+        // #region agent log
+        void this.log("manual sync sections ready", {
+          sections: manualSections,
+          count: manualSections.length,
+        }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
+        // #endregion
+        this.sectionProgress?.destroy();
+        this.sectionProgress = new SyncSectionProgress(this.app, () => {
+          this.cancelCurrentSync();
+        });
+        this.sectionProgress.show(manualSections);
+        this.sectionProgress.markScanning(manualSections[0]);
+        // #region agent log
+        void this.log("syncNow: sectionProgress.show done (pre-prune)", {
+          explorerVisible: isFileExplorerVisible(this.app),
+          sections: manualSections,
+        }, { hypothesisId: "H-panel", location: "main.syncNow" });
+        // #endregion
+      }
+
+      // #region agent log
+      void this.log("syncNow: before getOrCreateEngine", {
+        manual,
+      }, { hypothesisId: "H-panel", location: "main.syncNow" });
+      // #endregion
       const engine = this.getOrCreateEngine();
+      // #region agent log
+      void this.log("syncNow: after getOrCreateEngine", {
+        deleteLogSize: engine.getDeleteLog().length,
+      }, { hypothesisId: "H-panel", location: "main.syncNow" });
+      // #endregion
       // Refresh callbacks/settings each cycle so log + delete guard stay current.
       engine.applyOptions(this.createEngineOptions());
       engine.setLiveReport(liveReport);
       const configDir = this.app.vault.configDir;
+      // #region agent log
+      void this.log("syncNow: before pruneStaleDeleteLog", {
+        deleteLogSize: engine.getDeleteLog().length,
+      }, { hypothesisId: "H-panel", location: "main.syncNow" });
+      // #endregion
+      const pruneStartedAt = Date.now();
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
+      // #region agent log
+      void this.log("syncNow: after pruneStaleDeleteLog", {
+        pruned: prunedDeletes,
+        elapsedMs: Date.now() - pruneStartedAt,
+        deleteLogSize: engine.getDeleteLog().length,
+      }, { hypothesisId: "H-panel", location: "main.syncNow" });
+      // #endregion
       void this.log("delete-log before cycle", {
         pending: engine.getDeleteLog().length,
         pruned: prunedDeletes,
@@ -552,19 +652,11 @@ export default class DropboxSyncPlugin extends Plugin {
       // explorer progress segments. Background keeps a single multi-section cycle
       // unless the plan exceeds largeSyncInteractiveThreshold (then progress UI attaches).
       if (manual && manualSections && manualSections.length > 0) {
-        // #region agent log
-        void this.log("manual sync sections ready", {
-          sections: manualSections,
-          count: manualSections.length,
-        }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
-        // #endregion
-        this.sectionProgress?.destroy();
-        this.sectionProgress = new SyncSectionProgress(this.app, () => {
-          this.cancelCurrentSync();
-        });
-        // Show immediately so a long scan still has a visible "Scanning changes…" segment.
-        this.sectionProgress.show(manualSections);
-
+        // Created before prune above — local binding keeps the loop null-safe for tsc.
+        const sectionProgress = this.sectionProgress;
+        if (!sectionProgress) {
+          throw new Error("Manual sync progress panel was not initialized");
+        }
         const aggregatedSucceeded: SyncResult["succeeded"] = [];
         const aggregatedFailed: SyncResult["failed"] = [];
         const aggregatedDeferredItems: SyncResult["deferred"] = [];
@@ -580,8 +672,8 @@ export default class DropboxSyncPlugin extends Plugin {
           const isLast = i === manualSections.length - 1;
           engine.setDeferCursorUpdate(!isLast);
           engine.setSyncSections([section], configDir);
-          this.sectionProgress.markScanning(section);
-          this.sectionProgress.notifySegmentTransition(
+          sectionProgress.markScanning(section);
+          sectionProgress.notifySegmentTransition(
             null,
             `${SYNC_SCOPE_LABELS[section]}: Scanning changes…`,
           );
@@ -605,12 +697,12 @@ export default class DropboxSyncPlugin extends Plugin {
           }
 
           if (cycleResult.pathRenamesApplied) {
-            this.sectionProgress.markResult(section, "partial", "Renamed — resyncing");
-            this.sectionProgress.notifySegmentTransition(
+            sectionProgress.markResult(section, "partial", "Renamed — resyncing");
+            sectionProgress.notifySegmentTransition(
               `${SYNC_SCOPE_LABELS[section]}: Renamed — resyncing`,
               null,
             );
-            this.sectionProgress.finishSegmentNotices();
+            sectionProgress.finishSegmentNotices();
             needsResyncAfterRename = true;
             outcome = "renamed_resync";
             endMessage = "Dropbox Sync: files renamed. Syncing again…";
@@ -626,7 +718,7 @@ export default class DropboxSyncPlugin extends Plugin {
             cycleResult.deletesSkipped,
             cycleResult.pathsSkipped,
           );
-          this.sectionProgress.markResult(
+          sectionProgress.markResult(
             section,
             outcomeToSectionState(sectionFeedback.outcome),
             sectionFeedback.summary,
@@ -636,13 +728,13 @@ export default class DropboxSyncPlugin extends Plugin {
             },
           );
           // Hold end text so the next markScanning can combine into one Notice.
-          this.sectionProgress.notifySegmentTransition(
+          sectionProgress.notifySegmentTransition(
             `${SYNC_SCOPE_LABELS[section]}: ${sectionFeedback.summary}`,
             null,
           );
         }
 
-        this.sectionProgress.finishSegmentNotices();
+        sectionProgress.finishSegmentNotices();
         engine.setDeferCursorUpdate(false);
         this.engineMgr?.persistDeleteLog();
 
@@ -1456,15 +1548,27 @@ export default class DropboxSyncPlugin extends Plugin {
     this.app.setting?.openTabById(this.manifest.id);
   }
 
-  /** deleteLog에만 남은 고아 경로 제거 (rename 후 무한 재싱크 방지) */
+  /**
+   * Drop orphan delete-log paths (no sync base entry and no local file).
+   * Load base keys + local paths once — per-path getEntry + getFiles().some
+   * was O(n²) and stalled iPad sync start with thousands of delete intents.
+   */
   private async pruneStaleDeleteLog(engine: SyncEngine): Promise<number> {
     const store = this.engineMgr?.store;
     if (!store) return 0;
+    const deleteLog = engine.getDeleteLog();
+    if (deleteLog.length === 0) return 0;
+
+    const basePathLowers = new Set(
+      (await store.getAllEntries()).map((entry) => entry.pathLower),
+    );
+    const localPathLowers = new Set(
+      this.app.vault.getFiles().map((file) => file.path.toLowerCase()),
+    );
+
     let pruned = 0;
-    for (const pathLower of engine.getDeleteLog()) {
-      const entry = await store.getEntry(pathLower);
-      const hasLocal = this.app.vault.getFiles().some((f) => f.path.toLowerCase() === pathLower);
-      if (!entry && !hasLocal) {
+    for (const pathLower of deleteLog) {
+      if (!basePathLowers.has(pathLower) && !localPathLowers.has(pathLower)) {
         engine.clearDeleteIntent(pathLower);
         pruned++;
       }

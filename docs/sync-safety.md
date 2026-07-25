@@ -58,6 +58,12 @@ Sometimes the plugin skips a file during sync instead of processing it:
 
 These files aren't lost — they'll be handled on the next sync cycle. The sync result tells you if any files were deferred.
 
+## Stale delete-log cleanup
+
+Before each sync cycle, the plugin **prunes** delete-log paths that have neither a sync-base entry nor a local file. Those orphans cannot produce a meaningful delete and only inflate planning.
+
+Prune loads base keys and local vault paths **once** (set membership), then walks the log — not per-path store/vault scans. The old O(n²) approach stalled iPad sync start when thousands of intents accumulated.
+
 ## Technical details
 
 | Piece | Role |
@@ -66,6 +72,8 @@ These files aren't lost — they'll be handled on the next sync cycle. The sync 
 | `SyncEngine.applyDeleteGuard` | Awaits `onDeleteGuardTriggered`; `true` keeps deletes, `false` uses `filteredPlan` |
 | `DeleteConfirmModal` | Lists pending deletes; resolves `true`/`false` when the user closes it |
 | Plugin `onDeleteGuardTriggered` (`src/main.ts`) | Opens the modal and **awaits** the result for this cycle |
+| `pruneStaleDeleteLog` (`src/main.ts`) | Drops orphan delete intents with one base + one local path set |
+| `deleteRemote` (`src/sync/executor.ts`) | Dropbox `path_lookup/not_found` treated as success (remote already gone) |
 | `shouldSkipNotesInfer` / `shouldSkipPluginInfer` | Incomplete-scan guards; shared threshold helper `shouldSkipInferForIncompleteLocal` |
 | `SyncEngine.finalizeState` | Advances Dropbox cursor only when the cycle fully succeeded **and** the delete log is empty after clearing executed deletes |
 
@@ -76,3 +84,5 @@ These files aren't lost — they'll be handled on the next sync cycle. The sync 
 - **Threshold is independent of the interactive-progress threshold.** Delete protection uses `deleteThreshold`; large-background promotion uses `largeSyncInteractiveThreshold`.
 - **Do not advance the cursor while the delete log still has pending intents.** Multi-section manual sync used to update the cursor on a later section after an earlier section skipped deletes, which left remote files intact and the next cycle re-downloaded (or re-prompted). Clear succeeded deletes first, then require `deletedPaths.size === 0` (and no `deletesSkipped` / failures / deferred) before writing the cursor.
 - **Incomplete-scan skip is not “user deleted half the vault.”** If local notes are still ≥ 50% of base, infer still runs. Explicit Obsidian delete/rename events always stay in the delete log.
+- **`deleteRemote` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry / delete intent instead of failing the item (stale intents otherwise stick and block cursor finalize).
+- **Prune must stay O(n).** Never call `getEntry` / `vault.getFiles()` inside the per-path loop.

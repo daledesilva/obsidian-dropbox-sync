@@ -15,4 +15,10 @@ export interface DeviceSettingsV1 {
   cursorDebugSessionId: string;
   /** Ingest path from Cursor Debug, e.g. `/ingest/<uuid>`. */
   cursorDebugIngestPath: string;
+  /** Friendly Mac name from the discovery offer (Connect / Connected label). */
+  cursorDebugServerName: string;
+  /** Offer token echoed as X-Dropbox-Sync-Debug-Token on later GET /offer. */
+  cursorDebugOfferToken: string;
+  /** Epoch ms when Connect / auto-connect last applied an offer (0 = never). */
+  cursorDebugConnectedAt: number;
 }

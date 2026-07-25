@@ -43,9 +43,9 @@ UI Layer → SyncEngine (Planner → Executor) → Adapters (FileSystem, RemoteS
 When debugging on **iPad/mobile** (or any device where the agent needs live runtime logs on the Mac):
 
 1. Follow **`/debug-ingest`** (`.cursor/commands/debug-ingest.md`) and **`.cursor/rules/cursor-debug-ingest.mdc`**
-2. Start LAN relay: `bash scripts/ingest-lan-relay.sh` (needs `socat`); print Host/Port with `bash scripts/print-debug-ingest-settings.sh`
-3. Plugin path: Settings → Troubleshooting → **Debug logging** + device-local Cursor Host / Port / Session ID / Ingest path → **Send test log**
-4. Ordinary plugin logs go through gated `main.log()` → vault file + Wi‑Fi NDJSON when ingest is configured (`src/debug/cursor-debug-ingest.ts`)
+2. Write offer + start relay: `write-debug-ingest-offer.sh` then `ingest-lan-relay.sh` (socat + offer sidecar on `:7663`)
+3. Plugin: Settings → Troubleshooting → **Debug logging** → auto-connect on same Mac or tap **Connect** on mobile → **Send test log**
+4. Ordinary plugin logs go through gated `main.log()` → vault file + Wi‑Fi NDJSON when ingest is configured (`src/debug/cursor-debug-ingest.ts` / `cursor-debug-discover.ts`)
 5. Docs: `docs/cursor-debug-ingest.md`
 
 Do **not** invent a new logging pipe or use `fetch` to localhost — use the existing ingest workflow.

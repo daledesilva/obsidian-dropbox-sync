@@ -10,7 +10,7 @@ The plugin keeps several kinds of data in different places on purpose: OAuth and
 |---|---|---|
 | Settings, OAuth, `deviceId`, `vaultInstanceId` | `.obsidian/plugins/dropbox-sync/data.json` via `loadData` / `saveData` | Yes, if that plugin folder is in sync scope |
 | Sync base, Dropbox cursor, delete log | IndexedDB `dropbox-sync-<vaultInstanceId>` (desktop/Android); vault `.sync-state/` on iOS | No (device-local). `.sync-state/` is exclude-listed |
-| Cursor Debug host / port / session / path | `App.loadLocalStorage` / `App.saveLocalStorage` key `dropbox-sync-device-settings_v1` | No — vault-namespaced on this Obsidian profile |
+| Cursor Debug host / port / session / path / server name / offer token | `App.loadLocalStorage` / `App.saveLocalStorage` key `dropbox-sync-device-settings_v1` (filled by Connect; cleared when Debug logging turns off) | No — vault-namespaced on this Obsidian profile |
 | User-facing debug log | Vault root `sync-debug-<deviceId>.log` | Can sync like any vault file (intentional — users open/share it) |
 
 `vaultInstanceId` is a UUID minted once and stored in `data.json`. It names the IndexedDB database. It is **not** the Dropbox remote folder name (`syncName`) and **not** the short `deviceId` used in log filenames.
@@ -83,4 +83,5 @@ Built-in exclude patterns include `.sync-state/` so the iOS fallback does not ro
 - **`vaultInstanceId` in `data.json` can sync across devices** if the plugin folder is synced. That is fine for naming: each machine still has its own IndexedDB. Wiping `data.json` mints a new id and orphans the old DB on that machine.
 - **Vault-root debug logs are intentional.** Do not move them under `.obsidian/plugins` for “correctness”; users rely on seeing them in the vault and in View logs.
 - **App localStorage is vault-namespaced.** After migration from the old global key, Cursor Debug host/session are per vault on this profile — re-enter values in another vault if needed.
+- **Debug logging OFF clears ingest connection fields.** Host/path/session/token/server name are wiped from the device blob so a later session does not POST to a stale Cursor ingest path; quitting Obsidian with Debug still on keeps the cache.
 - **iOS Lockdown Mode** can break IndexedDB persistence in Obsidian generally; this plugin already falls back to `.sync-state/` on iOS.

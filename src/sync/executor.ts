@@ -11,7 +11,11 @@ import {
 } from "./conflict-handlers";
 import type { ConflictHandlerDeps } from "./conflict-handlers";
 import type { CycleContext } from "./cycle-context";
-import { SyncHypotheses, type SyncMonitorLog } from "../debug/sync-monitor";
+import {
+  hasNestedOtherFilesPath,
+  SyncHypotheses,
+  type SyncMonitorLog,
+} from "../debug/sync-monitor";
 
 export interface ExecutorDeps {
   fs: FileSystem;
@@ -344,6 +348,12 @@ async function raceWithTimeout<T>(
   }
 }
 
+/** Dropbox delete/lookup 409 when the path is already gone (path_lookup/not_found). */
+function isDropboxPathNotFoundError(err: unknown): boolean {
+  const msg = err instanceof Error ? err.message : String(err);
+  return msg.includes("not_found");
+}
+
 async function executeItem(
   item: SyncPlanItem,
   deps: ExecutorContext,
@@ -410,7 +420,29 @@ async function executeItem(
     }
 
     case "deleteRemote": {
-      await remote.delete(localPath);
+      try {
+        await remote.delete(localPath);
+      } catch (err) {
+        // Dropbox 409 path_lookup/not_found: remote already gone. Treat as success
+        // so stale delete intents (Ink/.writing, etc.) don't fail the cycle, stick
+        // in the delete log, or block cursor finalize. Confirmed on iPad logs.
+        if (!isDropboxPathNotFoundError(err)) {
+          throw err;
+        }
+        deps.log?.("deleteRemote already absent — treating as success", {
+          path: localPath,
+          nestedOtherFiles: hasNestedOtherFilesPath(localPath),
+          error: err instanceof Error ? err.message : String(err),
+        }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemote" });
+        // #region agent log
+        if (hasNestedOtherFilesPath(localPath)) {
+          deps.log?.("H-path: nested Other/Files path already absent on remote", {
+            path: localPath,
+            pathLower,
+          }, { hypothesisId: SyncHypotheses.pathShape, location: "executor.deleteRemote" });
+        }
+        // #endregion
+      }
       await store.deleteEntry(pathLower);
       break;
     }

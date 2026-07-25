@@ -527,7 +527,7 @@ export class SyncSectionProgress {
       this.infoRowEl = this.rootEl.createDiv({ cls: "dbx-sync-explorer-progress-info-row" });
       this.cancelBtnEl = this.infoRowEl.createSpan({
         // Ellipsis signals the confirm modal — not an immediate abort.
-        text: "Cancel...",
+        text: "Cancel sync...",
         cls: "dbx-sync-explorer-progress-cancel",
         attr: {
           role: "button",
@@ -865,20 +865,21 @@ function splitVaultPath(path: string): { dirPrefix: string; fileName: string } {
 }
 
 /**
- * Render path with leading-ellipsis on the directory and a bright file name.
- * Used in the recent-path peek and its hover tooltip.
+ * Render path as one continuous run (faint dir + bright name) for the peek / tooltip.
+ * CSS on the row uses rtl truncation so overflow ellipsis clips the start of the path
+ * and short lines sit flush right with no gap between dir and name.
  */
 function appendSplitPath(parent: HTMLElement, path: string): void {
   const { dirPrefix, fileName } = splitVaultPath(path);
+  // Inner LTR wrapper: row is rtl for leading-ellipsis; this keeps path characters LTR.
+  const inner = parent.createSpan({ cls: "dbx-sync-explorer-progress-path-inner" });
   if (dirPrefix) {
-    // Outer rtl + inner ltr makes text-overflow ellipsis appear on the left.
-    const dirEl = parent.createSpan({ cls: "dbx-sync-explorer-progress-path-dir" });
-    dirEl.createSpan({
+    inner.createSpan({
       text: dirPrefix,
-      cls: "dbx-sync-explorer-progress-path-dir-text",
+      cls: "dbx-sync-explorer-progress-path-dir",
     });
   }
-  parent.createSpan({
+  inner.createSpan({
     text: fileName,
     cls: "dbx-sync-explorer-progress-path-name",
   });

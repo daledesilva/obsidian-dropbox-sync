@@ -48,6 +48,10 @@ function mergeWithDefaults(partial: unknown): DeviceSettingsV1 {
     typeof o.cursorDebugPort === "number" && o.cursorDebugPort > 0 && o.cursorDebugPort < 65536
       ? o.cursorDebugPort
       : DEFAULT_CURSOR_DEBUG_PORT;
+  const connectedAt =
+    typeof o.cursorDebugConnectedAt === "number" && o.cursorDebugConnectedAt >= 0
+      ? o.cursorDebugConnectedAt
+      : base.cursorDebugConnectedAt;
   return {
     version: 1,
     cursorDebugHost: typeof o.cursorDebugHost === "string" ? o.cursorDebugHost : base.cursorDebugHost,
@@ -56,6 +60,11 @@ function mergeWithDefaults(partial: unknown): DeviceSettingsV1 {
       typeof o.cursorDebugSessionId === "string" ? o.cursorDebugSessionId : base.cursorDebugSessionId,
     cursorDebugIngestPath:
       typeof o.cursorDebugIngestPath === "string" ? o.cursorDebugIngestPath : base.cursorDebugIngestPath,
+    cursorDebugServerName:
+      typeof o.cursorDebugServerName === "string" ? o.cursorDebugServerName : base.cursorDebugServerName,
+    cursorDebugOfferToken:
+      typeof o.cursorDebugOfferToken === "string" ? o.cursorDebugOfferToken : base.cursorDebugOfferToken,
+    cursorDebugConnectedAt: connectedAt,
   };
 }
 
@@ -137,6 +146,14 @@ export function getCursorDebugSessionId(): string {
 
 export function getCursorDebugIngestPath(): string {
   return readDeviceSettings().cursorDebugIngestPath;
+}
+
+export function getCursorDebugServerName(): string {
+  return readDeviceSettings().cursorDebugServerName;
+}
+
+export function getCursorDebugOfferToken(): string {
+  return readDeviceSettings().cursorDebugOfferToken;
 }
 
 /**

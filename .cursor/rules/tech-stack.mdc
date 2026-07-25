@@ -14,7 +14,7 @@ This file is the source of truth for the libraries, frameworks, and tools used i
 - **UI:** Obsidian native UI (`createEl`, Setting API, Modals) + `styles.css`
 - **Persistence:** localforage (IndexedDB) for sync state; plugin `data.json` for settings; `localStorage` device-local settings (Cursor Debug ingest host/session)
 - **Remote API:** Dropbox HTTP API (OAuth PKCE, content_hash, rev, longpoll)
-- **Debug ingest (host-side):** Cursor Debug NDJSON listener; optional `socat` LAN relay (`scripts/ingest-lan-relay.sh`) for mobile Wi‑Fi
+- **Debug ingest (host-side):** Cursor Debug NDJSON listener; `socat` LAN relay + Python offer sidecar on `:7663` (`scripts/ingest-lan-relay.sh`, `write-debug-ingest-offer.sh`); plugin Connect / localhost auto-connect
 - **Testing:** bun:test (unit + in-memory simulation)
 - **Lint / types:** ESLint (eslint-plugin-obsidianmd), TypeScript (`tsc --noEmit`)
 - **CI:** GitHub Actions (`.github/workflows/ci.yml`, `release.yml`)

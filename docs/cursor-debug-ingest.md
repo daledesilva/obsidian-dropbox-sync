@@ -6,17 +6,19 @@ When debugging sync on an iPad or another device, the agent needs **runtime evid
 
 ## Conceptual understanding
 
-Debug logging and Cursor ingest are one pipeline with two destinations:
+Debug logging and Cursor ingest are one pipeline with two destinations, plus a discovery sidecar so you rarely paste host/path by hand:
 
 | Piece | Role |
 |---|---|
-| **Debug logging** (synced `debugLoggingEnabled`) | Master switch. Default **on**. Off → `main.log()` is a no-op (no vault file, no console mirror, no Wi‑Fi POST) |
-| **Vault log** | `sync-debug-<deviceId>.log` at the **vault root** via `LogManager` — intentional so users can open/share it from the file list (not under `.obsidian/plugins`) |
-| **Device-local ingest fields** | Host, Port, Session ID, Ingest path via Obsidian `App.loadLocalStorage` / `App.saveLocalStorage` (key `dropbox-sync-device-settings_v1`) — **not** vault `data.json` |
-| **LAN relay** | `scripts/ingest-lan-relay.sh` (socat) exposes Cursor’s localhost-only ingest on the LAN |
-| **Cursor Debug session** | Owns the HTTP listener; shell scripts cannot start it |
+| **Debug logging** (synced `debugLoggingEnabled`) | Master switch. Default **on**. Off → `main.log()` is a no-op **and** clears the device-local ingest connection cache |
+| **Vault log** | `sync-debug-<deviceId>.log` at the **vault root** via `LogManager` — intentional so users can open/share it from the file list |
+| **Device-local ingest fields** | Host, Port, Session ID, Ingest path, server name, offer token via App localStorage — **not** vault `data.json` |
+| **Offer sidecar** | Python HTTP on **:7663** serves `GET /offer` from `.cursor/debug-ingest-offer.json` |
+| **LAN relay** | `scripts/ingest-lan-relay.sh` runs socat (ingest port) **and** the offer sidecar |
+| **Connect / auto-connect** | Plugin fills device-local fields from the offer (localhost auto; mobile taps **Connect**) |
+| **Cursor Debug session** | Owns the HTTP ingest listener; shell scripts cannot start it |
 
-When logging is on but ingest fields are incomplete, logs still go to the vault file only. Wi‑Fi POST runs only when an ingest **URL** can be resolved (path required; host required on mobile).
+When logging is on but ingest fields are incomplete, logs still go to the vault file only. Wi‑Fi POST runs only when an ingest **URL** can be resolved.
 
 ```mermaid
 flowchart LR
@@ -25,38 +27,52 @@ flowchart LR
     Gate{debugLoggingEnabled}
     Local["vault sync-debug log"]
     Ingest["postCursorDebugIngest"]
+    Connect["Connect / autoConnect"]
+    Cache["device-local settings"]
     LogCall --> Gate
-    Gate -->|no| Drop[no-op]
+    Gate -->|no| Drop[no-op + clear cache]
     Gate -->|yes| Local
     Gate -->|yes| Ingest
+    Connect --> Cache
+    Cache --> Ingest
   end
   subgraph mac [Mac]
+    Offer["Offer sidecar :7663"]
     Relay["socat LAN relay"]
     Cursor["Cursor Debug 127.0.0.1"]
     LogFile[".cursor/debug-session.log"]
+    OfferFile["debug-ingest-offer.json"]
+    OfferFile --> Offer
     Relay --> Cursor --> LogFile
   end
+  Connect -->|"GET /offer"| Offer
   Ingest -->|"Wi-Fi POST"| Relay
 ```
 
 ## Flows
 
-### One-time / per Debug session
+### Per Debug session (preferred)
 
-1. Start a **Cursor Debug** agent session. Note **session ID** (short slug), **ingest path** (`/ingest/<uuid>`), and log file (`.cursor/debug-<slug>.log`). Path UUID ≠ session slug.
-2. On the Mac:
+1. Start a **Cursor Debug** agent session. Note **session ID**, **ingest path** (`/ingest/<uuid>`), ingest **port**, and log file. Path UUID ≠ session slug.
+2. On the Mac (agent via `/debug-ingest`):
    ```bash
-   bash scripts/print-debug-ingest-settings.sh
+   bash scripts/write-debug-ingest-offer.sh \
+     --session <slug> --path /ingest/<uuid> --port <ingestPort>
    bash scripts/ingest-lan-relay.sh
    ```
 3. In Obsidian → **Settings → Dropbox Sync → Troubleshooting**:
-   - Ensure **Debug logging** is on
-   - Set **Host** (Mac LAN IP on mobile; leave empty on desktop for `127.0.0.1`), **Port** (default `7662`), **Session ID**, **Ingest path**
+   - Enable **Debug logging**
+   - **Same Mac:** auto-connects to `127.0.0.1:7663` → button shows **Connected to {ComputerName}**
+   - **iPad / other device:** tap **Connect** (localhost → cached host → short private /24 probe)
    - Tap **Send test log**
-4. Confirm a canary line (`cursor-debug-ingest canary`) appears in `.cursor/debug-<sessionId>.log` on the Mac.
-5. Reproduce the bug; the agent reads the session log.
+4. Confirm a canary line appears in `.cursor/debug-<sessionId>.log`.
+5. Reproduce; the agent reads the session log.
 
-Agent shortcut: `/debug-ingest` (see `.cursor/commands/debug-ingest.md` and `.cursor/rules/cursor-debug-ingest.mdc`).
+Turning **Debug logging off** clears the device-local connection (host/path/session/token). Quit/reopen Obsidian with Debug still on keeps the cache. Plugin uninstall may wipe App localStorage.
+
+**Advanced** (collapsed in settings) still allows manual host/port/session/path paste.
+
+Agent shortcut: `/debug-ingest`.
 
 ### Settings model
 
@@ -65,60 +81,52 @@ flowchart TB
   Synced["Synced PluginSettings.debugLoggingEnabled"]
   Device["Device-local App localStorage blob"]
   Synced --> GateLog["Gates all logging"]
+  Synced -->|off| Clear["clearIngestConnection"]
   Device --> ResolveUrl["resolveCursorDebugIngestUrl"]
   ResolveUrl --> Post["requestUrl POST when URL resolves"]
 ```
-
-- **Synced:** turn logging on/off for the vault’s plugin settings (survives across devices as a preference).
-- **Device-local:** Mac LAN IP and Debug session values use vault-scoped App localStorage on this machine so one device’s host does not overwrite another’s via Dropbox-synced `data.json`. Call `initDeviceSettings(app)` at the start of `onload` before any ingest reads.
 
 ## Technical details
 
 | Module | Role |
 |---|---|
-| `src/device-settings/` | Versioned device-local blob via App localStorage + read/patch helpers |
-| `src/debug/cursor-debug-ingest.ts` | URL resolve + `requestUrl` POST + `postCursorDebugLogLine` |
-| `src/main.ts` `log()` / `sendDebugLogCanary()` | Gate + vault write + fire-and-forget ingest |
-| `src/ui/settings-tab.ts` | Troubleshooting toggle, ingest fields, Send test log |
-| `scripts/ingest-lan-relay.sh` | socat `0.0.0.0:7662` → `127.0.0.1:7662` |
-| `scripts/print-debug-ingest-settings.sh` | Prints Host/Port for paste into settings |
+| `src/device-settings/` | Versioned blob including `cursorDebugServerName` / `cursorDebugOfferToken` |
+| `src/debug/cursor-debug-discover.ts` | `fetchOffer`, `tryAutoConnect`, `connect`, `clearIngestConnection` |
+| `src/debug/cursor-debug-ingest.ts` | URL resolve + `requestUrl` POST |
+| `src/ui/settings-tab.ts` | Connect / Connected, Send test log, Advanced fields |
+| `scripts/write-debug-ingest-offer.sh` | Writes `.cursor/debug-ingest-offer.json` |
+| `scripts/debug-ingest-offer-sidecar.py` | `GET /offer` on `:7663` with magic header |
+| `scripts/ingest-lan-relay.sh` | socat + sidecar together |
 
-URL shape: `http://{host}:{port}{ingestPath}`
+**Offer JSON** (`GET http://<host>:7663/offer`):
+
+- `serverName`, `host` (LAN IP), `port`, `ingestPath`, `sessionId`, `token`
+- Response header `X-Dropbox-Sync-Debug: 1` (required)
+- Optional request header `X-Dropbox-Sync-Debug-Token` (cached token; wrong token → 401; missing allowed for bootstrap)
+
+**Bootstrap port:** fixed `7663`. Ingest POSTs use the session port via socat.
+
+URL shape for logs: `http://{host}:{port}{ingestPath}`
 
 - Desktop with empty host → `127.0.0.1`
 - Mobile with empty host → no URL (no POST)
-- Missing or blank ingest path → no URL (no POST)
-- Session ID alone cannot deliver a POST; it only fills the payload / `X-Debug-Session-Id` header when a URL exists
+- Missing ingest path → no URL
 
-Payload shape (one JSON object per POST; Cursor appends as NDJSON):
+Ordinary plugin logs use `hypothesisId: "log"`. Structured sync monitoring (`src/debug/sync-monitor.ts`) tags continuous phase/progress lines as `hypothesisId: "sync"` and investigation tags such as `H-A`…`H-E`. `main.log(msg, data, meta?)` forwards optional `hypothesisId` / `location` into ingest.
 
-```json
-{
-  "sessionId": "e7cde3",
-  "hypothesisId": "log",
-  "location": "main.log",
-  "message": "short description",
-  "data": {},
-  "timestamp": 1784206541263
-}
-```
-
-Ordinary plugin logs use `hypothesisId: "log"`. Structured sync monitoring (`src/debug/sync-monitor.ts`) tags continuous phase/progress lines as `hypothesisId: "sync"` and investigation tags such as `H-A`…`H-E` (delete execution, re-infer, guard skip, cursor stall, item stall). `main.log(msg, data, meta?)` forwards optional `hypothesisId` / `location` into ingest.
-
-Headers: `Content-Type: application/json`, optional `X-Debug-Session-Id`.
-
-Reusable Cursor templates (rule, command, scripts) also live under `_reference_ide-setup/obsidian-plugin/` for other Obsidian plugins.
+Reusable Cursor templates also live under `_reference_ide-setup/obsidian-plugin/`.
 
 ## Technical Gotchas
 
-- **Cursor binds localhost only.** Mobile devices need the LAN relay; USB alone does not bridge iOS to `127.0.0.1` on the Mac.
+- **Cursor binds localhost only.** Mobile needs the LAN relay; USB alone does not bridge iOS to `127.0.0.1` on the Mac.
+- **Offer port ≠ ingest port.** Connect talks to `:7663`; POSTs go to the relay/session port from the offer.
 - **Ingest path UUID ≠ session slug.** Wrong path → 404; wrong session id → log file mismatch.
-- **Port can vary by session.** Default in settings is `7662`; match the active Debug listener / relay (`INGEST_RELAY_PORT` if overridden).
-- **macOS Firewall** may block inbound TCP on the relay port.
-- **Same Wi‑Fi** required between iPad and Mac (or routable LAN).
-- **Always use `requestUrl`**, never `fetch`, for Obsidian mobile networking.
-- **Ingest is fire-and-forget** from `main.log()` so vault flush is not delayed; failures are swallowed — verify with **Send test log**, do not treat silence as proof a code path did not run.
+- **Auto-connect never scans the LAN** — only `127.0.0.1` / `localhost`. Mobile must tap **Connect** (or already have a cache).
+- **Clear on Debug logging OFF**, not on Obsidian quit. Leave Debug on across a new Cursor session and you may keep a stale path until you toggle off/on or Connect again (desktop settings open refreshes from localhost when the sidecar is up).
+- **macOS Firewall** may block inbound TCP on the ingest port and `7663`.
+- **Same Wi‑Fi** required between iPad and Mac.
+- **Always use `requestUrl`**, never `fetch`.
+- **Ingest is fire-and-forget** — verify with **Send test log**.
 - **Scripts cannot start Cursor’s listener** — only a Debug-mode agent session can.
-- **Existing installs** migrate missing `debugLoggingEnabled` to `true` so View logs keeps working after upgrade.
-- **Legacy raw `window.localStorage` blob** is copied into App localStorage once per vault when App storage is empty; the next write clears the old global key.
-- **Vault-root log path is product behavior**, not a packaging mistake — see [Plugin persistence](plugin-persistence.md).
+- **Offer file is gitignored** (`.cursor/debug-ingest-offer.json`) — session-specific.
+- **Vault-root log path is product behavior** — see [Plugin persistence](plugin-persistence.md).
