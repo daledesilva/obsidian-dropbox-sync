@@ -51,11 +51,12 @@ sequenceDiagram
 | `cancelCurrentSync` | Abort + status/notice only |
 | `syncNow` `finally` | Always clears ribbon + `syncing` when that run ends |
 
-Progress: first-pass timeouts do not bump `completed` until the retry (or abort path marks them failed) so the denominator stays “each item once.”
+Progress: `hooks.onSettled` runs **as each task finishes** inside the worker (success / failure / timeout), so explorer `onProgress` can move during the batch. First-pass timeouts do not bump `completed` until the retry (or abort path marks them failed) so the denominator stays “each item once.” Collecting settled results after the pool joins must **not** call `onSettled` again (double-count).
 
 ## Technical Gotchas
 
 - **Soft timeout ≠ cancel network.** A timed-out Dropbox request may still complete in the background; the executor has already moved on. That is intentional so one hung call cannot stall the vault.
 - **Conflicts are not timed out the same way.** Manual conflict modals are serial after the parallel batch and wait for the user.
 - **Never clear `syncing` in cancel.** Early clear previously allowed a new sync to start before the old `finally`, which could leave the ribbon spinning or strip the new run’s spin.
+- **UI-throwing catch must not leave `up_to_date`.** If progress chrome throws while opening the footer, log and set `outcome = "error"` before further UI updates; a second throw in `markInterrupted` previously skipped error assignment and reported a false instant success.
 - **Confirm modal does not abort until confirmed.** Closing with Keep syncing leaves the engine untouched.

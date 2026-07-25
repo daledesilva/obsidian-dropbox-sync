@@ -103,7 +103,7 @@ Payload shape (one JSON object per POST; Cursor appends as NDJSON):
 }
 ```
 
-Ordinary plugin logs use `hypothesisId: "log"`. Ad-hoc instrumentation may call `postCursorDebugIngest` with other hypothesis IDs.
+Ordinary plugin logs use `hypothesisId: "log"`. Structured sync monitoring (`src/debug/sync-monitor.ts`) tags continuous phase/progress lines as `hypothesisId: "sync"` and investigation tags such as `H-A`…`H-E` (delete execution, re-infer, guard skip, cursor stall, item stall). `main.log(msg, data, meta?)` forwards optional `hypothesisId` / `location` into ingest.
 
 Headers: `Content-Type: application/json`, optional `X-Debug-Session-Id`.
 

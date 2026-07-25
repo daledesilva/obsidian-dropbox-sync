@@ -12,6 +12,8 @@ What this means in practice:
 - If you exclude a file from sync using patterns, it will **not** be deleted from Dropbox
 - Only files you deliberately delete (or rename) in Obsidian are removed from Dropbox
 
+**Incomplete local scan guard (notes and plugins):** As a catch-up, the planner can *infer* deletes when a path is in the sync base and on Dropbox but missing locally. That is unsafe when the local listing is far smaller than the base (empty vault, partial index, mobile scan gaps). If the notes or plugins section is active and local count is under half of base (and base > 20), the engine **skips inferring** those deletes and clears prior non-`event` intents for that section so a bad mass-infer does not keep re-prompting. Vault delete/rename events (`event` source) still apply. Prefer re-download over mass `deleteRemote`.
+
 ## Layer 2: Confirmation before bulk deletions
 
 If a sync would delete more than 5 files at once (and delete protection is on), a confirmation window appears showing exactly which files will be deleted. The sync **waits** for your choice before continuing that cycle.
@@ -64,9 +66,13 @@ These files aren't lost — they'll be handled on the next sync cycle. The sync 
 | `SyncEngine.applyDeleteGuard` | Awaits `onDeleteGuardTriggered`; `true` keeps deletes, `false` uses `filteredPlan` |
 | `DeleteConfirmModal` | Lists pending deletes; resolves `true`/`false` when the user closes it |
 | Plugin `onDeleteGuardTriggered` (`src/main.ts`) | Opens the modal and **awaits** the result for this cycle |
+| `shouldSkipNotesInfer` / `shouldSkipPluginInfer` | Incomplete-scan guards; shared threshold helper `shouldSkipInferForIncompleteLocal` |
+| `SyncEngine.finalizeState` | Advances Dropbox cursor only when the cycle fully succeeded **and** the delete log is empty after clearing executed deletes |
 
 ## Technical Gotchas
 
 - **The modal must block the cycle.** Returning `false` immediately and deferring approval to a later debounced sync made both **Delete** and **Skip** look like Skip (especially when background sync was off). Always `await modal.waitForConfirmation()` and return that boolean.
 - **One modal at a time.** If a confirm modal is already open, a second guard trigger returns `false` (skips deletes) to avoid stacked dialogs.
 - **Threshold is independent of the interactive-progress threshold.** Delete protection uses `deleteThreshold`; large-background promotion uses `largeSyncInteractiveThreshold`.
+- **Do not advance the cursor while the delete log still has pending intents.** Multi-section manual sync used to update the cursor on a later section after an earlier section skipped deletes, which left remote files intact and the next cycle re-downloaded (or re-prompted). Clear succeeded deletes first, then require `deletedPaths.size === 0` (and no `deletesSkipped` / failures / deferred) before writing the cursor.
+- **Incomplete-scan skip is not “user deleted half the vault.”** If local notes are still ≥ 50% of base, infer still runs. Explicit Obsidian delete/rename events always stay in the delete log.

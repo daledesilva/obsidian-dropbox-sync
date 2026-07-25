@@ -17,6 +17,8 @@ import {
   countLocalBySection,
   countRemotePlugins,
   emitDiagnosticsPhaseLines,
+  countBaseNotes,
+  shouldSkipNotesInfer,
   shouldSkipPluginInfer,
   summarizeDeletePlan,
   type DeleteIntentSource,
@@ -61,6 +63,11 @@ export interface SyncEngineOptions {
    * Drives explorer segment fill while the section is still "Scanning…".
    */
   onScanProgress?: (completed: number, total: number) => void;
+  /**
+   * Path currently being scanned or executed. Feeds the explorer progress
+   * count-link peek (current + previous two files).
+   */
+  onActivityPath?: (path: string) => void;
   /**
    * Called after the plan is built (non-noop actions only) and before guards/execute.
    * Used to promote a large background sync to interactive progress UI.
@@ -207,6 +214,12 @@ export class SyncEngine {
     }
   }
 
+  /** Drop all delete intents (settings “Clear sync history”). */
+  clearDeleteLog(): void {
+    this.deletedPaths.clear();
+    this.deleteIntentSources.clear();
+  }
+
   /** 현재 삭제 로그 반환 (영속화용) */
   getDeleteLog(): string[] {
     return [...this.deletedPaths];
@@ -263,6 +276,8 @@ export class SyncEngine {
     await this.liveReport?.phaseStart(1);
     const localScanCb: LocalFileScanCallback = (path, detail) => {
       this.liveReport?.line(`\`${path}\` (${detail})`);
+      // Drive the explorer recent-path peek during local list/hash.
+      this.options.onActivityPath?.(path);
     };
     this.attachLocalScanCallback(localScanCb);
     // Drive explorer scan fill from VaultAdapter hashing (indexed + disk merges).
@@ -319,6 +334,7 @@ export class SyncEngine {
         inferredThisCycle: 0,
         inferredSample: [],
         inferredSkippedPlugin: 0,
+        inferredSkippedNotes: 0,
       },
       deletePlan: {
         deleteRemote: 0,
@@ -391,6 +407,7 @@ export class SyncEngine {
         inferredThisCycle: inferred.count,
         inferredSample: inferred.sample,
         inferredSkippedPlugin: inferred.skippedPluginInfer,
+        inferredSkippedNotes: inferred.skippedNotesInfer,
       };
       emitDiagnosticsPhaseLines(this.liveReport, "intent", this.lastDiagnostics);
       // #region agent log
@@ -400,6 +417,7 @@ export class SyncEngine {
         fromPersistedLog: intentSources.persisted,
         inferredThisCycle: inferred.count,
         inferredSkippedPlugin: inferred.skippedPluginInfer,
+        inferredSkippedNotes: inferred.skippedNotesInfer,
         inferredSample: inferred.sample,
         localInScope: localFiles.length,
         baseInScope: baseEntries.length,
@@ -529,6 +547,10 @@ export class SyncEngine {
       strictLocalPaths: this.options.strictLocalPaths,
       ctx,
       onExecItem: (localPath, actionType, event, ok, error) => {
+        if (event === "start") {
+          // Newest path when an item begins (concurrency may interleave starts).
+          this.options.onActivityPath?.(localPath);
+        }
         if (event === "end" && !ok) {
           execFailed++;
           this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
@@ -762,32 +784,66 @@ export class SyncEngine {
     localFiles: import("../types").FileInfo[],
     fullRemoteMap: Map<string, RemoteEntry>,
     baseEntries: import("../types").SyncEntry[],
-  ): { count: number; sample: string[]; skippedPluginInfer: number } {
+  ): { count: number; sample: string[]; skippedPluginInfer: number; skippedNotesInfer: number } {
     const localPathSet = new Set(localFiles.map((f) => f.pathLower));
     const sample: string[] = [];
     let count = 0;
     let skippedPluginInfer = 0;
+    let skippedNotesInfer = 0;
 
+    const bySection = countLocalBySection(localFiles, this.configDir);
     const pluginsSectionActive = this.sectionFilter?.includes("plugins") ?? false;
-    const localPlugins = countLocalBySection(localFiles, this.configDir).plugins;
-    const basePlugins = countBasePlugins(baseEntries, this.configDir);
+    const notesSectionActive = this.sectionFilter?.includes("notes") ?? false;
     const skipPluginInfer = shouldSkipPluginInfer(
       pluginsSectionActive,
-      localPlugins,
-      basePlugins,
+      bySection.plugins,
+      countBasePlugins(baseEntries, this.configDir),
+    );
+    // Same incomplete-scan guard as plugins: local<<base must not mass-infer deleteRemote
+    // (event-tracked deletes in deletedPaths still apply).
+    const skipNotesInfer = shouldSkipNotesInfer(
+      notesSectionActive,
+      bySection.notes,
+      countBaseNotes(baseEntries, this.configDir),
     );
 
+    // Drop prior catch-up intents when the local scan looks incomplete so a
+    // previous false mass-infer (now persisted) cannot keep re-prompting deletes.
+    // Vault delete/rename events (source "event") are kept.
+    if (skipNotesInfer) {
+      for (const pathLower of [...this.deletedPaths]) {
+        if (this.deleteIntentSources.get(pathLower) === "event") continue;
+        const baseHit = baseEntries.find((e) => e.pathLower === pathLower);
+        const section = classifyVaultPath(
+          baseHit?.localPath ?? pathLower,
+          this.configDir,
+        );
+        if (section === "notes") {
+          this.deletedPaths.delete(pathLower);
+          this.deleteIntentSources.delete(pathLower);
+        }
+      }
+    }
+
     for (const base of baseEntries) {
-      if (
-        skipPluginInfer &&
-        classifyVaultPath(base.localPath, this.configDir) === "plugins"
-      ) {
+      const section = classifyVaultPath(base.localPath, this.configDir);
+      if (skipPluginInfer && section === "plugins") {
         if (
           !localPathSet.has(base.pathLower) &&
           !this.deletedPaths.has(base.pathLower) &&
           fullRemoteMap.has(base.pathLower)
         ) {
           skippedPluginInfer++;
+        }
+        continue;
+      }
+      if (skipNotesInfer && section === "notes") {
+        if (
+          !localPathSet.has(base.pathLower) &&
+          !this.deletedPaths.has(base.pathLower) &&
+          fullRemoteMap.has(base.pathLower)
+        ) {
+          skippedNotesInfer++;
         }
         continue;
       }
@@ -804,7 +860,7 @@ export class SyncEngine {
         }
       }
     }
-    return { count, sample, skippedPluginInfer };
+    return { count, sample, skippedPluginInfer, skippedNotesInfer };
   }
 
   /** 삭제 가드 적용 → 실행할 plan과 스킵 수 반환 */
@@ -889,19 +945,9 @@ export class SyncEngine {
     deletesSkipped: number,
   ): Promise<void> {
     const deleteLogBefore = this.deletedPaths.size;
-    const canUpdateCursor =
-      !this.options.deferCursorUpdate
-      && result.failed.length === 0
-      && deletesSkipped === 0
-      && result.deferred.length === 0;
 
-    // 모두 성공 시에만 cursor 갱신 (deferred도 미완료 취급).
-    // Intermediate sequential sections defer so later sections see the same delta.
-    if (canUpdateCursor) {
-      await store.setMeta("cursor", latestCursor);
-    }
-
-    // 성공한 삭제 항목을 deletedPaths에서 제거
+    // Clear executed deletes before the cursor decision so a later multi-section
+    // cycle cannot advance the cursor while an earlier section still has skips pending.
     let deletesClearedFromLog = 0;
     for (const item of result.succeeded) {
       if (item.action.type === "deleteRemote" || item.action.type === "deleteLocal") {
@@ -912,6 +958,20 @@ export class SyncEngine {
       }
     }
 
+    const pendingDeleteLog = this.deletedPaths.size;
+    const canUpdateCursor =
+      !this.options.deferCursorUpdate
+      && result.failed.length === 0
+      && deletesSkipped === 0
+      && result.deferred.length === 0
+      && pendingDeleteLog === 0;
+
+    // 모두 성공 시에만 cursor 갱신 (deferred / pending delete log도 미완료 취급).
+    // Intermediate sequential sections defer so later sections see the same delta.
+    if (canUpdateCursor) {
+      await store.setMeta("cursor", latestCursor);
+    }
+
     // #region agent log
     this.log("finalize state", {
       cursorUpdated: canUpdateCursor,
@@ -919,11 +979,13 @@ export class SyncEngine {
       failed: result.failed.length,
       deferred: result.deferred.length,
       deletesSkipped,
+      pendingDeleteLog,
       blockReasons: [
         ...(this.options.deferCursorUpdate ? ["deferCursorUpdate"] : []),
         ...(result.failed.length > 0 ? [`failed:${result.failed.length}`] : []),
         ...(deletesSkipped > 0 ? [`deletesSkipped:${deletesSkipped}`] : []),
         ...(result.deferred.length > 0 ? [`deferred:${result.deferred.length}`] : []),
+        ...(pendingDeleteLog > 0 ? [`pendingDeleteLog:${pendingDeleteLog}`] : []),
       ],
       deleteLogBefore,
       deletesClearedFromLog,

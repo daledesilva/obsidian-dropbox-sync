@@ -109,6 +109,41 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     tsLink.setAttr("target", "_blank");
     new Setting(containerEl).setName("Troubleshooting").setDesc(troubleshootingFrag).setHeading();
 
+    // Wipe sync base/cursor/delete log only — never debugLoggingEnabled, Cursor
+    // Debug ingest fields, OAuth, logs, or vault/Dropbox files.
+    const clearHistoryDesc = document.createDocumentFragment();
+    clearHistoryDesc.appendText(
+      "Forget this device’s sync base, Dropbox cursor, and delete log. The next sync behaves like a first install for planning (typically re-downloads). Keeps Debug logging, Cursor Debug ingest settings, your Dropbox login, and all vault files. See ",
+    );
+    const clearHistoryLink = clearHistoryDesc.createEl("a", {
+      text: "Plugin persistence",
+      href: `${DOCS_BASE}/plugin-persistence.md`,
+    });
+    clearHistoryLink.setAttr("target", "_blank");
+    clearHistoryDesc.appendText(".");
+
+    new Setting(containerEl)
+      .setName("Clear sync history")
+      .setDesc(clearHistoryDesc)
+      .addButton((btn) =>
+        btn
+          .setButtonText("Clear history")
+          .setWarning()
+          .onClick(async () => {
+            const modal = new ConfirmModal(
+              this.app,
+              "Clear sync history?",
+              "This device will forget what it has already synced. The next sync will treat the vault as new on this device for planning — usually re-downloading from Dropbox instead of pushing local deletes.",
+              "Does not change Debug logging or Cursor Debug ingest settings, does not disconnect Dropbox, and does not delete vault or Dropbox files.",
+              "Clear history",
+              "Cancel",
+              true,
+            );
+            if (!(await modal.waitForConfirmation())) return;
+            await this.plugin.clearSyncHistory();
+          }),
+      );
+
     new Setting(containerEl)
       .setName("Debug logging")
       .setDesc(

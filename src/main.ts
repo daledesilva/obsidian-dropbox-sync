@@ -13,6 +13,7 @@ import { DropboxSyncSettingTab } from "./ui/settings-tab";
 import { StatusBar } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
 import { ConfirmModal } from "./ui/confirm-modal";
+import { SyncCancelConfirmModal } from "./ui/sync-cancel-confirm-modal";
 import { DeleteConfirmModal } from "./ui/delete-confirm-modal";
 import { IncompatiblePathsModal } from "./ui/incompatible-paths-modal";
 import { LogViewerModal } from "./ui/log-viewer-modal";
@@ -42,8 +43,6 @@ import {
   getSyncDeviceTypeLabel,
   buildSyncResultFeedback,
   buildSyncSummaryMarkdown,
-  notifySyncEnd,
-  notifySyncStart,
   setRibbonSyncing,
   writeSyncLogFallback,
   type SyncOutcome,
@@ -372,19 +371,8 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private async handleRibbonClick(): Promise<void> {
     if (this.syncing) {
-      // Confirm before aborting — accidental ribbon taps mid-sync were too easy.
-      const shouldCancel = await new ConfirmModal(
-        this.app,
-        "Cancel sync?",
-        "Stop the sync that is currently running?",
-        undefined,
-        "Cancel sync",
-        "Keep syncing",
-        true,
-      ).waitForConfirmation();
-      if (shouldCancel) {
-        this.cancelCurrentSync();
-      }
+      // Same confirm modal as the explorer panel Cancel control.
+      await this.confirmAndCancelSync();
       return;
     }
     if (this.scopeModalOpen) return;
@@ -410,13 +398,22 @@ export default class DropboxSyncPlugin extends Plugin {
     this.scopeModalOpen = false;
   }
 
+  /** Shared by ribbon stop and explorer panel Cancel. */
+  private async confirmAndCancelSync(): Promise<void> {
+    const shouldCancel = await new SyncCancelConfirmModal(this.app).waitForConfirmation();
+    if (shouldCancel) {
+      this.cancelCurrentSync();
+    }
+  }
+
   cancelCurrentSync(): void {
     if (!this.syncing) return;
     this.abortController?.abort();
     // Do not clear syncing/ribbon here — syncNow's finally owns cleanup so a
     // follow-up sync cannot start while an aborted cycle is still unwinding
     // (which previously left the ribbon spinning or cleared a newer run's spin).
-    this.statusBar?.update("idle", "stopping…");
+    // Still out of sync until a later run finishes successfully.
+    this.statusBar?.markPending("stopping");
     new Notice("Dropbox Sync: stopping…", 2000);
   }
 
@@ -471,7 +468,10 @@ export default class DropboxSyncPlugin extends Plugin {
     if (!this.scopeModalOpen) {
       setRibbonSyncing(this.ribbonEl, true);
     }
-    this.statusBar?.update("syncing");
+    // Background: keep/show out-of-sync until success. Manual progress is the explorer panel.
+    if (!manual) {
+      this.statusBar?.markPending();
+    }
 
     let cursorUpdated = false;
     let needsResyncAfterRename = false;
@@ -503,7 +503,6 @@ export default class DropboxSyncPlugin extends Plugin {
       }
     }
 
-    if (this.interactiveUi) notifySyncStart();
     void this.log(`sync started (v${this.manifest.version}, scope: ${scopeLabel})`, {
       manual,
       platform: Platform.isMobile ? "mobile" : "desktop",
@@ -535,9 +534,17 @@ export default class DropboxSyncPlugin extends Plugin {
       // Manual: one section at a time (notes → settings → plugins → workspaces) with
       // explorer progress segments. Background keeps a single multi-section cycle
       // unless the plan exceeds largeSyncInteractiveThreshold (then progress UI attaches).
-      if (manual && manualSections) {
+      if (manual && manualSections && manualSections.length > 0) {
+        // #region agent log
+        void this.log("manual sync sections ready", {
+          sections: manualSections,
+          count: manualSections.length,
+        }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
+        // #endregion
         this.sectionProgress?.destroy();
-        this.sectionProgress = new SyncSectionProgress(this.app);
+        this.sectionProgress = new SyncSectionProgress(this.app, () => {
+          this.cancelCurrentSync();
+        });
         // Show immediately so a long scan still has a visible "Scanning changes…" segment.
         this.sectionProgress.show(manualSections);
 
@@ -562,7 +569,7 @@ export default class DropboxSyncPlugin extends Plugin {
             `${SYNC_SCOPE_LABELS[section]}: Scanning changes…`,
           );
           liveReport?.line(`## ${SYNC_SCOPE_LABELS[section]}`);
-          this.statusBar?.update("syncing", SYNC_SCOPE_LABELS[section]);
+          // Progress lives in the explorer panel — status bar stays a plain "syncing" state.
 
           const cycleResult = await engine.runCycle(this.abortController.signal);
           lastPlan = cycleResult.plan;
@@ -592,7 +599,7 @@ export default class DropboxSyncPlugin extends Plugin {
             endMessage = "Dropbox Sync: files renamed. Syncing again…";
             noticeDuration = 5000;
             this.lastSyncSummary = "renamed — resyncing";
-            this.statusBar?.update("success", "renamed — resyncing");
+            this.statusBar?.update("success");
             engine.setDeferCursorUpdate(false);
             return;
           }
@@ -606,6 +613,10 @@ export default class DropboxSyncPlugin extends Plugin {
             section,
             outcomeToSectionState(sectionFeedback.outcome),
             sectionFeedback.summary,
+            {
+              conflictPaths: sectionFeedback.conflictPaths,
+              summaryParts: sectionFeedback.summaryParts,
+            },
           );
           // Hold end text so the next markScanning can combine into one Notice.
           this.sectionProgress.notifySegmentTransition(
@@ -659,7 +670,7 @@ export default class DropboxSyncPlugin extends Plugin {
           endMessage = "Dropbox Sync: files renamed. Syncing again…";
           noticeDuration = 5000;
           this.lastSyncSummary = "renamed — resyncing";
-          this.statusBar?.update("success", "renamed — resyncing");
+          this.statusBar?.update("success");
           return;
         }
 
@@ -671,6 +682,10 @@ export default class DropboxSyncPlugin extends Plugin {
             this.progressSection,
             outcomeToSectionState(sectionFeedback.outcome),
             sectionFeedback.summary,
+            {
+              conflictPaths: sectionFeedback.conflictPaths,
+              summaryParts: sectionFeedback.summaryParts,
+            },
           );
           // Remaining promoted segments share the overall outcome for this single cycle.
           for (const section of this.backgroundPromoteSections ?? []) {
@@ -679,6 +694,10 @@ export default class DropboxSyncPlugin extends Plugin {
               section,
               outcomeToSectionState(sectionFeedback.outcome),
               sectionFeedback.summary,
+              {
+                conflictPaths: sectionFeedback.conflictPaths,
+                summaryParts: sectionFeedback.summaryParts,
+              },
             );
           }
           this.sectionProgress.notifySegmentTransition(
@@ -698,24 +717,40 @@ export default class DropboxSyncPlugin extends Plugin {
         }
       }
     } catch (e) {
-      this.getOrCreateEngine().setDeferCursorUpdate(false);
+      // Log before UI updates — markInterrupted can throw and would otherwise
+      // leave outcome stuck at the initial "up_to_date" (false instant complete).
+      const errMsg = e instanceof Error ? e.message : String(e);
+      void this.log("sync error", e instanceof Error ? e : { message: errMsg });
+      try {
+        this.getOrCreateEngine().setDeferCursorUpdate(false);
+      } catch {
+        /* engine may be unavailable after clearSyncHistory mid-failure */
+      }
       if (e instanceof Error && e.name === "AbortError") {
-        this.sectionProgress?.markInterrupted(
-          currentManualSection ?? this.progressSection,
-          "Cancelled",
-        );
+        try {
+          this.sectionProgress?.markInterrupted(
+            currentManualSection ?? this.progressSection,
+            "Cancelled",
+          );
+        } catch {
+          /* progress UI must not mask abort */
+        }
         await this.log("sync aborted");
         outcome = "aborted";
         endMessage = "Dropbox Sync: cancelled";
         noticeDuration = 3000;
-        this.statusBar?.update("idle");
+        this.statusBar?.markPending("cancelled");
         return;
       }
       if (e instanceof DropboxAuthError) {
-        this.sectionProgress?.markInterrupted(
-          currentManualSection ?? this.progressSection,
-          "Auth error",
-        );
+        try {
+          this.sectionProgress?.markInterrupted(
+            currentManualSection ?? this.progressSection,
+            "Auth error",
+          );
+        } catch {
+          /* progress UI must not mask auth errors */
+        }
         await this.log("auth error — token revoked", e);
         this.settings.accessToken = "";
         this.settings.tokenExpiry = 0;
@@ -728,13 +763,16 @@ export default class DropboxSyncPlugin extends Plugin {
         this.statusBar?.update("error", "auth expired");
         return;
       }
-      this.sectionProgress?.markInterrupted(
-        currentManualSection ?? this.progressSection,
-        (e as Error).message?.slice(0, 80) || "Error",
-      );
-      await this.log("sync error", e);
+      try {
+        this.sectionProgress?.markInterrupted(
+          currentManualSection ?? this.progressSection,
+          errMsg.slice(0, 80) || "Error",
+        );
+      } catch {
+        /* progress UI must not mask the original sync failure */
+      }
       outcome = "error";
-      errorMessage = (e as Error).message;
+      errorMessage = errMsg;
       endMessage = `Dropbox Sync error: ${errorMessage}`;
       noticeDuration = 8000;
       this.lastSyncSummary = "sync failed";
@@ -742,8 +780,7 @@ export default class DropboxSyncPlugin extends Plugin {
     } finally {
       const endedAt = Date.now();
       setRibbonSyncing(this.ribbonEl, false);
-      // Interactive finish stays until dismissed so the result is not missed; start notice still auto-hides.
-      if (this.interactiveUi) notifySyncEnd(endMessage, 0);
+      // End summary lives in the explorer panel for interactive runs — no sticky Notice.
 
       const reportInput: SyncReportInput = {
         startedAt,
@@ -883,6 +920,28 @@ export default class DropboxSyncPlugin extends Plugin {
     return this.logger?.read() ?? "(no logs)";
   }
 
+  /**
+   * Settings “Clear sync history”: wipe local sync base/cursor/delete log so the
+   * next sync re-downloads like a first install. Does not clear debug settings
+   * (debugLoggingEnabled or Cursor Debug ingest). Refuses while a cycle is running.
+   */
+  async clearSyncHistory(): Promise<void> {
+    if (this.syncing) {
+      new Notice("Wait for the current sync to finish, then try again.");
+      return;
+    }
+    try {
+      await this.getEngineManager().clearSyncHistory();
+      void this.log("cleared sync history (store + delete log)");
+      new Notice(
+        "Sync history cleared. The next sync will treat this device like a new install.",
+      );
+    } catch (e) {
+      console.error("Failed to clear sync history:", e);
+      new Notice("Could not clear sync history. Check the logs.");
+    }
+  }
+
   // ── Private: Engine ──
 
   private getEngineManager(): EngineManager {
@@ -897,7 +956,11 @@ export default class DropboxSyncPlugin extends Plugin {
         getCursor: async () => this.engineMgr?.store?.getMeta("cursor") ?? null,
         isSyncing: () => this.syncing,
         isEnabled: () => this.settings.backgroundSyncEnabled && !!this.engineMgr?.store,
-        onChanges: () => { void this.syncNow(); },
+        onChanges: () => {
+          // Remote delta detected — show out-of-sync until this (or a follow-up) run finishes.
+          this.statusBar?.markPending();
+          void this.syncNow();
+        },
         log: (msg, data) => this.log(msg, data),
       });
     }
@@ -943,9 +1006,10 @@ export default class DropboxSyncPlugin extends Plugin {
     void this.log(
       `large background sync: ${actionCount} actions > ${threshold} — interactive UI`,
     );
-    notifySyncStart();
     this.sectionProgress?.destroy();
-    this.sectionProgress = new SyncSectionProgress(this.app);
+    this.sectionProgress = new SyncSectionProgress(this.app, () => {
+      this.cancelCurrentSync();
+    });
     this.sectionProgress.show(sections);
     const first = sections[0];
     if (first) {
@@ -1054,15 +1118,20 @@ export default class DropboxSyncPlugin extends Plugin {
           this.sectionProgress?.updateOperationProgress(this.progressSection, completed, total);
         }
       },
+      onActivityPath: (path: string) => {
+        // Latest activity paths for the accent count-link peek in the footer.
+        if (this.progressSection) {
+          this.sectionProgress?.recordActivityPath(this.progressSection, path);
+        }
+      },
       onProgress: (completed: number, total: number, failed: number) => {
-        const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
-        const failHint = failed > 0 ? ` · ${failed} failed` : "";
-        this.statusBar?.update("syncing", `${pct}% · ${completed}/${total}${failHint}`);
         // Drive the active explorer segment fill from plan execute progress.
+        // Do not mirror % / counts into the status bar — that UI is the explorer panel only.
         if (this.progressSection) {
           this.sectionProgress?.updateOperationProgress(this.progressSection, completed, total);
         }
         if (completed % 10 === 0 || completed === total || failed > 0) {
+          const pct = total > 0 ? Math.round((completed / total) * 100) : 0;
           void this.log(`execute: ${completed}/${total} (${failed} failed)`, {
             pct,
             completed,
@@ -1151,10 +1220,6 @@ export default class DropboxSyncPlugin extends Plugin {
   // ── Private: Timers ──
 
   applySyncState(): void {
-    if (this.statusBar) {
-      this.statusBar.backgroundSyncEnabled = this.settings.backgroundSyncEnabled;
-    }
-
     if (this.isBackgroundSyncTimerEligible()) {
       if (!this.syncing) {
         this.scheduleBackgroundSyncTimer();
@@ -1188,6 +1253,8 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private scheduleDebouncedSync(): void {
     if (!this.settings.backgroundSyncEnabled) return;
+    // Vault changed — out-of-sync icon until a successful background sync clears it.
+    this.statusBar?.markPending();
     this.clearDebounceTimer();
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
@@ -1215,7 +1282,7 @@ export default class DropboxSyncPlugin extends Plugin {
     new SyncStatusModal(
       this.app,
       {
-        status: this.statusBar?.lastStatus ?? "idle",
+        status: this.statusBar?.lastStatus ?? "hidden",
         detail: this.statusBar?.lastDetail,
         backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
         lastSyncTime: this.lastSyncTime,
@@ -1325,6 +1392,7 @@ export default class DropboxSyncPlugin extends Plugin {
     deletesSkipped?: number,
     pathsSkipped?: number,
   ): { outcome: SyncOutcome; endMessage: string; noticeDuration: number } {
+    const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
     if (result.failed.length > 0) {
       for (const f of result.failed) {
         const err = f.error;
@@ -1333,19 +1401,23 @@ export default class DropboxSyncPlugin extends Plugin {
       }
       this.statusBar?.update("error", `${result.failed.length} failed`);
     } else {
-      const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
-      if (pathsSkipped && pathsSkipped > 0) {
+      // Green tick only when we were out of sync or actually changed something.
+      // Quiet interval runs that find nothing stay icon-free.
+      const wasPending =
+        this.statusBar?.lastStatus === "pending"
+        || this.statusBar?.lastStatus === "syncing"
+        || this.statusBar?.lastStatus === "error";
+      const hadWork =
+        result.succeeded.length > 0
+        || !!(deletesSkipped && deletesSkipped > 0)
+        || !!(pathsSkipped && pathsSkipped > 0);
+      if (wasPending || hadWork) {
         this.statusBar?.update("success", feedback.summary);
-      } else if (deletesSkipped && deletesSkipped > 0) {
-        this.statusBar?.update("success", feedback.summary);
-      } else if (result.succeeded.length > 0) {
-        this.statusBar?.update("success", feedback.summary);
-      } else {
-        this.statusBar?.update("success", "up to date");
+      } else if (this.statusBar?.lastStatus !== "success") {
+        this.statusBar?.update("hidden");
       }
     }
 
-    const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
     this.lastSyncSummary = feedback.summary;
     return feedback;
   }

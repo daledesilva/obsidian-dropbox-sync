@@ -44,15 +44,19 @@ flowchart TB
 
 Goal: empty vault should **re-download** from Dropbox instead of pushing local deletes.
 
+**Preferred:** Settings → Dropbox Sync → Troubleshooting → **Clear sync history** (confirm). That clears only the sync store and in-memory delete log on this device. It does **not** clear Debug logging, Cursor Debug ingest fields, OAuth, debug log files, or vault/Dropbox files.
+
+Manual alternative (if the UI is unavailable):
+
 1. Disable or pause sync / quit Obsidian if needed.
 2. Clear sync state only:
-   - Desktop/Android: delete IndexedDB `dropbox-sync-<vaultInstanceId>` (id is in `data.json`), or call `store.clear()` if a UI exists later.
+   - Desktop/Android: delete IndexedDB `dropbox-sync-<vaultInstanceId>` (id is in `data.json`).
    - iOS: clear or delete `.sync-state/entries.json` and `.sync-state/meta.json`.
 3. Optionally delete `sync-debug-*.log` for a clean log; not required for planner behavior.
 4. Leave `data.json` alone to keep OAuth (unless you also want to re-auth).
 5. Reload the plugin, then sync with an empty local vault.
 
-Do **not** rely on `resetEngine()` — that rebuilds the engine and preserves the delete log; it does not wipe IndexedDB.
+Do **not** rely on `resetEngine()` — that rebuilds the engine and preserves the delete log; it does not wipe IndexedDB. Clear history is refused while a sync is running.
 
 ### Device-settings migrate (Cursor Debug fields)
 
@@ -67,6 +71,7 @@ Older builds stored the blob in raw `window.localStorage` (global across vaults)
 | `src/adapters/vault-file-store.ts` | iOS sync-state files under `.sync-state/` |
 | `src/device-settings/` | App-scoped device blob; `initDeviceSettings` in `onload` |
 | `src/log-manager.ts` + `main.ts` logger path | Vault-root `sync-debug-*.log` (user-visible by design) |
+| `EngineManager.clearSyncHistory` / `main.clearSyncHistory` | UI **Clear sync history** — `store.clear()` + empty delete log; drop engine so intents are not rehydrated |
 | `.cursor/rules/device-local-settings.mdc` | Prefer App localStorage over raw `window.localStorage` |
 
 Built-in exclude patterns include `.sync-state/` so the iOS fallback does not round-trip through Dropbox.

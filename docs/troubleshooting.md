@@ -99,6 +99,10 @@ For live logs on an agent’s Mac during a Cursor Debug session (including from 
 
 ## Testing: re-download everything (ignore local delete history)
 
-If you wipe the local vault to retest and the plugin tries to **delete those files on Dropbox**, it still has a local sync base (last-known file state). Clear **sync state** so the plugin behaves like a first install, then sync again.
+If you wipe the local vault to retest and the plugin tries to **delete those files on Dropbox**, it still has a local sync base (last-known file state).
 
-See [Plugin persistence](plugin-persistence.md) for where sync state lives (`vaultInstanceId` IndexedDB on desktop/Android, `.sync-state/` on iOS) and the safe reset steps. Leave `data.json` alone if you want to keep your Dropbox login.
+1. Wait until no sync is running.
+2. **Settings → Dropbox Sync → Troubleshooting → Clear sync history** → confirm.
+3. Sync again (empty local vault → re-download from Dropbox).
+
+That keeps your Dropbox login. Details: [Plugin persistence](plugin-persistence.md).

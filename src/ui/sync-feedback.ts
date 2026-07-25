@@ -1,7 +1,12 @@
 import { Notice, Platform, setIcon, type App } from "obsidian";
 import type { SyncPlan, SyncResult } from "../types";
 import { PathValidationError, LocalPathError } from "../types";
-import { summarizeActions } from "../sync/sync-reporter";
+import {
+  listConflictPaths,
+  summarizeActionParts,
+  summarizeActions,
+  type ActionSummaryPart,
+} from "../sync/sync-reporter";
 import {
   formatDiagnosticsMarkdown,
   type SyncCycleDiagnostics,
@@ -64,12 +69,28 @@ export function notifySyncEnd(message: string, durationMs = 5000): void {
   new Notice(message, durationMs);
 }
 
+export interface SyncResultFeedback {
+  outcome: SyncOutcome;
+  summary: string;
+  endMessage: string;
+  noticeDuration: number;
+  /** Succeeded conflict paths — explorer panel can expand these under a link. */
+  conflictPaths: string[];
+  /**
+   * Icon/count parts for the explorer panel (white icons + normal value colour).
+   * Empty when the summary is prose (failed / up to date) rather than action icons.
+   */
+  summaryParts: ActionSummaryPart[];
+}
+
 /** Status bar + notice message from engine result. */
 export function buildSyncResultFeedback(
   result: SyncResult,
   deletesSkipped?: number,
   pathsSkipped?: number,
-): { outcome: SyncOutcome; summary: string; endMessage: string; noticeDuration: number } {
+): SyncResultFeedback {
+  const conflictPaths = listConflictPaths(result.succeeded);
+  const summaryParts = summarizeActionParts(result.succeeded);
   if (result.failed.length > 0) {
     const summary = `${result.failed.length} failed, ${result.succeeded.length} ok`;
     const first = result.failed[0];
@@ -83,6 +104,9 @@ export function buildSyncResultFeedback(
       summary,
       endMessage: `Dropbox Sync: ${summary}\n${first.item.localPath}: ${detail}${pathHint}`,
       noticeDuration: 8000,
+      conflictPaths,
+      // Prose summary — panel renders plain text, not icon parts.
+      summaryParts: [],
     };
   }
   if (pathsSkipped && pathsSkipped > 0) {
@@ -92,6 +116,8 @@ export function buildSyncResultFeedback(
       summary,
       endMessage: `Dropbox Sync: ${pathsSkipped} file(s) skipped (incompatible names). Other changes synced.`,
       noticeDuration: 6000,
+      conflictPaths,
+      summaryParts,
     };
   }
   if (deletesSkipped && deletesSkipped > 0) {
@@ -101,6 +127,8 @@ export function buildSyncResultFeedback(
       summary,
       endMessage: `Dropbox Sync: ${summarizeActions(result.succeeded)}, ${deletesSkipped} deletions skipped by protection.`,
       noticeDuration: 5000,
+      conflictPaths,
+      summaryParts,
     };
   }
   if (result.succeeded.length > 0) {
@@ -110,6 +138,8 @@ export function buildSyncResultFeedback(
       summary,
       endMessage: `Dropbox Sync: ${summary}`,
       noticeDuration: 5000,
+      conflictPaths,
+      summaryParts,
     };
   }
   return {
@@ -117,6 +147,8 @@ export function buildSyncResultFeedback(
     summary: "up to date",
     endMessage: "Dropbox Sync: up to date",
     noticeDuration: 4000,
+    conflictPaths,
+    summaryParts: [],
   };
 }
 

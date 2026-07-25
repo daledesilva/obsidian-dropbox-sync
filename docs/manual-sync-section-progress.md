@@ -9,7 +9,9 @@ Long syncs need visible structure: which vault section is running, whether the r
 - **Interactive UI** means: explorer progress footer, start/end Notices, rotating ribbon with a stop affordance, and confirmed cancel from the ribbon.
 - **Manual Sync now** always uses interactive UI. The footer appears **immediately** with a **Scanning changes…** segment so slow local/remote scans are not an invisible wait.
 - **Background sync** stays quiet unless the plan has more actionable items than **Settings → Large sync progress threshold** (default **10** → promote when `plan.items.length > 10`). `plan.items` excludes noops.
-- **Minimize, don’t close.** Click the progress footer (or the chevron) to hide only the detail text; title and segment bars stay. There is no Close control that destroys the footer mid-run.
+- **Minimize while running; dismiss when complete.** While syncing, click the footer (or the decorative chevron) to hide only the detail text; title and segment bars stay. When every section has a result, the title becomes **Sync completed**, the footer auto-expands if it was minimized, and the trailing control becomes a plain **X** that destroys the footer (body clicks no longer toggle minimize).
+- **Live execute fill.** Progress `completed/total` advances as each plan item finishes (not only after the whole concurrent batch), so large downloads do not sit at `0/N` until the end.
+- **Recent-path peek.** On an active segment with a known total, the accent `completed/total` count is a link that toggles a short newest-first peek (current + previous two paths) fed by scan/execute activity.
 - **Ribbon while syncing.** The refresh icon spins; a non-rotating stop square sits in the center. Clicking asks **Cancel sync** / **Keep syncing** before aborting.
 - **Explorer closed.** If the file explorer is not visible at footer `show()` (or later), segment start/end become Notices; adjacent end→start combine into one Notice.
 
@@ -53,12 +55,13 @@ flowchart TD
 | `interactiveUi` (`src/main.ts`) | True for manual runs, or after background promotion; drives Notices and end sticky Notice |
 | `largeSyncInteractiveThreshold` | Setting (default 10); promote when actionable plan size is **greater than** this value |
 | `onPlanReady` (`SyncEngine`) | After plan, before guards/execute — flips Scanning→Syncing, or promotes background UI |
-| `SyncSectionProgress` | Footer mount, minimize, scanning/active/result, segment Notices |
+| `SyncSectionProgress` | Footer mount, minimize / Sync completed + X, scanning/active/result, recent-path peek, segment Notices |
+| `onActivityPath` / `recordActivityPath` | Newest scan or execute path into the count-link peek |
 | `isFileExplorerVisible` | Layout-size check on file-explorer leaves |
 | `setRibbonSyncing` | Spin class + centered non-spinning stop square overlay |
-| `handleRibbonClick` / `ConfirmModal` | Confirm before `cancelCurrentSync` |
+| `handleRibbonClick` / cancel confirm modals | Confirm before `cancelCurrentSync` |
 
-Minimize: root click toggles `.dbx-sync-explorer-progress-minimized` and flips chevron down↔up. Chevron is decorative for that same toggle (single handler on the footer).
+While running: root click toggles `.dbx-sync-explorer-progress-minimized` and flips the decorative chevron. When complete: title **Sync completed**, class `dbx-sync-explorer-progress-complete`, X closes via `destroy()`.
 
 Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility at start (sticky for the run). `notifySegmentTransition(ended, started)` holds a lone end until the next start so transitions combine; `finishSegmentNotices` flushes a trailing end.
 
@@ -69,3 +72,5 @@ Segment Notices: `show()` sets `segmentNoticesEnabled` from explorer visibility 
 - **Promotion count is `plan.items.length`.** Noops are never in `items`; do not subtract `stats.noop` again.
 - **Explorer “closed” is geometric.** Collapsed sidebars / zero-size leaves count as hidden even if a leaf still exists in the workspace.
 - **Footer replacement.** A new interactive run destroys/rebuilds `SyncSectionProgress`; leftover Close semantics from older builds were removed on purpose.
+- **Use DOM `removeAttribute`, not Obsidian `removeAttr`.** Obsidian’s `HTMLElement` exposes `setAttr` but not `removeAttr`. Calling `removeAttr` during `show()`/`render` threw, aborted the sync before `runCycle`, and left `outcome` stuck at the default `up_to_date` (instant “completed” with no work). Aria cleanup must use `element.removeAttribute(...)`.
+- **Progress must settle per item inside the concurrent batch.** Calling `onSettled` only after `runWithConcurrency` returned made the bar sit at `0/N` until every download finished, then jump to done in one frame.

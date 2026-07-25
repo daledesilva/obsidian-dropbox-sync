@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { shouldSkipPluginInfer } from "../src/sync/sync-diagnostics";
+import {
+  shouldSkipInferForIncompleteLocal,
+  shouldSkipNotesInfer,
+  shouldSkipPluginInfer,
+} from "../src/sync/sync-diagnostics";
 
 describe("shouldSkipPluginInfer", () => {
   test("inactive when plugins section not in scope", () => {
@@ -16,5 +20,22 @@ describe("shouldSkipPluginInfer", () => {
 
   test("inactive when base small", () => {
     expect(shouldSkipPluginInfer(true, 0, 15)).toBe(false);
+  });
+});
+
+describe("shouldSkipNotesInfer", () => {
+  test("active when local notes far below base (mass false delete)", () => {
+    expect(shouldSkipNotesInfer(true, 1, 576)).toBe(true);
+  });
+
+  test("inactive when local notes sufficient", () => {
+    expect(shouldSkipNotesInfer(true, 400, 576)).toBe(false);
+  });
+});
+
+describe("shouldSkipInferForIncompleteLocal", () => {
+  test("shared threshold matches section helpers", () => {
+    expect(shouldSkipInferForIncompleteLocal(true, 1, 576)).toBe(true);
+    expect(shouldSkipInferForIncompleteLocal(false, 1, 576)).toBe(false);
   });
 });

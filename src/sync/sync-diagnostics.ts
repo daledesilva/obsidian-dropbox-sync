@@ -29,6 +29,8 @@ export interface SyncCycleDiagnostics {
     inferredThisCycle: number;
     inferredSample: string[];
     inferredSkippedPlugin: number;
+    /** Notes infer skipped when local scan is far below base (same incomplete-scan guard). */
+    inferredSkippedNotes: number;
   };
   deletePlan: {
     deleteRemote: number;
@@ -153,6 +155,11 @@ export function formatDiagnosticsMarkdown(d: SyncCycleDiagnostics): string[] {
       `- Plugin infer skipped (incomplete scan guard): **${d.deleteIntent.inferredSkippedPlugin}**`,
     );
   }
+  if (d.deleteIntent.inferredSkippedNotes > 0) {
+    lines.push(
+      `- Notes infer skipped (incomplete scan guard): **${d.deleteIntent.inferredSkippedNotes}**`,
+    );
+  }
   if (d.deleteIntent.inferredSample.length > 0) {
     lines.push("- Inferred sample:");
     for (const p of d.deleteIntent.inferredSample) {
@@ -231,6 +238,9 @@ export function emitDiagnosticsPhaseLines(
       if (d.deleteIntent.inferredSkippedPlugin > 0) {
         report.line(`plugin infer skipped: **${d.deleteIntent.inferredSkippedPlugin}** paths`);
       }
+      if (d.deleteIntent.inferredSkippedNotes > 0) {
+        report.line(`notes infer skipped: **${d.deleteIntent.inferredSkippedNotes}** paths`);
+      }
       for (const p of d.deleteIntent.inferredSample.slice(0, 5)) {
         report.line(`inferred sample: \`${p}\``);
       }
@@ -282,11 +292,40 @@ export function countBasePlugins(baseEntries: SyncEntry[], configDir: string): n
   return n;
 }
 
+export function countBaseNotes(baseEntries: SyncEntry[], configDir: string): number {
+  let n = 0;
+  for (const e of baseEntries) {
+    if (classifyVaultPath(e.localPath, configDir) === "notes") n++;
+  }
+  return n;
+}
+
+/**
+ * Skip catch-up delete inference when the local scan looks incomplete vs base.
+ * Prefer re-download over mass deleteRemote — vault-event deletes still apply via deletedPaths.
+ */
+export function shouldSkipInferForIncompleteLocal(
+  sectionActive: boolean,
+  localCount: number,
+  baseCount: number,
+): boolean {
+  return sectionActive && baseCount > 20 && localCount < baseCount * 0.5;
+}
+
 /** Skip inferring plugin deletes when local scan is far below base (incomplete index). */
 export function shouldSkipPluginInfer(
   pluginsSectionActive: boolean,
   localPlugins: number,
   basePlugins: number,
 ): boolean {
-  return pluginsSectionActive && basePlugins > 20 && localPlugins < basePlugins * 0.5;
+  return shouldSkipInferForIncompleteLocal(pluginsSectionActive, localPlugins, basePlugins);
+}
+
+/** Skip inferring notes deletes when local scan is far below base (empty/partial vault). */
+export function shouldSkipNotesInfer(
+  notesSectionActive: boolean,
+  localNotes: number,
+  baseNotes: number,
+): boolean {
+  return shouldSkipInferForIncompleteLocal(notesSectionActive, localNotes, baseNotes);
 }

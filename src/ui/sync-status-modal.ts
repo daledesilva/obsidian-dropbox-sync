@@ -126,8 +126,9 @@ export class SyncStatusModal extends Modal {
 
   private formatStatus(): string {
     switch (this.info.status) {
-      case "idle": return "Idle";
-      case "syncing": return this.info.detail ? `Syncing: ${this.info.detail}` : "Syncing...";
+      case "hidden": return "Up to date";
+      case "pending": return "Out of sync";
+      case "syncing": return "Syncing…";
       case "success": return this.info.detail ?? "Synced";
       case "error": return this.info.detail ?? "Error";
     }

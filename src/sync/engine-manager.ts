@@ -11,6 +11,7 @@ export interface EngineManagerConfig {
  *
  * - getOrCreate(): 엔진이 없으면 생성, 있으면 재사용
  * - reset(): 설정 변경 시 엔진 재생성 (deleteLog 보존)
+ * - clearSyncHistory(): wipe store + delete intents (unlike reset, does not preserve deleteLog)
  * - store/remote: 외부에서 참조 가능
  */
 export class EngineManager {
@@ -39,6 +40,25 @@ export class EngineManager {
       this.pendingDeleteLog = this.engine.getDeleteLog();
       this.persistDeleteLog();
     }
+    this.engine = null;
+    this.deps = null;
+  }
+
+  /**
+   * Treat this device like a first install for planning: empty sync base, cursor,
+   * and delete log only. Must not touch data.json (incl. debugLoggingEnabled),
+   * device-local Cursor Debug ingest fields, debug log files, OAuth, or vault files.
+   * Drops the engine afterward so the next cycle does not rehydrate delete intents.
+   */
+  async clearSyncHistory(): Promise<void> {
+    this.pendingDeleteLog = [];
+    const engine = this.getOrCreate();
+    const store = this.deps?.store;
+    if (!store) {
+      throw new Error("Sync state store is not available");
+    }
+    engine.clearDeleteLog();
+    await store.clear();
     this.engine = null;
     this.deps = null;
   }

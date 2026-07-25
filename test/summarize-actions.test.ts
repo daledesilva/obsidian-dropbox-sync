@@ -24,7 +24,15 @@ describe("summarizeActions", () => {
       make("conflict"),
       make("deleteLocal"),
     ];
-    expect(summarizeActions(items)).toBe("↑1 ↓1 ⚡1 ↓✗1 ↑✗1");
+    expect(summarizeActions(items)).toBe(
+      "\u21911 \u21931 \u{1F6AB} 1 conflict \u2193\u{1F5D1}1 \u2191\u{1F5D1}1",
+    );
+  });
+
+  test("conflicts → plural wording", () => {
+    expect(summarizeActions([make("conflict"), make("conflict")])).toBe(
+      "\u{1F6AB} 2 conflicts",
+    );
   });
 
   test("noop만 → 'N synced'", () => {
