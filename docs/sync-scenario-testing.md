@@ -15,6 +15,8 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 
 `test.todo` rows are intentional: open-editor deferral, large binaries, and re-link UI need harness work or a human Dropbox peer. Claiming a row means adding a `run` and updating the coverage map.
 
+After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa-test-vault/SIMULATION_COVERAGE.md`](../qa-test-vault/SIMULATION_COVERAGE.md).
+
 ```mermaid
 flowchart LR
   Spec[docs/sync-scenarios.md rows] --> Matrix[scenario-matrix.test.ts]
@@ -43,8 +45,9 @@ flowchart LR
 
 | Piece | Role |
 |---|---|
-| `SyncSimulator` / `Device` | Multi-device in-memory engine driver; `rename` skips `trackDelete` on case-only paths |
+| `SyncSimulator` / `Device` | Multi-device driver; `rename` / `renameFolder`; `setScanUnvouched` for G22; `addDeviceWithFailingRemote` |
 | `DropboxAppDevice` | P3 peer; `forceUpload` / `move` / folder helpers on memory remote |
+| `MemoryRemoteStorage.expireRevisions` | Clears revision history for row 83 ask path |
 | `RecordingLog` | Captures `ruleId` / message for taxonomy checks |
 | `applyResurrectionGuard({ hasSyncCursor })` | R10 only on fresh join — see [Sync gap closure](sync-gap-closure.md) |
 | `qa:generate` / `qa:reset` / `qa:deploy` | `package.json` scripts |

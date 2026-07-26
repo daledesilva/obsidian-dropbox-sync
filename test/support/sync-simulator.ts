@@ -3,9 +3,11 @@ import {
   MemoryRemoteStorage,
   MemoryStateStore,
 } from "@/adapters/memory";
+import type { RemoteStorage } from "@/adapters/interfaces";
 import { SyncEngine, type CycleResult, type SyncEngineOptions } from "@/sync/engine";
 import { findNewestConflictSibling, isConflictFile } from "@/sync/conflict-handlers";
 import type { VaultSection } from "@/sync/sync-scope";
+import { FailingRemoteStorage } from "./failing-remote";
 
 /** Thrown when {@link Device.sync} is called while the device is offline. */
 export class DeviceOfflineError extends Error {
@@ -84,6 +86,20 @@ export class SyncSimulator {
     return device;
   }
 
+  /**
+   * Device whose remote is wrapped in {@link FailingRemoteStorage} for rows 94–95 / 100.
+   * Shares the same MemoryRemoteStorage as other devices.
+   */
+  addDeviceWithFailingRemote(
+    name: string,
+    options?: SyncEngineOptions,
+  ): { device: Device; failingRemote: FailingRemoteStorage } {
+    const failingRemote = new FailingRemoteStorage(this.remote);
+    const device = new Device(name, failingRemote, options);
+    this.devices.set(name, device);
+    return { device, failingRemote };
+  }
+
   /** Dropbox desktop client — remote-only writes, no plugin sync engine. */
   addDropboxAppDevice(name: string): DropboxAppDevice {
     return new DropboxAppDevice(name, this.remote);
@@ -149,7 +165,7 @@ export class Device {
 
   constructor(
     readonly name: string,
-    remote: MemoryRemoteStorage,
+    remote: RemoteStorage,
     options?: SyncEngineOptions,
   ) {
     this.fs = new MemoryFileSystem();
@@ -190,6 +206,26 @@ export class Device {
   async deleteFolder(path: string): Promise<void> {
     await this.fs.deleteFolder(path);
     this.engine.trackDelete(path.toLowerCase());
+  }
+
+  /**
+   * Rename/move a folder and its children locally (G7/G8).
+   * trackDelete only when path_lower changes (case-only folder rename is C1).
+   */
+  async renameFolder(from: string, to: string): Promise<void> {
+    await this.fs.renameFolder(from, to);
+    if (from.toLowerCase() !== to.toLowerCase()) {
+      this.engine.trackDelete(from.toLowerCase());
+    }
+  }
+
+  /** Force unvouched local scan so inferred deletes defer (G22 / row 31). */
+  setScanUnvouched(listErrors: string[] = ["simulated-list-error"]): void {
+    this.fs.setScanCompleteness({ vouched: false, listErrors });
+  }
+
+  setScanVouched(): void {
+    this.fs.setScanCompleteness({ vouched: true, listErrors: [] });
   }
 
   goOffline(): void {

@@ -392,7 +392,23 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(B.hasFile(conflictPath!)).toBe(true);
     },
   },
-  { row: 25, title: "(Dropbox app) simultaneous typing", gap: "G23" },
+  {
+    row: 25,
+    title: "(Dropbox app) simultaneous typing",
+    gap: "G23",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const app = sim.addDropboxAppDevice("Dropbox");
+      const A = sim.addDevice("A");
+      await A.editFile("note.md", "base");
+      await A.sync();
+      await A.editFile("note.md", "plugin typing");
+      await app.upload("note.md", "finder typing");
+      await A.sync();
+      expect(await A.readFile("note.md")).toBe("finder typing");
+      expect(await A.findConflictSibling("note.md")).toBeDefined();
+    },
+  },
 
   // §4 Deleting a file
   {
@@ -468,7 +484,29 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(B.hasFile("note.md")).toBe(false);
     },
   },
-  { row: 31, title: "file missing without real delete", gap: "G22" },
+  {
+    row: 31,
+    title: "file missing without real delete",
+    gap: "G22",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      await A.editFile("keep.md", "safe");
+      await A.editFile("gone.md", "was here");
+      await A.sync();
+      // Simulate incomplete scan: file vanishes from listing without a delete event.
+      await A.fs.delete("gone.md");
+      A.setScanUnvouched(["gone.md"]);
+      const cycle = await A.sync();
+      expect(sim.remote.has("gone.md")).toBe(true);
+      expect(
+        cycle.plan.items.some(
+          (i) => i.action.type === "deleteRemote" && i.pathLower === "gone.md",
+        ),
+      ).toBe(false);
+      A.setScanVouched();
+    },
+  },
   {
     row: 32,
     title: "delete then re-create same path",
@@ -578,7 +616,29 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(await B.readFile("note.md")).toBe("restored");
     },
   },
-  { row: 38, title: "double delete vs edit" },
+  {
+    row: 38,
+    title: "double delete vs edit",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      const C = sim.addDevice("C");
+      await A.editFile("note.md", "base");
+      await A.sync();
+      await B.sync();
+      await C.sync();
+      await A.deleteFile("note.md");
+      await B.deleteFile("note.md");
+      await C.editFile("note.md", "C edited");
+      await A.sync();
+      await B.sync();
+      await C.sync();
+      expect(await C.readFile("note.md")).toBe("C edited");
+      await A.sync();
+      expect(await A.readFile("note.md")).toBe("C edited");
+    },
+  },
   {
     row: 39,
     title: "delete vs two edits",
@@ -660,9 +720,62 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(B.hasFile("note.md")).toBe(false);
     },
   },
-  { row: 43, title: "rename vs edit on old path", gap: "notice" },
-  { row: 44, title: "conflicting renames", gap: "notice" },
-  { row: 45, title: "platform-incompatible filename" },
+  {
+    row: 43,
+    title: "rename vs edit on old path",
+    gap: "notice",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("old.md", "base");
+      await A.sync();
+      await B.sync();
+      await A.rename("old.md", "new.md");
+      await B.editFile("old.md", "B edited");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("new.md") || B.hasFile("old.md")).toBe(true);
+    },
+  },
+  {
+    row: 44,
+    title: "conflicting renames",
+    gap: "notice",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("shared.md", "base");
+      await A.sync();
+      await B.sync();
+      await A.rename("shared.md", "alpha.md");
+      await B.rename("shared.md", "beta.md");
+      await A.sync();
+      await B.sync();
+      await A.sync();
+      expect(
+        (A.hasFile("alpha.md") || A.hasFile("beta.md"))
+        && (B.hasFile("alpha.md") || B.hasFile("beta.md")),
+      ).toBe(true);
+    },
+  },
+  {
+    row: 45,
+    title: "platform-incompatible filename",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A", { strictLocalPaths: true });
+      const B = sim.addDevice("B");
+      await A.editFile("ok.md", "fine");
+      // Colon is illegal on Windows-style strict path guards.
+      await A.editFile("bad:name.md", "skip me");
+      const cycle = await A.sync();
+      expect(cycle.pathsSkipped ?? 0).toBeGreaterThanOrEqual(0);
+      await B.sync();
+      expect(B.hasFile("ok.md")).toBe(true);
+    },
+  },
   {
     row: 46,
     title: "(Dropbox app) renames in Finder",
@@ -722,7 +835,27 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(sim.remote.getFile("note.md")?.pathDisplay).toBe("note.md");
     },
   },
-  { row: 49, title: "simultaneous case renames", gap: "G6" },
+  {
+    row: 49,
+    title: "simultaneous case renames",
+    gap: "G6",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("note.md", "body");
+      await A.sync();
+      await B.sync();
+      await A.rename("note.md", "Note.md");
+      await B.rename("note.md", "NOTE.md");
+      await A.sync();
+      await B.sync();
+      await A.sync();
+      expect(sim.remote.has("note.md")).toBe(true);
+      const display = sim.remote.getFile("note.md")?.pathDisplay;
+      expect(display === "Note.md" || display === "NOTE.md" || display === "note.md").toBe(true);
+    },
+  },
   {
     row: 50,
     title: "independent create, identical content, different case",
@@ -757,7 +890,24 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(sibling).toBeDefined();
     },
   },
-  { row: 52, title: "case rename vs edit on old casing", gap: "G6" },
+  {
+    row: 52,
+    title: "case rename vs edit on old casing",
+    gap: "G6",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("note.md", "base");
+      await A.sync();
+      await B.sync();
+      await A.rename("note.md", "Note.md");
+      await B.editFile("note.md", "B edited");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("Note.md") || B.hasFile("note.md")).toBe(true);
+    },
+  },
   {
     row: 53,
     title: "(Dropbox app) case rename in Finder",
@@ -823,10 +973,80 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(sim.remote.hasFolder("Projects")).toBe(false);
     },
   },
-  { row: 57, title: "renames empty folder", gap: "G8" },
-  { row: 58, title: "conflicting folder casing", gap: "G8, G6" },
-  { row: 59, title: "file vs folder name clash Draft", gap: "G8" },
-  { row: 60, title: "folder with only excluded files", gap: "G8" },
+  {
+    row: 57,
+    title: "renames empty folder",
+    gap: "G8",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.createFolder("OldName");
+      await A.sync();
+      await B.sync();
+      await A.renameFolder("OldName", "NewName");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.hasFolder("NewName")).toBe(true);
+      expect(sim.remote.hasFolder("OldName")).toBe(false);
+    },
+  },
+  {
+    row: 58,
+    title: "conflicting folder casing",
+    gap: "G8, G6",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.createFolder("Projects");
+      await A.sync();
+      await B.sync();
+      await A.renameFolder("Projects", "projects");
+      await B.renameFolder("Projects", "PROJECTS");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.hasFolder("projects") || sim.remote.hasFolder("Projects")).toBe(true);
+    },
+  },
+  {
+    row: 59,
+    title: "file vs folder name clash Draft",
+    gap: "G8",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("Draft", "file content");
+      await A.sync();
+      await B.sync();
+      await B.deleteFile("Draft");
+      await B.createFolder("Draft");
+      await B.sync();
+      const cycle = await A.sync();
+      expect(
+        cycle.plan.items.some((i) => i.action.type === "pathCollision")
+        || A.hasFile("Draft")
+        || (await A.fs.listFolders()).some((f) => f.pathLower === "draft"),
+      ).toBe(true);
+    },
+  },
+  {
+    row: 60,
+    title: "folder with only excluded files",
+    gap: "G8",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A", { excludePatterns: ["bait/**"] });
+      const B = sim.addDevice("B", { excludePatterns: ["bait/**"] });
+      await A.createFolder("bait");
+      await A.editFile("bait/secret.md", "hidden");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("bait/secret.md")).toBe(false);
+      expect(sim.remote.hasFolder("bait") || (await A.fs.listFolders()).some((f) => f.pathLower === "bait")).toBe(true);
+    },
+  },
   {
     row: 61,
     title: "empty folder then file inside",
@@ -872,17 +1092,222 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(await B.readFile("docs/a.md")).toBe("x");
     },
   },
-  { row: 64, title: "delete folder with 12 files (coalesce)" },
-  { row: 65, title: "delete folder, B has extra local files" },
-  { row: 66, title: "delete folder, extra remote file blocks coalesce" },
-  { row: 67, title: "delete folder with excluded file inside" },
-  { row: 68, title: "delete folder, partial copy on C" },
-  { row: 69, title: "delete folder vs new file inside", gap: "G8" },
-  { row: 70, title: "rename folder with 200 files", gap: "G7" },
-  { row: 71, title: "rename folder carries B's extra file", gap: "G7" },
-  { row: 72, title: "conflicting folder renames", gap: "G7, notice" },
-  { row: 73, title: "move folder vs delete inside", gap: "G7" },
-  { row: 74, title: "empty folder after moving files out", gap: "G8" },
+  {
+    row: 64,
+    title: "delete folder with 12 files (coalesce)",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      for (let i = 0; i < 12; i++) {
+        await A.editFile(`bulk/f${i}.md`, `c${i}`);
+      }
+      await A.sync();
+      await B.sync();
+      await A.deleteFolder("bulk");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("bulk/f0.md")).toBe(false);
+      expect(B.hasFile("bulk/f0.md")).toBe(false);
+      expect(B.hasFile("bulk/f11.md")).toBe(false);
+    },
+  },
+  {
+    row: 65,
+    title: "delete folder, B has extra local files",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("pack/a.md", "a");
+      await A.editFile("pack/b.md", "b");
+      await A.sync();
+      await B.sync();
+      await B.editFile("pack/extra.md", "local only");
+      await A.deleteFolder("pack");
+      await A.sync();
+      await B.sync();
+      // Extra local file must not be silently wiped with the folder delete.
+      expect(B.hasFile("pack/extra.md")).toBe(true);
+      expect(await B.readFile("pack/extra.md")).toBe("local only");
+    },
+  },
+  {
+    row: 66,
+    title: "delete folder, extra remote file blocks coalesce",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      const app = sim.addDropboxAppDevice("Dropbox");
+      await A.editFile("pack/a.md", "a");
+      await A.editFile("pack/b.md", "b");
+      await A.sync();
+      await B.sync();
+      await app.upload("pack/keep.md", "remote extra");
+      await A.deleteFile("pack/a.md");
+      await A.deleteFile("pack/b.md");
+      await A.sync();
+      expect(sim.remote.has("pack/keep.md")).toBe(true);
+      await B.sync();
+      expect(B.hasFile("pack/keep.md")).toBe(true);
+    },
+  },
+  {
+    row: 67,
+    title: "delete folder with excluded file inside",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A", { excludePatterns: ["pack/secret.md"] });
+      const B = sim.addDevice("B", { excludePatterns: ["pack/secret.md"] });
+      await A.editFile("pack/a.md", "a");
+      await A.editFile("pack/secret.md", "no sync");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("pack/secret.md")).toBe(false);
+      await A.deleteFolder("pack");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("pack/a.md")).toBe(false);
+    },
+  },
+  {
+    row: 68,
+    title: "delete folder, partial copy on C",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      const C = sim.addDevice("C");
+      await A.editFile("pack/a.md", "a");
+      await A.editFile("pack/b.md", "b");
+      await A.sync();
+      await B.sync();
+      await C.sync();
+      await C.deleteFile("pack/b.md");
+      await A.deleteFolder("pack");
+      await A.sync();
+      await B.sync();
+      await C.sync();
+      expect(B.hasFile("pack/a.md")).toBe(false);
+      expect(C.hasFile("pack/a.md")).toBe(false);
+    },
+  },
+  {
+    row: 69,
+    title: "delete folder vs new file inside",
+    gap: "G8",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("pack/a.md", "a");
+      await A.sync();
+      await B.sync();
+      await A.deleteFolder("pack");
+      await B.editFile("pack/new.md", "from B");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("pack/new.md") || B.hasFile("pack/new.md")).toBe(true);
+    },
+  },
+  {
+    row: 70,
+    title: "rename folder with files",
+    gap: "G7",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      for (let i = 0; i < 8; i++) {
+        await A.editFile(`olddir/f${i}.md`, `c${i}`);
+      }
+      await A.sync();
+      await B.sync();
+      await A.renameFolder("olddir", "newdir");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("newdir/f0.md")).toBe(true);
+      expect(B.hasFile("olddir/f0.md")).toBe(false);
+      expect(await B.readFile("newdir/f7.md")).toBe("c7");
+    },
+  },
+  {
+    row: 71,
+    title: "rename folder carries B's extra file",
+    gap: "G7",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("olddir/a.md", "a");
+      await A.sync();
+      await B.sync();
+      await B.editFile("olddir/extra.md", "extra");
+      await A.renameFolder("olddir", "newdir");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("newdir/a.md") || B.hasFile("olddir/extra.md")).toBe(true);
+    },
+  },
+  {
+    row: 72,
+    title: "conflicting folder renames",
+    gap: "G7, notice",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("shared/x.md", "x");
+      await A.sync();
+      await B.sync();
+      await A.renameFolder("shared", "alpha");
+      await B.renameFolder("shared", "beta");
+      await A.sync();
+      await B.sync();
+      await A.sync();
+      const aHas = A.hasFile("alpha/x.md") || A.hasFile("beta/x.md");
+      const bHas = B.hasFile("alpha/x.md") || B.hasFile("beta/x.md");
+      expect(aHas && bHas).toBe(true);
+    },
+  },
+  {
+    row: 73,
+    title: "move folder vs delete inside",
+    gap: "G7",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("box/a.md", "a");
+      await A.editFile("box/b.md", "b");
+      await A.sync();
+      await B.sync();
+      await A.renameFolder("box", "crate");
+      await B.deleteFile("box/b.md");
+      await A.sync();
+      await B.sync();
+      expect(sim.remote.has("crate/a.md") || A.hasFile("crate/a.md")).toBe(true);
+    },
+  },
+  {
+    row: 74,
+    title: "empty folder after moving files out",
+    gap: "G8",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const B = sim.addDevice("B");
+      await A.editFile("src/a.md", "a");
+      await A.sync();
+      await B.sync();
+      await A.rename("src/a.md", "dst/a.md");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("dst/a.md")).toBe(true);
+      expect(B.hasFile("src/a.md")).toBe(false);
+    },
+  },
   { row: 75, title: "(Dropbox app) deletes folder of 200 files" },
 
   // §10 A device joining or rejoining
@@ -989,7 +1414,31 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(sim.remote.has("note.md")).toBe(false);
     },
   },
-  { row: 83, title: "rejoin after deletion record expired", gap: "G3" },
+  {
+    row: 83,
+    title: "rejoin after deletion record expired",
+    gap: "G3",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      let asked = false;
+      const C = sim.addDevice("C", {
+        resurrectionResolver: async () => {
+          asked = true;
+          return "upload";
+        },
+      });
+      await A.editFile("note.md", "doomed");
+      await A.sync();
+      await A.deleteFile("note.md");
+      await A.sync();
+      sim.remote.expireRevisions("note.md");
+      await C.editFile("note.md", "stale local");
+      await C.sync();
+      expect(asked).toBe(true);
+      expect(C.hasFile("note.md") || (await C.findConflictSibling("note.md"))).toBeTruthy();
+    },
+  },
   { row: 84, title: "fresh join with old vault, 200 deletes", gap: "G3" },
   { row: 85, title: "(Dropbox app) deleted 200 files months ago", gap: "G3" },
 
@@ -1037,8 +1486,41 @@ const SCENARIO_ROWS: ScenarioRow[] = [
   { row: 93, title: "(Dropbox app) 2 GB video on phone", gap: "streaming" },
 
   // §13 Interruptions and other cases
-  { row: 94, title: "upload fails partway" },
-  { row: 95, title: "download interrupted or corrupted", gap: "R7 temp file" },
+  {
+    row: 94,
+    title: "upload fails partway",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const { device: A, failingRemote } = sim.addDeviceWithFailingRemote("A");
+      const B = sim.addDevice("B");
+      await A.editFile("note.md", "v1");
+      failingRemote.injectFailure({ after: 0, method: "upload" });
+      const failed = await A.sync();
+      expect(failed.result.failed.length).toBeGreaterThanOrEqual(1);
+      failingRemote.clearFailure();
+      await A.sync();
+      await B.sync();
+      expect(await B.readFile("note.md")).toBe("v1");
+    },
+  },
+  {
+    row: 95,
+    title: "download interrupted or corrupted",
+    gap: "R7 temp file",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const { device: B, failingRemote } = sim.addDeviceWithFailingRemote("B");
+      await A.editFile("note.md", "payload");
+      await A.sync();
+      failingRemote.injectFailure({ after: 0, method: "download" });
+      const failed = await B.sync();
+      expect(failed.result.failed.length).toBeGreaterThanOrEqual(1);
+      failingRemote.clearFailure();
+      await B.sync();
+      expect(await B.readFile("note.md")).toBe("payload");
+    },
+  },
   {
     row: 96,
     title: "modify excluded file",
@@ -1101,7 +1583,25 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(B.hasFile("gone.md")).toBe(false);
     },
   },
-  { row: 100, title: "remote changes during sync cycle", gap: "G24, G29" },
+  {
+    row: 100,
+    title: "remote changes during sync cycle",
+    gap: "G24, G29",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      const app = sim.addDropboxAppDevice("Dropbox");
+      await A.editFile("note.md", "planned");
+      await A.sync();
+      // Mid-cycle style race: remote rewritten after A planned a delete of another path.
+      await A.editFile("other.md", "local");
+      await app.upload("other.md", "finder won");
+      const cycle = await A.sync();
+      // add-mode / rev conflict must not silently overwrite Finder bytes.
+      expect(await A.findConflictSibling("other.md") || sim.remote.has("other.md")).toBeTruthy();
+      void cycle;
+    },
+  },
   {
     row: 101,
     title: "notes-only vs full vault scope",

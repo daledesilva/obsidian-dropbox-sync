@@ -29,10 +29,21 @@ interface MemoryFile {
   mtime: number;
 }
 
+/** Positive scan-completeness signal for delete inference (G22) — mirrors VaultAdapter. */
+export interface MemoryScanCompleteness {
+  vouched: boolean;
+  listErrors: string[];
+}
+
 export class MemoryFileSystem implements FileSystem {
   private files = new Map<string, MemoryFile>();
   /** Explicit empty folders (G8). */
   private folders = new Set<string>();
+  /**
+   * Engine gates inferMissingDeletes on vouched (G22). Defaults true; tests can
+   * call {@link setScanCompleteness} to simulate an incomplete local scan.
+   */
+  lastScanCompleteness: MemoryScanCompleteness = { vouched: true, listErrors: [] };
 
   // eslint-disable-next-line @typescript-eslint/require-await -- async wraps sync throw into rejection
   async read(path: string): Promise<Uint8Array> {
@@ -62,6 +73,46 @@ export class MemoryFileSystem implements FileSystem {
     if (!file) throw new Error(`File not found: ${from}`);
     this.files.delete(from);
     this.files.set(to, file);
+  }
+
+  /**
+   * Rename an empty/folder marker and rewrite child file + nested folder prefixes.
+   * Used by scenario-matrix folder move/rename rows (G7/G8).
+   */
+  async renameFolder(from: string, to: string): Promise<void> {
+    const fromNorm = from.replace(/\/+$/, "");
+    const toNorm = to.replace(/\/+$/, "");
+    const fromPrefix = `${fromNorm}/`;
+    const toPrefix = `${toNorm}/`;
+
+    if (this.folders.has(fromNorm)) {
+      this.folders.delete(fromNorm);
+      this.folders.add(toNorm);
+    }
+    for (const folderPath of [...this.folders]) {
+      if (folderPath === fromNorm) continue;
+      if (folderPath.startsWith(fromPrefix) || folderPath.toLowerCase().startsWith(fromPrefix.toLowerCase())) {
+        this.folders.delete(folderPath);
+        const suffix = folderPath.slice(fromNorm.length);
+        this.folders.add(`${toNorm}${suffix}`);
+      }
+    }
+    for (const filePath of [...this.files.keys()]) {
+      if (filePath === fromNorm || filePath.startsWith(fromPrefix)
+        || filePath.toLowerCase().startsWith(fromPrefix.toLowerCase())) {
+        const file = this.files.get(filePath)!;
+        this.files.delete(filePath);
+        const suffix = filePath.slice(fromNorm.length);
+        this.files.set(`${toNorm}${suffix}`, file);
+      }
+    }
+    // Ensure destination folder marker exists even when only children moved.
+    this.folders.add(toNorm);
+  }
+
+  /** Test helper: mark the next list() as incomplete so inferred deletes defer (G22). */
+  setScanCompleteness(completeness: MemoryScanCompleteness): void {
+    this.lastScanCompleteness = completeness;
   }
 
   async list(_options?: FileListOptions): Promise<FileInfo[]> {
@@ -393,32 +444,78 @@ export class MemoryRemoteStorage implements RemoteStorage {
 
   async move(from: string, to: string): Promise<RemoteEntry> {
     const fromLower = from.toLowerCase();
+    const toLower = to.toLowerCase();
     const file = this.files.get(fromLower);
-    if (!file || file.deleted) {
+    if (file && !file.deleted) {
+      // Emit a deleted tombstone for the old path_lower so peer cursors see the rename
+      // as delete+create (Dropbox move_v2 delta shape), not a silent key rewrite.
+      if (fromLower !== toLower) {
+        this.addChangeLog({
+          pathLower: fromLower,
+          pathDisplay: file.pathDisplay,
+          hash: null,
+          serverModified: Date.now(),
+          rev: file.rev,
+          size: 0,
+          deleted: true,
+        });
+      }
+      this.files.delete(fromLower);
+      file.pathLower = toLower;
+      file.pathDisplay = to;
+      this.files.set(toLower, file);
+      const entry = this.toRemoteEntry(file);
+      this.addChangeLog(entry);
+      this.appendRevision(toLower, file);
+      return entry;
+    }
+
+    // Folder move (G8): relocate empty-folder marker + all children under prefix.
+    const fromKey = normalizeFolderPathLower(from);
+    const fromDisplay = from.replace(/\/+$/, "");
+    const toDisplay = to.replace(/\/+$/, "");
+    const fromPrefix = `${fromLower}/`;
+    const hasFolder = this.folders.has(fromKey);
+    const hasChildren = [...this.files.keys()].some((k) => k.startsWith(fromPrefix));
+    if (!hasFolder && !hasChildren) {
       throw new Error(`File not found on remote: ${from}`);
     }
-    const toLower = to.toLowerCase();
-    // Emit a deleted tombstone for the old path_lower so peer cursors see the rename
-    // as delete+create (Dropbox move_v2 delta shape), not a silent key rewrite.
     if (fromLower !== toLower) {
       this.addChangeLog({
         pathLower: fromLower,
-        pathDisplay: file.pathDisplay,
+        pathDisplay: this.folders.get(fromKey) ?? fromDisplay,
         hash: null,
         serverModified: Date.now(),
-        rev: file.rev,
+        rev: "",
         size: 0,
         deleted: true,
+        isFolder: true,
       });
     }
-    this.files.delete(fromLower);
-    file.pathLower = toLower;
-    file.pathDisplay = to;
-    this.files.set(toLower, file);
-    const entry = this.toRemoteEntry(file);
-    this.addChangeLog(entry);
-    this.appendRevision(toLower, file);
-    return entry;
+    this.folders.delete(fromKey);
+    for (const [key, display] of [...this.folders.entries()]) {
+      const normalized = key.replace(/\/+$/, "").toLowerCase();
+      if (!normalized.startsWith(fromPrefix)) continue;
+      this.folders.delete(key);
+      const suffix = display.slice(fromDisplay.length);
+      const childDisplay = `${toDisplay}${suffix}`;
+      this.folders.set(normalizeFolderPathLower(childDisplay), childDisplay);
+    }
+    this.folders.set(normalizeFolderPathLower(toDisplay), toDisplay);
+    for (const [key, child] of [...this.files.entries()]) {
+      if (child.deleted) continue;
+      if (key !== fromLower && !key.startsWith(fromPrefix)) continue;
+      this.files.delete(key);
+      const suffix = child.pathDisplay.slice(fromDisplay.length);
+      const newDisplayPath = `${toDisplay}${suffix}`;
+      child.pathLower = newDisplayPath.toLowerCase();
+      child.pathDisplay = newDisplayPath;
+      this.files.set(child.pathLower, child);
+      this.addChangeLog(this.toRemoteEntry(child));
+    }
+    const folderEntry = this.folderToRemoteEntry(normalizeFolderPathLower(toDisplay), toDisplay);
+    this.addChangeLog(folderEntry);
+    return folderEntry;
   }
 
   async createFolder(path: string): Promise<RemoteEntry> {
@@ -430,6 +527,18 @@ export class MemoryRemoteStorage implements RemoteStorage {
   async listRevisions(path: string): Promise<RemoteRevision[]> {
     const pathLower = path.toLowerCase();
     return [...(this.revisionHistory.get(pathLower) ?? [])];
+  }
+
+  /**
+   * Clear revision history for a path (or all paths) so list_revisions looks
+   * aged-out — row 83 ask path instead of R10 (G3).
+   */
+  expireRevisions(path?: string): void {
+    if (path === undefined) {
+      this.revisionHistory.clear();
+      return;
+    }
+    this.revisionHistory.delete(path.toLowerCase());
   }
 
   /** Simulate Dropbox invalidating a delta cursor — stale cursors throw on next listChanges. */

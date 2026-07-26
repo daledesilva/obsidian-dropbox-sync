@@ -507,12 +507,14 @@ export class SyncEngine {
             mergedBeforeExclude: allLocalFiles.length,
             mergedAfterExclude: allLocalFiles.length,
           };
-    this.lastScanVouched = fs instanceof VaultAdapter
-      ? fs.lastScanCompleteness.vouched
-      : true;
-    if (!this.lastScanVouched && fs instanceof VaultAdapter) {
+    // VaultAdapter and MemoryFileSystem both expose lastScanCompleteness (G22).
+    const scanCompleteness = (
+      fs as { lastScanCompleteness?: { vouched: boolean; listErrors: string[] } }
+    ).lastScanCompleteness;
+    this.lastScanVouched = scanCompleteness?.vouched ?? true;
+    if (!this.lastScanVouched) {
       logTemp(this.options.log, "P3", "local scan not vouched — deferring inferred deletes", {
-        listErrors: fs.lastScanCompleteness.listErrors.slice(0, 8),
+        listErrors: scanCompleteness?.listErrors.slice(0, 8) ?? [],
       }, { location: "engine.localScan" });
     }
     const inScopeBySection = countLocalBySection(localFiles, this.configDir);

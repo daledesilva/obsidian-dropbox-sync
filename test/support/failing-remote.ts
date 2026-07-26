@@ -37,7 +37,10 @@ export class FailingRemoteStorage implements RemoteStorage {
       | "delete"
       | "deleteBatch"
       | "listChanges"
-      | "listFilePathLowersUnder";
+      | "listFilePathLowersUnder"
+      | "move"
+      | "createFolder"
+      | "listRevisions";
   }): void {
     this.failAfter = opts.after;
     this.failError = opts.error ?? new Error("Network error");

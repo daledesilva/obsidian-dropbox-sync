@@ -376,7 +376,7 @@ function applyRenameMatches(
 }
 
 function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
-  const { localFolders, remoteEntries, baseEntries, localDeletedPaths, log } = input;
+  const { localFolders, localFiles, remoteEntries, baseEntries, localDeletedPaths, log } = input;
   const localMap = new Map(localFolders.map((f) => [f.pathLower, f]));
   const remoteMap = new Map<string, RemoteEntry>();
   for (const entry of remoteEntries) {
@@ -387,6 +387,10 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
   const baseMap = new Map(
     baseEntries.filter(isFolderEntry).map((e) => [e.pathLower, e]),
   );
+  const hasLocalFilesUnder = (folderPathLower: string): boolean => {
+    const prefix = `${folderPathLower}/`;
+    return localFiles.some((f) => f.pathLower.startsWith(prefix));
+  };
 
   const allPathLowers = new Set<string>();
   for (const k of localMap.keys()) allPathLowers.add(k);
@@ -433,15 +437,17 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
     }
 
     if (localExists && !remoteExists) {
-      // G8: peer removed the remote folder — delete local empty folder.
-      // Brand-new local folders (!base) still createRemoteFolder; do not re-upload
-      // an empty folder we already had in base after a remote delete.
+      // G8: peer removed the remote folder — delete local empty folder only.
+      // If unmanaged local children remain (row 65), skip folder wipe; file planner
+      // removes synced children. Brand-new local folders (!base) still createRemoteFolder.
       if (base && !deleteIntended) {
-        items.push({
-          pathLower,
-          localPath,
-          action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
-        });
+        if (!hasLocalFilesUnder(pathLower)) {
+          items.push({
+            pathLower,
+            localPath,
+            action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
+          });
+        }
       } else {
         items.push({
           pathLower,
