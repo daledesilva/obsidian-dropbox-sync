@@ -22,7 +22,7 @@ Either may own a device's link to the shared folder: this plugin while Obsidian 
 
 "Notes only" is a reasonable sync scope, so no part of `.obsidian/` can be assumed to travel — not settings, workspaces, or the plugins folder. A user may sync notes alone and install this plugin by hand on each device; that is a sensible arrangement, not a broken one. Each installation is then independent, configured separately, and possibly on a different version.
 
-Exclude patterns, delete thresholds and conflict strategy are therefore per-device preferences rather than shared policy. Anything sync needs in order to behave correctly must be derivable from the vault files themselves or held per device — never assumed to have arrived via Obsidian settings or plugins. The corollary is that a device must never read the absence of a section it does not sync as a deletion of that section.
+Exclude patterns and delete thresholds are therefore per-device preferences rather than shared policy. **Conflict resolution that decides the canonical path is not** — that is R2, the same on every device. Per-device conflict UX (notices, which file to open first) is fine; anything that would change who keeps `note.md` is not. Anything sync needs in order to behave correctly must be derivable from the vault files themselves or held per device — never assumed to have arrived via Obsidian settings or plugins. The corollary is that a device must never read the absence of a section it does not sync as a deletion of that section.
 
 ### P5 — Manual sync and live sync must produce the same outcomes
 
@@ -36,7 +36,9 @@ Both sides survive as two real files — neither the Dropbox version nor the loc
 
 ### R2 — The version already on Dropbox keeps the canonical name
 
-The later upload is renamed. Dropbox's `rev` check already serialises uploads, so every device reaches the same answer without comparing anything.
+When two **different contents** compete for the same path, the bytes already on Dropbox keep that path and the later upload is renamed. Dropbox's `rev` check already serialises uploads, so every device reaches the same answer without comparing clocks or consulting a per-device setting. There is no "newest wins" (or any other strategy) that may override who holds the canonical name.
+
+This rule is about content conflicts only. A capitalisation-only change is a rename of the same bytes (R8 / section 7), not an R2 conflict.
 
 ### R3 — Conflict copies are ordinary files and must sync everywhere
 
@@ -50,9 +52,11 @@ We use Dropbox's format exactly: `note (Dale's MacBook's conflicted copy 2026-07
 
 The modified file is resurrected, and the user who deleted it is told it came back.
 
-### R6 — A delete needs durable evidence, or it will be undone
+### R6 — A delete needs durable evidence; without it, ask — never decide silently
 
-A device that has never seen a path cannot tell "deleted" from "never existed", so it re-uploads and the deletion is reversed. We read that evidence from Dropbox's `list_revisions` rather than writing tombstones of our own, because a delete performed from a Dropbox-managed device would never produce a record of ours — leaving a log that is incomplete in a way nothing could detect.
+A device that has never seen a path cannot tell "deleted" from "never existed". We read durable evidence from Dropbox's `list_revisions` rather than writing tombstones of our own, because a delete performed from a Dropbox-managed device would never produce a record of ours — leaving a log that is incomplete in a way nothing could detect.
+
+When that evidence exists, the deletion stands. When it does not — including after Dropbox's revision retention ages out (on the order of **30 days** on personal plans, longer on some business plans) — the device must **ask** before re-uploading or removing the local copy. Silent resurrection and silent discard are both forbidden. A device that still holds a valid delta cursor and prior base state does not need revision history for deletes it already learned about through the cursor; retention limits bite fresh joins and cleared state, not every long offline period.
 
 ### R7 — Never write directly to the destination file
 
@@ -62,15 +66,39 @@ Changes go to a temporary copy that is moved into place, so a crash mid-write ca
 
 A date may settle a question where **both answers are safe** — which capitalisation to adopt, what date to show the user — because a wrong clock then costs nothing. A date may never decide which version of someone's writing is discarded, because a wrong clock would silently destroy work. Two facts make this unavoidable: a rename does not change a file's modification date, and Dropbox stores no creation date at all.
 
+Capitalisation races use the same three-way compare as content, on the **display path** recorded in base state — not a shared rename timestamp, and not local mtime. When both sides renamed casing before syncing, the casing that first lands on Dropbox wins; the other device adopts it.
+
 ### R9 — Removing many files at once needs confirmation
 
 When one sync would remove more files than the delete threshold — **5** by default — the device asks before anything goes, and asks again on each other device as the deletion reaches it. The threshold is a per-device preference, so devices may not all ask; each protects only itself. This applies to every row below and is not repeated in them.
+
+### R10 — Durable delete evidence plus local bytes becomes a conflict copy
+
+When revision history (or equivalent durable evidence) shows the path was deleted, but this device still holds bytes at that path, the deletion stands at the canonical path and the local bytes are preserved as a conflict copy that syncs everywhere (R1, R3, R4). Neither silent restore of `note.md` nor silent discard of the local content is allowed. (Dropbox's own client would simply re-upload to the original path; under P3 that remains their behaviour, not ours.)
+
+### R11 — Changing the linked folder is a re-link, not a mass delete
+
+Repointing this installation at a different Dropbox folder, or otherwise changing vault / link identity, must be recognised as a re-link. The device asks what the user intends before removing local files or treating the new empty remote as authoritative. It must not infer a mass deletion (or mass upload) solely from "everything I knew is missing on the other side" after a folder change.
+
+### R12 — Open editors may delay apply or delete; every deferral is bounded
+
+An open or dirty editor may briefly delay applying an incoming download or a remote delete so the view can reload cleanly, or so the user can choose when a note open here was deleted elsewhere. Every such deferral expires after a bound: the change then applies (and unsaved work conflicts by the normal rules), or the delete prompt is forced. Deferral may change *when* a run finishes a path; it must not change *what* P5 would allow a later manual sync to conclude. Unsaved buffers in any tab Obsidian exposes — not only the active file — are protected until flushed, then treated as ordinary local modifications.
+
+### R13 — Debounce to settled bursts; one unresolved conflict copy per device per path
+
+Uploads from a typing burst are evaluated once the device settles, not once per autosave. A device holds at most one unresolved conflict copy per canonical path; further local edits update that copy rather than spawning another. Both must hold on a cold manual sync that already finds two divergent files on disk — not only during a live typing session.
+
+### R14 — Folder-level operations need a confirmed membership match
+
+A recursive folder delete or folder move may run only when the device has confirmed the folder contains exactly the paths it intends to act on (including empty subfolders once folders are tracked). Otherwise it falls back to per-file operations. An excluded or out-of-scope path the device is not allowed to manage makes the folder ineligible for a recursive delete, the same as an unknown file.
 
 ### What we do not need
 
 **Version vectors.** Every device talks only to Dropbox, so "what I last saw on the server" plus the server's own `rev` carries the same causality for far less machinery.
 
 **Automatic text merging.** No mainstream file-sync tool merges file contents, and neither do we.
+
+**Shared rename timestamps.** Path and capitalisation changes are decided by three-way comparison on base display paths plus server-side moves (R8). Nothing of ours is written into the vault or Dropbox folder to stamp a rename.
 
 ## The mental model
 
@@ -107,6 +135,7 @@ One record per path, keyed by Dropbox's `path_lower`. This is the "what I last s
 |---|---|
 | `baseLocalHash` | Local content hash at the last successful sync |
 | `baseRemoteHash` | Remote content hash at the last successful sync |
+| `basePathDisplay` | Display casing / path last successfully synced (for three-way capitalisation and rename detection; keyed with `path_lower`) |
 | `rev` | Dropbox revision, used as the optimistic lock on upload |
 | `lastSynced` | When the record was written |
 
@@ -120,7 +149,7 @@ All of it lives in IndexedDB (`dropbox-sync-<vaultInstanceId>`), except on iOS w
 
 ### Settings — in the vault
 
-`data.json` in the plugin folder: sync interval and scope, exclude patterns, conflict strategy, delete threshold, remote folder name, and **the Dropbox OAuth access and refresh tokens**.
+`data.json` in the plugin folder: sync interval and scope, exclude patterns, delete threshold, remote folder name, and **the Dropbox OAuth access and refresh tokens**. Any leftover "conflict strategy" field must not change R2 outcomes — at most UX such as which file to surface first.
 
 Whether this file reaches another device is the user's choice, so by the fourth principle nothing may depend on it having done so. It also carries `deviceId`, which is minted only when absent — so a `data.json` that *does* travel gives two devices the same identity (`G26`).
 
@@ -146,7 +175,7 @@ Three things do reach Dropbox that a reader might not expect — not because syn
 |---|---|
 | `client_modified` | Never sent on upload, so Dropbox substitutes the upload time and a synced note shows the wrong date everywhere (`G11`) |
 | Creation date | Dropbox has no field for it, so it cannot survive a round trip and must never be load-bearing |
-| Rename timestamps | Nothing records when a path or capitalisation changed, so "the most recent rename wins" is unimplementable (`G6`) |
+| Shared rename timestamps | Not used — capitalisation and path changes use three-way compare on `basePathDisplay` plus server-side moves (`G6`, R8). No vault or Dropbox sidecar stamps. |
 | Folder entries | Only files are tracked, so empty folders and folder moves are invisible (`G8`) |
 | Deletion records | Read from Dropbox's revision history instead of being written by us (R6) |
 
@@ -262,7 +291,7 @@ Three things do reach Dropbox that a reader might not expect — not because syn
 <td>Modifies file, syncs</td>
 <td>Modifies the same file differently, syncs</td>
 <td>—</td>
-<td>Conflict. A's version keeps the name because it landed first; neither device's modification date is consulted.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — A's version<br>• <code>note (B's conflicted copy 2026-07-26).md</code> — B's version<br>Both files reach all three devices, so everyone sees the clash. If a "newest wins" setting is offered, it may only change <i>which</i> version holds the canonical name — both files still exist.</td>
+<td>Conflict. A's version keeps the name because it landed first (R2); neither device's modification date is consulted, and no per-device strategy may override that.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — A's version<br>• <code>note (B's conflicted copy 2026-07-26).md</code> — B's version<br>Both files reach all three devices, so everyone sees the clash.</td>
 <td>Deviates: <code>note.md</code> becomes B's version, A and C are silently overwritten with it, and A's version survives only as a local-only copy on B. The <code>newest</code> setting is worse again — it discards the loser entirely.</td>
 </tr>
 <tr>
@@ -326,12 +355,9 @@ Three things do reach Dropbox that a reader might not expect — not because syn
 
 ## 3. Simultaneous editing
 
-The previous section treats each edit as a single event. In practice Obsidian autosaves continuously, so "two people editing the same note" is not one clash but a stream of them. Two design rules keep that stream from turning into a pile of files:
+The previous section treats each edit as a single event. In practice Obsidian autosaves continuously, so "two people editing the same note" is not one clash but a stream of them. **R13** keeps that stream from turning into a pile of files: uploads are debounced to a settled burst, and a device holds at most one unresolved conflict copy per path.
 
-- **Uploads are debounced to a settled burst**, so a conflict is evaluated once a device stops typing, not once per keystroke.
-- **A device holds at most one unresolved conflict copy per file.** Further edits from that device update its existing copy rather than creating another. So a two-sided hour-long editing session ends with two files, not two hundred.
-
-Having a file open is also not a claim on it. An open editor may delay an incoming change briefly so the view can reload cleanly, but it can never block it indefinitely — that bound is [G10](#gap-list).
+Having a file open is also not a claim on it. **R12** allows a brief delay so the view can reload cleanly, but every deferral is bounded — that bound is also [G10](#gap-list) in the codebase.
 
 <table>
 <colgroup>
@@ -433,7 +459,7 @@ Having a file open is also not a claim on it. An open editor may delay an incomi
 <td>Deletes file, syncs</td>
 <td>—</td>
 <td>—</td>
-<td>Removed from Dropbox, then from B and C.<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code><br>• the deletion recorded in Dropbox's own revision history, so late-arriving devices cannot undo it</td>
+<td>Removed from Dropbox, then from B and C.<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code><br>• the deletion recorded in Dropbox's own revision history for as long as retention lasts (R6), so late-arriving devices with evidence apply R10 rather than resurrecting</td>
 <td>Deviates: the deletion works, and this device keeps a local delete log, but nothing durable is read from Dropbox for other devices — see rows 82 to 85.</td>
 </tr>
 <tr>
@@ -473,7 +499,7 @@ Having a file open is also not a claim on it. An open editor may delay an incomi
 <td>File goes missing with no real delete (crash, half-loaded vault)</td>
 <td>—</td>
 <td>—</td>
-<td>Nothing is deleted from Dropbox, and A downloads its own copy back. Absence is not a decision, so no heuristic is allowed to turn it into one — only an observed deletion is.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — unchanged</td>
+<td>Nothing is deleted from Dropbox, and A downloads its own copy back. Absence alone is never enough for a remote delete (P1): a path may be planned for remote delete only when base knew it <b>and</b> the local scan is vouched complete. If the scan cannot be trusted, deletes are deferred to a later cycle and the file is restored instead.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — unchanged</td>
 <td>Deviates. The planner is right — a missing file with no recorded intent becomes a restore — but the engine <i>infers</i> a delete intent for any base path absent from the local scan before the planner runs. It must do something of the kind, since a delete made with Obsidian closed has no event to catch; the problem is that it cannot tell that case apart from this one, so a single file lost to a crash is planned as a remote delete.</td>
 </tr>
 <tr>
@@ -589,7 +615,7 @@ Having a file open is also not a claim on it. An open editor may delay an incomi
 <td>Renames <code>old.md</code> to <code>new.md</code>, syncs</td>
 <td>—</td>
 <td>—</td>
-<td>Executed as a <b>server-side move</b>, so no content is re-uploaded and version history follows the file. A <b>rename timestamp</b> is recorded. B and C move their copies rather than deleting and re-downloading.<br><b>Dropbox holds:</b><br>• <code>new.md</code> — the moved file, history intact<br>• nothing at <code>old.md</code></td>
+<td>Executed as a <b>server-side move</b>, so no content is re-uploaded and version history follows the file. Detected by three-way compare (and content similarity when the rename happened outside Obsidian); live rename events may only accelerate the same plan (P5). B and C move their copies rather than deleting and re-downloading.<br><b>Dropbox holds:</b><br>• <code>new.md</code> — the moved file, history intact<br>• nothing at <code>old.md</code></td>
 <td>Deviates: performed as a delete plus a fresh upload, which re-transmits the file and restarts its history.</td>
 </tr>
 <tr>
@@ -637,7 +663,18 @@ Having a file open is also not a claim on it. An open editor may delay an incomi
 
 ## 7. Capitalisation
 
-Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at once. Every row here therefore ends with exactly one file — the only question is which capitalisation, and since the content is identical either way, **no answer can lose data**. That is what makes this the one place a timestamp is allowed to pick a winner.
+Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at once. Every row here therefore ends with exactly one file — the only question is which capitalisation, and since the content is identical either way, **no answer can lose data** (R8).
+
+Decisions use a **three-way compare on display casing** against `basePathDisplay` (same pattern as content under P1) — not shared rename timestamps, and not local mtime:
+
+| Local vs base | Remote vs base | Action |
+|---|---|---|
+| changed | same | This device renamed → push a case-only server move |
+| same | changed | Remote renamed → adopt Dropbox's casing locally |
+| same | same | In sync |
+| both changed, differently | — | First casing that lands on Dropbox wins; the other adopts |
+
+Live Obsidian rename events may only accelerate the same plan a cold sync would reach (P5). A device that never renamed simply sees "remote changed, local did not" and adopts — it does **not** push its old casing back.
 
 <table>
 <colgroup>
@@ -657,7 +694,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>Creates <code>note.md</code>, syncs. Later renames it to <code>Note.md</code>, syncs</td>
 <td>—</td>
 <td>—</td>
-<td>The rename is stamped with a <b>rename timestamp</b> and propagates as a case-only move, so B and C rename their copies to match. The file's modification date is irrelevant here, and unchanged by the rename.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file, new capitalisation</td>
+<td>Local casing changed, remote still matches base → A pushes a case-only server-side move. B and C see remote casing changed and local unchanged → they adopt <code>Note.md</code>. The file's modification date is irrelevant and unchanged by the rename.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file, new capitalisation</td>
 <td>Deviates: nothing propagates, B and C keep <code>note.md</code>. The rename also calls <code>trackDelete</code> on the same <code>path_lower</code> while the file still exists, so the delete intent never clears and <b>A's sync cursor stalls</b> until that log entry is pruned or cleared.</td>
 </tr>
 <tr>
@@ -665,7 +702,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>Renamed it to <code>Note.md</code> earlier, as in row 47</td>
 <td>Renames it back to <code>note.md</code>, syncs</td>
 <td>—</td>
-<td>B's rename timestamp is more recent than A's, so it wins and A and C follow. Renaming back and forth keeps working indefinitely.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — one file</td>
+<td>B's local casing changed against base while remote still had <code>Note.md</code> → B pushes the case move. A and C then adopt. Renaming back and forth keeps working indefinitely.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — one file</td>
 <td>Deviates the same way as row 47</td>
 </tr>
 <tr>
@@ -673,7 +710,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>Renames to <code>Note.md</code>, syncs</td>
 <td>Renames the same file to <code>NOTE.md</code> at about the same time, syncs</td>
 <td>—</td>
-<td>The <b>later rename timestamp wins</b> on every device, and the earlier one is discarded without loss, since only the name differed. Identical stamps are broken by device ID so every device agrees.<br><b>Dropbox holds:</b><br>• one file, under the later of the two names</td>
+<td>Both diverge from base before either lands. Whichever case-only move reaches Dropbox first wins; the other device adopts that casing. No content is lost.<br><b>Dropbox holds:</b><br>• one file, under the casing that landed first</td>
 <td>Deviates: neither rename propagates</td>
 </tr>
 <tr>
@@ -681,7 +718,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>Creates <code>Note.md</code>, syncs</td>
 <td>Independently creates <code>note.md</code>, <b>identical content</b>, syncs</td>
 <td>—</td>
-<td>No rename happened, so there is no rename timestamp to compare. The capitalisation already on Dropbox wins and B adopts it silently.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file</td>
+<td>No rename on either side relative to a shared history — B has no base (or content matches with casing differing from Dropbox). The capitalisation already on Dropbox wins and B adopts it. B records the path as in sync under that casing.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file</td>
 <td>Deviates: the content match is recognised, but B keeps <code>note.md</code> locally forever — the capitalisation difference persists silently and nothing is recorded</td>
 </tr>
 <tr>
@@ -705,7 +742,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>—</td>
 <td>—</td>
 <td><b>(Dropbox app)</b> renames <code>note.md</code> to <code>Note.md</code> in Finder</td>
-<td>The case change propagates as a move and every device adopts it. Note that <b>no rename timestamp can exist</b> for this: the device that made it does not run our code. A case rename from a Dropbox-managed device can only be observed after the fact, so the most-recent-rename tiebreak has nothing of its own to compare against.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file</td>
+<td>Dropbox performs a server-side case move. Plugin devices see remote casing changed against base and local unchanged → they adopt <code>Note.md</code>. No stamp from us is required or possible (P3); the three-way table is enough.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file</td>
 <td>Deviates: case renames do not propagate at all, from either kind of device.</td>
 </tr>
 </tbody>
@@ -807,11 +844,7 @@ Folders are tracked as entities in their own right, not merely implied by the fi
 
 A populated folder is where folder-level operations meet per-file sync, and it is the one place where an optimisation can cause data loss. Deleting or moving a folder is far cheaper as a single recursive operation than as hundreds of per-file ones — but a recursive operation applies to **whatever is in the folder right now**, which is not necessarily what the acting device thinks is in it. Another device may have added files it has never seen, or hold files it never received, or the folder may contain files this device is configured to ignore.
 
-The governing rule is therefore:
-
-> A folder-level operation may only be used when the device has confirmed the folder contains exactly the files it intends to act on. Otherwise it falls back to acting on each file individually.
-
-This is the one part of folder handling that is already implemented well: the delete coalescer collapses a subtree into a single folder delete only after checking that every remote file beneath it is in the delete set, declines when the remote listing is empty, and declines when any other pending action touches a path underneath. The gap is what that check can *see* — covered in row 67.
+That gate is **R14**. This is the one part of folder handling that is already implemented well for files: the delete coalescer collapses a subtree into a single folder delete only after checking that every remote file beneath it is in the delete set, declines when the remote listing is empty, and declines when any other pending action touches a path underneath. The gap is what that check can *see* — covered in row 67 and G20 (empty subfolders).
 
 <table>
 <colgroup>
@@ -985,7 +1018,7 @@ This is the one part of folder handling that is already implemented well: the de
 <td>Already synced</td>
 <td>Already synced</td>
 <td>Already synced, then repointed at a different (empty) Dropbox folder</td>
-<td>Recognised as a re-link rather than a mass deletion, and C is asked what it intends before anything is removed.<br><b>Dropbox holds:</b><br>• the original folder — untouched<br>• the new folder — still empty</td>
+<td>Recognised as a re-link (R11) rather than a mass deletion, and C is asked what it intends before anything is removed.<br><b>Dropbox holds:</b><br>• the original folder — untouched<br>• the new folder — still empty</td>
 <td>Deviates: changing vault ID keeps the old sync base and only resets the engine. An empty new folder is then planned as mass <b>local</b> deletes ("deleted on remote"), not a full upload. Delete protection may ask when the count exceeds the threshold — below it, local files are removed with no re-link prompt. The settings copy promises an upload; the planner does the opposite.</td>
 </tr>
 <tr>
@@ -1021,7 +1054,7 @@ These rows are separated out because they all fail the same way: a device arrive
 <td>Deletes file, syncs</td>
 <td>—</td>
 <td>Joins fresh, still holding its own copy of that file</td>
-<td>C finds a deletion record for the path, so the deletion stands and <code>note.md</code> does not come back. C's copy is preserved rather than silently restoring the file or silently destroying C's content.<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code><br>• <code>note (C's conflicted copy 2026-07-26).md</code> — C's copy</td>
+<td>C finds durable deletion evidence for the path (R6), so the deletion stands at <code>note.md</code>. C's bytes are preserved as a conflict copy and sync everywhere (R10).<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code><br>• <code>note (C's conflicted copy 2026-07-26).md</code> — C's copy</td>
 <td>Deviates: C re-uploads the file, <code>note.md</code> returns on A and B, and nothing indicates it happened</td>
 </tr>
 <tr>
@@ -1029,7 +1062,7 @@ These rows are separated out because they all fail the same way: a device arrive
 <td>Deletes file, syncs</td>
 <td>—</td>
 <td>Was offline, rejoins after the deletion record expired</td>
-<td>Falls back to the safe answer: C does not silently resurrect, and asks. Retention of 90 days or more makes this rare.<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code>, until the user decides otherwise</td>
+<td>No durable evidence left (R6 retention). C asks before re-uploading or discarding — never silently resurrects and never silently deletes the local copy. (A device that kept a valid cursor through the offline period is not this row; see row 28.)<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code>, until the user decides otherwise</td>
 <td>Deviates: silently resurrects, as row 82</td>
 </tr>
 <tr>
@@ -1045,7 +1078,7 @@ These rows are separated out because they all fail the same way: a device arrive
 <td>—</td>
 <td><b>(Dropbox app)</b> deleted 200 files months ago</td>
 <td>Joins fresh with the plugin today</td>
-<td>C must not resurrect them. No plugin was running when they were deleted, so no record of ours could possibly exist — the only durable evidence anywhere is Dropbox's own revision history. This row is the reason <code>G3</code> resolves to reading that history rather than writing tombstones of our own.<br><b>Dropbox holds:</b><br>• nothing at those 200 paths<br>• the deletions, in Dropbox's revision history</td>
+<td>C must not resurrect them. No plugin was running when they were deleted, so no record of ours could possibly exist — the only durable evidence anywhere is Dropbox's own revision history (R6 / R10). This row is the reason <code>G3</code> resolves to reading that history rather than writing tombstones of our own. If retention has already aged out, C asks (row 83), still without silent mass restore.<br><b>Dropbox holds:</b><br>• nothing at those 200 paths<br>• the deletions, in Dropbox's revision history while retention lasts</td>
 <td>Deviates: all 200 return, and the desktop watches them reappear.</td>
 </tr>
 </tbody>
@@ -1206,39 +1239,53 @@ Every row so far assumes a text note of a few kilobytes. Attachments break that 
 <td>The remote can change at any moment during A's cycle, so a plan is a snapshot that may already be stale when it executes. Every operation must therefore be safe to attempt against a moved target: <code>rev</code> checks reject stale uploads, and anything that fails is retried next cycle rather than forced.<br><b>Dropbox holds:</b><br>• a moving target — consistent at every individual moment, never frozen</td>
 <td>Matches in the two places it has been thought about — <code>rev</code> rejects a stale upload, and the folder delete re-lists live from Dropbox rather than trusting the plan — but that is two deliberate defences rather than a general stance. See <code>G24</code>.</td>
 </tr>
+<tr>
+<td>101</td>
+<td>Syncs <b>notes only</b> (no <code>.obsidian/</code> section)</td>
+<td>Syncs the full vault, including <code>.obsidian/</code></td>
+<td>—</td>
+<td>A's local absence of <code>.obsidian/</code> is out of scope, not a deletion (P4). A must not plan remote deletes for that section, and B's settings and plugins on Dropbox stay untouched. Within notes, sync behaves normally.<br><b>Dropbox holds:</b><br>• notes — as A and B agree<br>• <code>.obsidian/</code> — B's copy, unchanged by A's scoped sync</td>
+<td>Partially guarded by a per-section ratio heuristic, which is standing in for an explicit scope check. A small or half-present settings tree can still be misread as deletes.</td>
+</tr>
 </tbody>
 </table>
 
 ---
 
+## Principles and Rules Gaps
+
+Gaps between the **Expected Outcomes** and the **Guiding principles / General rules**. This is not about the codebase; that is the [Gap list](#gap-list) below.
+
+None open. The Expected Outcomes and P1–P5 / R1–R14 currently agree; remaining work is implementation (`G*` below) plus the open API questions.
+
 ## Gap list
 
-Ordered by how much user data is at risk.
+Ordered by how much user data is at risk. Gaps between **today's codebase** and the **Expected Outcomes** — not between those outcomes and the principles (see [Principles and Rules Gaps](#principles-and-rules-gaps) above).
 
 | ID | Change | Rows | Why it matters |
 |---|---|---|---|
 | **G1** | Conflict copies must sync to Dropbox and to every device | 4, 5, 10, 12, 19, 20, 24, 78, 98 | A losing version currently exists on exactly one device. Wipe that device and the content is gone from the vault. Both Dropbox and Syncthing propagate conflict copies for this reason. |
 | **G2** | The version already on Dropbox keeps the canonical path; the arriving version becomes the conflict copy | 4, 5, 10, 12, 13, 15, 19, 20, 39, 78, 88 | Today the last device to sync silently replaces the canonical file on every other device, and the displaced content survives only on the device that caused the conflict. |
-| **G3** | Durable evidence of deletion, read from Dropbox's own revision history | 26, 82, 83, 84, 85 | Without it a device with no prior state cannot tell "deleted" from "never existed", so it re-uploads and undoes the deletion — the same defect currently reported against Obsidian Sync. Dropbox already records every deletion it performs and exposes it through `list_revisions`, which is the only source that also covers deletions made by a Dropbox client rather than by us. Writing our own tombstones would miss exactly those. |
+| **G3** | Durable evidence of deletion, read from Dropbox's own revision history; ask when evidence is missing (R6, R10) | 26, 82, 83, 84, 85 | Without it a device with no prior state cannot tell "deleted" from "never existed", so today it re-uploads and undoes the deletion — the same defect currently reported against Obsidian Sync. Dropbox already records every deletion it performs and exposes it through `list_revisions`, which is the only source that also covers deletions made by a Dropbox client rather than by us. Writing our own tombstones would miss exactly those. When evidence exists, apply R10 (conflict copy, path stays deleted). When it has expired, ask — do not silently resurrect. |
 | **G4** | Record a path as in sync even when nothing transfers | 3, 6, 11, 77 | A device that finds its copy already identical writes no record, so it later treats the file as new. This is what makes G3's failure reachable even after a short absence. |
-| **G5** | Remove or fix the "newest wins" strategy | 10 | It decides using wall-clock times from two different devices and discards the loser with no copy kept. A date may pick which version holds the canonical name; it may never be the reason a version is destroyed. Being a per-device setting makes it worse: a conflict is resolved by whichever device happens to notice it first, so the same clash can destroy content or not depending on which machine synced first. Once `newest` is gone the remaining strategies all preserve both sides, and differing per device becomes a harmless UX preference. |
-| **G6** | Record a rename timestamp so path and capitalisation changes have a winner | 41, 47, 48, 49, 52, 53, 58 | A rename does not change a file's modification date, so "the most recent rename wins" is unimplementable without stamping the rename ourselves. This is the prerequisite for capitalisation changes propagating at all. Note that a rename performed with Obsidian closed can only be stamped when it is *discovered*, not when it happened, so the tiebreak is weaker for external renames than for observed ones. |
+| **G5** | Remove the "newest wins" strategy | 10 | It decides using wall-clock times from two different devices and discards the loser with no copy kept. R2 is absolute: the version already on Dropbox keeps the canonical name. Per-device conflict UX may remain; nothing may change who holds `note.md`. |
+| **G6** | Propagate path and capitalisation changes via server-side moves and three-way compare on `basePathDisplay` | 41, 47, 48, 49, 50, 52, 53, 58 | No shared rename timestamps (P1/P2/P3). Record display casing in base state; push a case-only move when local casing changed against an unchanged remote; adopt Dropbox when only remote changed; first landing wins if both renamed. Live Obsidian rename events may only accelerate the same plan. Depends on Dropbox supporting case-only move (open question 1). |
 | **G7** | Execute renames as server-side moves, and detect renames by content | 41, 42, 46, 57, 70, 71, 72, 73 | Avoids re-uploading content, preserves version history, and makes a 200-file folder rename free instead of a full re-transfer. At folder scale it is also a correctness fix, not just a speed one: delete-plus-upload drops files another device added to the folder. By the first principle this needs a content-similarity pass as well as the vault's rename event, since a rename done outside Obsidian arrives as one path gone and another appeared — the same problem Git solves heuristically. |
 | **G8** | Sync folders as first-class entities | 54 to 74 | Empty folders, folder moves and folder deletes are all invisible today. Folder structure a user deliberately created does not reach their other devices. |
 | **G9** | Name conflict copies after the device that produced them | 4, 5, 12, 98 | With three devices a timestamp alone does not tell the user whose work they are looking at. Both reference implementations encode the device. The identity this uses has to be device-local storage, not synced settings — see `G26`. |
-| **G10** | Bound every deferral | 9, 18, 21, 29, 97 | An indefinitely open file or a permanently postponed conflict holds the sync cursor back, which quietly stops the device syncing at all. |
+| **G10** | Bound every deferral (R12) | 9, 18, 21, 29, 97 | An indefinitely open file or a permanently postponed conflict holds the sync cursor back, which quietly stops the device syncing at all. |
 | **G11** | Send and read `client_modified` | 1 | Without it Dropbox substitutes the upload time, so a synced note shows the wrong modification date on every device but the one that wrote it. |
 | **G12** | Write through a temporary file | 95 | A crash mid-write can currently leave a partially written note. Syncthing never writes to the destination directly. |
 | **G13** | Tell the user when something surprising happened | 35, 36, 40, 43, 44, 51 | Resurrections, rename duplicates and capitalisation normalisations are all correct behaviour that currently happens silently, which reads as data loss to the user. |
 | **G14** | Report file-versus-folder path collisions | 59 | Two different kinds of thing cannot share a path, and the clash is currently undetectable because folders are not tracked. |
-| **G15** | Recognise a re-link rather than inferring a mass delete | 80 | Today a vault-ID change keeps the sync base, so an empty new folder is planned as mass local deletes. Delete protection may catch large cases; small vaults can lose local files. Clearing history or treating a folder change as a fresh link is required — not just a better prompt. |
+| **G15** | Recognise a re-link rather than inferring a mass delete (R11) | 80 | Today a vault-ID change keeps the sync base, so an empty new folder is planned as mass local deletes. Delete protection may catch large cases; small vaults can lose local files. Clearing history or treating a folder change as a fresh link is required — not just a better prompt. |
 | **G16** | Upload large files through a resumable upload session | 86 | Dropbox's single-request upload endpoint stops at 150 MB. Anything larger — a video or a big PDF in an attachments folder — fails every cycle, and retrying cannot help. |
 | **G17** | Stream large downloads to disk, and skip what will not fit | 87, 93 | The whole file is currently buffered in memory before any of it is written, which is the same 400 MB attachment failing from the other direction, and hardest on the device least able to cope. |
-| **G18** | Debounce conflict evaluation and hold one conflict copy per device per file | 19, 20 | Obsidian autosaves constantly, so two people editing the same note is a stream of clashes. Without both rules, an hour of shared editing produces a pile of near-identical files instead of two. |
+| **G18** | Debounce conflict evaluation and hold one conflict copy per device per file (R13) | 19, 20 | Obsidian autosaves constantly, so two people editing the same note is a stream of clashes. Without both rules, an hour of shared editing produces a pile of near-identical files instead of two. |
 | **G19** | Protect unsaved buffers in background tabs, not just the active file | 21, 23 | Deferral is keyed on the one note Obsidian reports as active, so an unsaved buffer in any other tab is written over with no conflict copy. |
 | **G20** | Folder-delete verification must account for empty subfolders | 64, 67 | The live re-list run before a recursive delete asks Dropbox for *files*, so an empty subfolder inside the doomed folder is invisible to it and is removed without ever being counted. Narrow, and a sub-case of G8 rather than an independent defect, but it is the one path by which the two-stage folder-delete guard can still remove something it did not verify. |
-| **G21** | Prompt when a file open in the editor is deleted elsewhere | 29 | The user is mid-sentence in a note another device just deleted. They need to be told and given the choice, rather than having the note disappear or having the deletion silently ignored forever. |
-| **G22** | Gate delete inference on a scan that can be vouched for | 31 | Inferring deletes from absence cannot simply be removed — by the first principle, a delete made with Obsidian closed has no event and *must* be recovered from state. The missing piece is trust in the scan. Today the only brake is a ratio test (skip when a section holds over 20 known files and under half are present), which a crash losing one file sails straight through. Inference should require positive confirmation that the vault was fully mounted, fully indexed and scanned without error, and should defer deletes to the next cycle when that confirmation is unavailable. |
+| **G21** | Prompt when a file open in the editor is deleted elsewhere (R12) | 29 | The user is mid-sentence in a note another device just deleted. They need to be told and given the choice, rather than having the note disappear or having the deletion silently ignored forever. |
+| **G22** | Gate delete inference on a scan that can be vouched for | 31, 101 | Inferring deletes from absence cannot simply be removed — by the first principle, a delete made with Obsidian closed has no event and *must* be recovered from state. The missing piece is trust in the scan (and an explicit out-of-scope check for P4 / row 101). Today the only brake is a ratio test (skip when a section holds over 20 known files and under half are present), which a crash losing one file sails straight through. Inference should require positive confirmation that the vault was fully mounted, fully indexed and scanned without error, should treat out-of-scope sections as not present rather than deleted, and should defer deletes to the next cycle when that confirmation is unavailable. |
 | **G23** | Recognise conflicted copies made by Dropbox's own clients | 17, 25, 81 | Under the second principle a vault contains conflict copies we did not create, and adopting Dropbox's naming makes ours indistinguishable from theirs — which is the point. But it cuts both ways: the plugin's current filter matches only its own old `.conflict-<timestamp>` names, so today Dropbox's copies sync as ordinary notes, which is accidentally right. Once the naming matches, that filter starts hiding them, and a copy holding the user's only surviving draft stops moving between devices. G1 removes the filter, and these two changes must land together. Because devices are updated independently, the two naming formats will also coexist for a while, so detection has to accept both — the old `.conflict-<timestamp>` names as well as Dropbox's. |
 | **G24** | Assume the remote can change mid-cycle | 100 | A Dropbox client writes to the folder continuously and on nobody's schedule, so a plan is a snapshot that may be stale before it executes. The two places that already handle this — `rev` checks on upload and the live re-list before a folder delete — are the model, not the exception; anything else that decides from the planner's snapshot needs the same treatment. |
 | **G25** | Exclude the plugin's own `data.json` from sync | — | It holds the Dropbox OAuth access and refresh tokens, and nothing excludes it. Enabling the Plugins section uploads those tokens to Dropbox and distributes them to every device that syncs that section. The vault debug log and `sync-logs/` reach Dropbox the same way, which is untidy rather than dangerous. |
@@ -1252,36 +1299,36 @@ How each gap or approach concern sits against the rules and principles, and whet
 |---|---|---|---|
 | **G1** | Conflict copies stay local and are excluded from sync | R1, R3 | **Yes.** Upload the sibling; stop excluding it. Couple with G2 and G23. |
 | **G2** | Arriving device overwrites the Dropbox canonical path | R1, R2 | **Yes.** Invert `keep_both`: Dropbox keeps the name; local becomes the conflict copy. |
-| **G3** | No durable delete evidence for fresh / state-lost devices | R6, P3 | **Yes, with limits.** Read Dropbox `list_revisions` (not our tombstones — those break P1/P2/P3). Retention and per-path cost are open (Q4); after history ages out, fall back to ask — do not invent vault sidecars. |
-| **G4** | Identical content writes no sync base | R6 (enables resurrection), P1 (incomplete three-way) | **Yes.** Record base on `same_content` noop. Purely local state. |
-| **G5** | `newest` discards the loser by wall clock | R1, R8 | **Yes.** Remove it, or reduce it to "which name is canonical" while still keeping both files (R1). |
-| **G6** | No rename timestamp → case/path changes have no winner | R8 (temptation to misuse mtime), section 7 | **Tension.** Stamping into the Dropbox folder breaks P1/P2; Dropbox-app renames would not write stamps (P3). Prefer inferring from move / `server_modified` (Q2). Weaker for external renames — accept that, do not add vault metadata files. |
-| **G7** | Renames are delete + upload | P1 (external renames invisible as moves), correctness at folder scale | **Yes.** Server-side `move` + content-similarity detection so cold/manual sync (P5) sees the same move a live rename event would. Confirm case-only move (Q3). |
+| **G3** | No durable delete evidence for fresh / state-lost devices | R6, R10, P3 | **Yes, with limits.** Read Dropbox `list_revisions` (not our tombstones — those break P1/P2/P3). After history ages out, ask (R6); with evidence apply R10. Per-path cost still open (Q2). |
+| **G4** | Identical content writes no sync base | R6 (enables resurrection), P1 (incomplete three-way) | **Yes.** Record base on `same_content` noop, including `basePathDisplay`. Purely local state. |
+| **G5** | `newest` discards the loser by wall clock | R1, R2, R8 | **Yes.** Remove it. R2 is absolute for content conflicts; no per-device override of the canonical name. |
+| **G6** | Case/path changes do not propagate; no three-way on display path | R8, section 7, P1 | **Yes.** Persist `basePathDisplay`; case-only server move when local casing changed; adopt remote when only remote changed; first landing wins if both renamed. No shared stamps. Confirm case-only move API (Q1). |
+| **G7** | Renames are delete + upload | P1 (external renames invisible as moves), correctness at folder scale | **Yes.** Server-side `move` + content-similarity detection so cold/manual sync (P5) sees the same move a live rename event would. Confirm case-only move (Q1). |
 | **G8** | Folders not first-class | P1/P2 (empty folders are real vault structure) | **Yes.** Track folder entries from Dropbox/local listings — no sidecar files. |
 | **G9** | Conflict names lack device identity | R4 | **Yes, only after G26.** Name from device-local identity. Doing G9 while `deviceId` still syncs via `data.json` breaks R4 in practice (colliding names). |
-| **G10** | Unbounded deferral stalls the cursor | P1 (device stops reconciling) | **Yes.** Bound then apply; conflict if needed. Must not rely on "user eventually closed the note" as a live-only signal (P5). |
+| **G10** | Unbounded deferral stalls the cursor | R12, P1 (device stops reconciling) | **Yes.** Bound then apply; conflict if needed (R12). Must not rely on "user eventually closed the note" as a live-only signal (P5). |
 | **G11** | `client_modified` never sent | — (display/metadata, not a decision rule) | **Yes.** Send/read Dropbox's field. Does not decide conflicts (R8). |
 | **G12** | Downloads write straight to the destination | R7 | **Yes.** Temp file then move into place. |
 | **G13** | Resurrections / rename duplicates are silent | R5 (told), UX only otherwise | **Yes.** Notices only; no behaviour change. |
 | **G14** | File-vs-folder collisions undetected | — (needs G8) | **Yes**, once folders are tracked. Report, do not invent a winner that destroys content (R1). |
-| **G15** | Vault-ID change planned as mass local deletes | R9 (below threshold), P1 | **Yes.** Treat folder change as re-link: clear or isolate base, ask intent. Do not "fix" it by writing a marker file into the vault (P1). |
+| **G15** | Vault-ID change planned as mass local deletes | R11, R9 (below threshold), P1 | **Yes.** Treat folder change as re-link (R11): clear or isolate base, ask intent. Do not "fix" it by writing a marker file into the vault (P1). |
 | **G16** | Large uploads fail at 150 MB | — (transport) | **Yes.** Resumable upload sessions. |
 | **G17** | Large downloads buffered in memory | — (transport) | **Yes.** Stream to disk; skip + tell when space is insufficient. |
-| **G18** | Autosave stream → many conflict files; no one-copy rule | R1/R3 under load | **Yes, carefully.** Debounce may choose *when* to sync (P5 allows that). One-copy-per-device and conflict evaluation must still hold on a cold manual sync with two divergent files already on disk — not only during a live typing burst. |
+| **G18** | Autosave stream → many conflict files; no one-copy rule | R13, R1/R3 under load | **Yes, carefully.** Debounce may choose *when* to sync (P5 / R13). One-copy-per-device must still hold on a cold manual sync with two divergent files already on disk. |
 | **G19** | Only the active note is protected | R1 (background unsaved overwritten) | **Yes, with platform limits.** Protect dirty editors Obsidian exposes. Must degrade safely when the API cannot list them — never require a live-only hook that manual sync lacks (P5). |
 | **G20** | Folder-delete live re-list ignores empty subfolders | P1/P2 (removes unverified structure), G8 | **Yes**, with G8: re-list must include folders. |
-| **G21** | Open-file remote delete: no prompt | R5-adjacent, G10 | **Yes.** Modal choice; bound the wait (G10). Outcome must match what a later manual sync would do after the user chooses (P5). |
-| **G22** | Delete inference from incomplete scans | P1 vs R6 | **Yes.** Gate on vouched scan completeness; defer deletes when untrusted. Do not replace inference with tombstone files (P1/P2/P3). |
+| **G21** | Open-file remote delete: no prompt | R12, G10 | **Yes.** Modal choice; bound the wait (R12 / G10). Outcome must match what a later manual sync would do after the user chooses (P5). |
+| **G22** | Delete inference from incomplete scans / out-of-scope absence | P1, P4, R6 | **Yes.** Gate on vouched scan completeness; treat out-of-scope sections as not present (row 101); defer deletes when untrusted. Do not replace inference with tombstone files (P1/P2/P3). |
 | **G23** | Dropbox conflicted-copy names unrecognised / filter hazard | R3, P2, P3 | **Yes, only with G1.** Adopt Dropbox naming and stop excluding those paths in the same change. Accept both old `.conflict-*` and Dropbox names during rollout (P4: mixed versions). |
 | **G24** | Plan snapshot can go stale mid-cycle | P3 | **Yes.** Generalise `rev` + live re-list pattern; retry rather than force. |
 | **G25** | Plugin `data.json` (OAuth tokens) can sync | P4, security | **Yes.** Exclude it. Also stops `deviceId` travelling (helps G26). |
 | **G26** | `deviceId` in synced settings | P4, R4 (once G9 lands) | **Yes.** Move to device-local storage. Prerequisite for G9. |
 | **C1** | Case rename leaves a stuck delete intent and stalls the cursor | P1, P5 (device stops syncing) | **Yes.** Do not `trackDelete` when `path_lower` is unchanged; prune same-key intents. Part of G6/G7 work. |
-| **C2** | `list_revisions` is per-path and retention is short | R6 (after expiry), G3 | **Tension, not a veto.** Confirm API (Q4). Batch/limit calls; after expiry ask the user (row 83). Writing our own delete log into the vault would "solve" retention by breaking P1/P2/P3 — do not. |
-| **C3** | Rename-timestamp storage vs P1/P2/P3 | G6, Q2 | **Tension.** Infer from Dropbox move metadata if possible. If that is too weak for case-only races, accept device-local discovery stamps (P5-weaker for external renames) rather than vault sidecars. |
+| **C2** | `list_revisions` is per-path and retention is short | R6 (after expiry), G3 | **Accepted limit, not a veto.** Confirm API (Q2). Batch/limit calls; after expiry ask (row 83 / R6). Writing our own delete log into the vault would "solve" retention by breaking P1/P2/P3 — do not. |
+| **C3** | ~~Rename-timestamp storage~~ | — | **Closed.** Three-way on `basePathDisplay` replaces shared stamps (section 7, R8, G6). |
 | **C4** | Shipping G9 before G26 | R4, P4 | **Yes — by ordering.** G26 (and preferably G25) first, then G9. |
 | **C5** | Shipping Dropbox conflict naming without removing the exclude filter | R3, P2, P3 | **Yes — by coupling.** Land with G1/G23 together. |
-| **C6** | Row 82: preserve deleted path as a conflict copy | R1 vs R6 (judgement) | **Yes as policy.** Chosen outcome upholds R1 and R6 better than silent restore or silent discard. Bulk join UX optional; do not require settings sync (P4). |
+| **C6** | Row 82: preserve deleted path as a conflict copy | R10 | **Closed as R10.** Implementation is G3; bulk join UX optional; do not require settings sync (P4). |
 | **C7** | iOS sync state in `.sync-state/` inside the vault | P1 | **Tension.** IndexedDB is unavailable; vault files are the pragmatic host. Keep excluded and never required for correctness on other devices (P2/P4). Prefer platform APIs outside the vault when they exist; do not add more bookkeeping files. |
 | **C8** | Debug log / `sync-logs/` are ordinary vault files that sync | P1 (clutter), G25 note | **Yes for hygiene.** Exclude by default. Not a safety defect like tokens. |
 | **C9** | Live `trackDelete` / rename events vs cold discovery | P5 | **Yes.** Events may only accelerate; planner must infer the same deletes/moves from base + listings on manual sync (G7 content-similarity, G22 vouched scan). |
@@ -1289,15 +1336,11 @@ How each gap or approach concern sits against the rules and principles, and whet
 
 ## Open questions
 
-1. **Row 82's resolution is a judgement call.** When a fresh device holds a copy of a deleted file, the options are to restore it, delete it, or preserve it as a conflict copy. The table proposes the third because it neither undoes a shared decision nor destroys content, but it does leave a stray copy behind. Dropbox's own client would simply re-upload it.
+1. **Does Dropbox's move endpoint support a case-only rename?** G6 and G7 both depend on it, and section 7 is unimplementable without it. Worth confirming against the live API before committing.
 
-2. **Where do rename timestamps live?** They need to be readable by a device that has no local state, which points at the synced Dropbox folder — but the second principle says nothing of ours belongs there, and a Dropbox-managed device would not write them anyway. The deletion side of this problem was resolved by using Dropbox's revision history instead; renames may need the same treatment, inferring the stamp from `server_modified` on the moved file rather than recording one.
+2. **How far back does Dropbox's deletion history reach, and does `list_revisions` still report a deletion after the file itself has aged out?** R6 already budgets for expiry by requiring an ask rather than silent resurrection, but the practical window (and per-path cost of checking) still needs a live API answer. Personal plans are on the order of 30 days.
 
-3. **Does Dropbox's move endpoint support a case-only rename?** G6 and G7 both depend on it, and section 7 is unimplementable without it. Worth confirming against the live API before committing.
-
-4. **How far back does Dropbox's deletion history reach?** G3 now depends on it, so the answer sets the longest absence a device can survive without resurrecting files. Dropbox retains deleted files for 30 days on personal plans and longer on business ones, which is shorter than the offline periods worth designing for. Whether `list_revisions` still reports a deletion after the file itself has aged out needs confirming against the live API.
-
-5. **How long is "bounded" for a deferral?** G10 requires every deferral to expire, but the right window is unknown. Long enough that an editor can reload cleanly, short enough that a note left open overnight does not stop the device syncing.
+3. **How long is "bounded" for a deferral?** R12 / G10 require every deferral to expire, but the right window is unknown. Long enough that an editor can reload cleanly, short enough that a note left open overnight does not stop the device syncing.
 
 ## Technical gotchas
 
@@ -1305,7 +1348,7 @@ How each gap or approach concern sits against the rules and principles, and whet
 
 - **A conflict must resolve the same way on every device.** If two devices can reach different conclusions about who won, the resolutions themselves generate new conflicts. Anchoring the decision to "what is already on Dropbox" gives determinism for free, because the `rev` check already serialises uploads.
 
-- **A rename does not touch the modification date.** This catches people out repeatedly. Any rule about renames — including every row in section 7 — needs a timestamp we record at the moment of the rename, not one read off the filesystem.
+- **A rename does not touch the modification date.** This catches people out repeatedly. Capitalisation and path changes must not use mtime; they use three-way compare on `basePathDisplay` and server-side moves (section 7, R8).
 
 - **Dropbox has no creation date.** It cannot survive a round trip, so creation date must never be load-bearing in a sync decision unless we first record it in our own synced metadata.
 
@@ -1341,3 +1384,5 @@ The thirteen scenario tables are **raw HTML**, not Markdown, so that the `#` col
 Row numbers run continuously across all thirteen tables and are referenced from the gap list, the open questions, and from other rows. **Renumbering means updating those references too.** The reliable way to restructure is to move rows into their final order first, then renumber every `<td>N</td>` cell sequentially from the top, then fix the prose references — searching for `row ` and checking the gap list's Rows column.
 
 Every other table on this page is ordinary Markdown, because none of them has a column that needs pinning.
+
+The **Principles and Rules Gaps** ledger (`PR*`) and the **Gap list** (`G*`) are different: the first compares Expected Outcomes to P1–P5 / R1–R14; the second compares the codebase to Expected Outcomes. Do not merge them or renumber across the two series. Add a `PR*` row only when an Expected Outcome and a principle/rule disagree; remove it once the contract is fixed.
