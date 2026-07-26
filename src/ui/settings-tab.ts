@@ -21,8 +21,14 @@ import {
 import { LogViewerModal } from "./log-viewer-modal";
 import { isExcluded } from "../exclude";
 import {
+  clearOAuthTokens,
+  getCustomAppKey,
+  getDeviceId,
+  getRefreshToken,
   patchDeviceSettings,
   readDeviceSettings,
+  setCustomAppKey,
+  setOAuthTokens,
 } from "../device-settings/device-settings";
 import { DEFAULT_CURSOR_DEBUG_PORT } from "../device-settings/device-settings-defaults";
 import { isCursorDebugIngestConfigured } from "../debug/cursor-debug-ingest";
@@ -52,7 +58,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
     const { containerEl } = this;
     containerEl.empty();
 
-    const isConnected = !!this.plugin.settings.refreshToken;
+    const isConnected = !!getRefreshToken();
     const hasSyncName = !!this.plugin.settings.syncName;
     const autoSyncOn = this.plugin.settings.backgroundSyncEnabled;
 
@@ -173,6 +179,19 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       );
 
     if (this.plugin.settings.debugLoggingEnabled) {
+      // Device-local: one line per vault file per cycle is right for diagnosing
+      // a single machine and wrong as a default that travels via data.json.
+      new Setting(containerEl)
+        .setName("Verbose decision logging")
+        .setDesc(
+          "Log the sync decision for every file, including files that need no action. Useful when a file is not syncing and you need to see why sync thinks it is already up to date. Very noisy on large vaults, and applies to this device only.",
+        )
+        .addToggle((toggle) =>
+          toggle.setValue(readDeviceSettings().verboseDecisionLogging).onChange((value) => {
+            patchDeviceSettings({ verboseDecisionLogging: value });
+          }),
+        );
+
       this.renderCursorDebugIngestSettings(containerEl);
       // Silent refresh when Troubleshooting opens — onload / toggle-on notify instead
       // so opening settings does not re-toast every time.
@@ -194,11 +213,11 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("View sync logs")
-      .setDesc(`Device: ${this.plugin.settings.deviceId || "unknown"}`)
+      .setDesc(`Device: ${getDeviceId()}`)
       .addButton((btn) =>
         btn.setButtonText("View logs").onClick(async () => {
           const content = await this.plugin.readLogs();
-          new LogViewerModal(this.app, content, this.plugin.settings.deviceId).open();
+          new LogViewerModal(this.app, content, getDeviceId()).open();
         }),
       );
   }
@@ -543,7 +562,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             }
             this.plugin.settings.syncName = inputName;
             await this.plugin.saveSettings();
-            this.plugin.resetEngine();
+            await this.plugin.handleSyncNameRelink(inputName);
             new Notice(`Vault ID set: ${inputName}`);
             this.display();
           });
@@ -605,7 +624,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
             if (!confirmed) return;
             this.plugin.settings.syncName = pendingName;
             await this.plugin.saveSettings();
-            this.plugin.resetEngine();
+            await this.plugin.handleSyncNameRelink(pendingName);
             new Notice(`Vault ID changed: ${pendingName}`);
             this.display();
           });
@@ -622,9 +641,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
           .setButtonText("Disconnect")
           .setWarning()
           .onClick(async () => {
-            this.plugin.settings.refreshToken = "";
-            this.plugin.settings.accessToken = "";
-            this.plugin.settings.tokenExpiry = 0;
+            clearOAuthTokens();
             this.plugin.settings.backgroundSyncEnabled = false;
             await this.plugin.saveSettings();
             this.display();
@@ -712,9 +729,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
               authCodeInput,
               this.codeVerifier,
             );
-            this.plugin.settings.accessToken = tokenInfo.accessToken;
-            this.plugin.settings.refreshToken = tokenInfo.refreshToken;
-            this.plugin.settings.tokenExpiry = tokenInfo.expiresAt;
+            setOAuthTokens(tokenInfo.accessToken, tokenInfo.refreshToken, tokenInfo.expiresAt);
             await this.plugin.saveSettings();
             this.codeVerifier = null;
             new Notice("Connected to Dropbox!");
@@ -734,9 +749,8 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       .setHeading();
 
     const strategyDescs: Record<string, string> = {
-      keep_both: "Both versions are kept. Remote version is saved as a .conflict file.",
-      newest: "The newer version wins, based on modification time.",
-      manual: "A merge modal opens so you can compare and choose per section.",
+      keep_both: "Both versions are kept. Dropbox keeps the file name; your version is saved as a conflict copy.",
+      manual: "A merge modal opens so you can compare and choose per section (both sides are always kept).",
     };
 
     const conflictDesc = (strategy: string) => {
@@ -754,7 +768,6 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
       .addDropdown((dropdown) =>
         dropdown
           .addOption("keep_both", "Keep both versions")
-          .addOption("newest", "Keep newest")
           .addOption("manual", "Ask me")
           .setValue(this.plugin.settings.conflictStrategy)
           .onChange(async (value) => {
@@ -848,7 +861,7 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
 
   // ── App Key (disconnect 상태에서만 변경 가능) ──
   private renderAppKey(containerEl: HTMLElement): void {
-    const isConnected = !!this.plugin.settings.refreshToken;
+    const isConnected = !!getRefreshToken();
 
     if (DEFAULT_APP_KEY) {
       const appKeyDesc = (() => {
@@ -887,10 +900,11 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
         .addText((text) =>
           text
             .setPlaceholder(DEFAULT_APP_KEY || "Your App Key")
-            .setValue(this.plugin.settings.appKey)
+            .setValue(getCustomAppKey() || this.plugin.settings.appKey)
             .setDisabled(isConnected)
             .onChange(async (value) => {
-              this.plugin.settings.appKey = value.trim();
+              setCustomAppKey(value.trim());
+              this.plugin.settings.appKey = "";
               await this.plugin.saveSettings();
             }),
         );

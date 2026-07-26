@@ -1,6 +1,7 @@
 import { describe, test, expect } from "bun:test";
 import { checkPathGuard } from "@/sync/path-guard";
-import type { SyncPlan, SyncPlanItem } from "@/types";
+import type { SyncPlan, SyncPlanItem } from "@/types"
+import { emptySyncPlanStats } from "@/types";
 
 function item(localPath: string, action: SyncPlanItem["action"]): SyncPlanItem {
   return { pathLower: localPath.toLowerCase(), localPath, action };
@@ -9,7 +10,7 @@ function item(localPath: string, action: SyncPlanItem["action"]): SyncPlanItem {
 function plan(...items: SyncPlanItem[]): SyncPlan {
   return {
     items,
-    stats: { upload: 0, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 0 },
+    stats: emptySyncPlanStats(),
   };
 }
 

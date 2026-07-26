@@ -144,11 +144,15 @@ describe("migrateSettings", () => {
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
       vaultEventDebounceSec: 2,
       includeHiddenFilesAndFolders: false,
+      debugLoggingEnabled: true,
+      largeSyncInteractiveThreshold: 10,
     });
     expect(migrateSettings(undefined)).toEqual({
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
       vaultEventDebounceSec: 2,
       includeHiddenFilesAndFolders: false,
+      debugLoggingEnabled: true,
+      largeSyncInteractiveThreshold: 10,
     });
   });
 

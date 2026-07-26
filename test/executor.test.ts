@@ -1,5 +1,7 @@
 import { describe, test, expect, beforeEach } from "bun:test";
 import { executePlan, makeConflictPath } from "@/sync/executor";
+import { findNewestConflictSibling } from "@/sync/conflict-handlers";
+import { patchDeviceSettings } from "@/device-settings/device-settings";
 import type { ExecutorDeps, ExecutorConfig } from "@/sync/executor";
 import {
   MemoryFileSystem,
@@ -8,22 +10,23 @@ import {
 } from "@/adapters/memory";
 import { dropboxContentHash } from "@/hash";
 import type { SyncPlan, SyncPlanItem } from "@/types";
-import { PathValidationError } from "@/types";
+import { emptySyncPlanStats, PathValidationError } from "@/types";
 
 function mkPlan(...items: SyncPlanItem[]): SyncPlan {
-  const stats = {
-    upload: 0,
-    download: 0,
-    deleteLocal: 0,
-    deleteRemote: 0,
-    conflict: 0,
-    noop: 0,
-  };
+  const stats = emptySyncPlanStats();
   for (const item of items) {
-    const key = item.action.type as keyof typeof stats;
-    if (key in stats) stats[key]++;
+    const key = item.action.type;
+    if (key in stats) (stats as Record<string, number>)[key]++;
   }
   return { items, stats };
+}
+
+async function findConflictSibling(
+  fs: MemoryFileSystem,
+  canonicalPath: string,
+): Promise<string | undefined> {
+  const files = await fs.list();
+  return findNewestConflictSibling(files.map((f) => f.path), canonicalPath) ?? undefined;
 }
 
 describe("executePlan", () => {
@@ -33,6 +36,7 @@ describe("executePlan", () => {
   let deps: ExecutorDeps;
 
   beforeEach(() => {
+    patchDeviceSettings({ deviceId: "test" });
     fs = new MemoryFileSystem();
     remote = new MemoryRemoteStorage();
     store = new MemoryStateStore();
@@ -94,18 +98,18 @@ describe("executePlan", () => {
     const result = await executePlan(plan, deps);
     expect(result.succeeded).toHaveLength(1);
 
-    // conflict 파일 생성됨
-    const conflictPath = fs.findByPrefix("test.conflict-");
+    // conflict 파일에 로컬 버전, canonical은 원격 유지 (R2)
+    const conflictPath = await findConflictSibling(fs, "test.md");
     expect(conflictPath).toBeDefined();
     const conflictData = await fs.read(conflictPath!);
-    expect(conflictData).toEqual(remoteData);
+    expect(conflictData).toEqual(localData);
 
-    // 원본 로컬 파일 유지
-    expect(await fs.read("test.md")).toEqual(localData);
+    expect(await fs.read("test.md")).toEqual(remoteData);
 
-    // 원격은 로컬 버전으로 업데이트됨
     const remoteDl = await remote.download("test.md");
-    expect(remoteDl.data).toEqual(localData);
+    expect(remoteDl.data).toEqual(remoteData);
+    const conflictRemote = await remote.download(conflictPath!);
+    expect(conflictRemote.data).toEqual(localData);
   });
 
   test("upload: rev 충돌 + remote not_found → stale rev 버리고 fresh upload", async () => {
@@ -133,6 +137,9 @@ describe("executePlan", () => {
       downloadCallCount++;
       throw new Error(`Dropbox API error 409: path/not_found`);
     };
+
+    // Remote gone — add-mode retry should succeed (G29).
+    await remote.delete("test.md");
 
     const plan = mkPlan({
       pathLower: "test.md",
@@ -370,7 +377,12 @@ describe("executePlan", () => {
       });
     }
     // Remote edited after plan-time base — must not be wiped by folder delete.
-    await remote.upload("notes/c.md", new TextEncoder().encode("edited-on-ipad"));
+    const cBase = await store.getEntry("notes/c.md");
+    await remote.upload(
+      "notes/c.md",
+      new TextEncoder().encode("edited-on-ipad"),
+      cBase!.rev!,
+    );
 
     const plan = mkPlan(
       ...paths.map((path) => ({
@@ -441,17 +453,17 @@ describe("executePlan", () => {
     const result = await executePlan(plan, deps);
     expect(result.succeeded).toHaveLength(1);
 
-    // 로컬 원본 유지
-    expect(await fs.read("test.md")).toEqual(localData);
+    // canonical은 원격, conflict sibling은 로컬 (R2)
+    expect(await fs.read("test.md")).toEqual(remoteData);
 
-    // 원격 버전 conflict 파일로 보존
-    const conflictPath = fs.findByPrefix("test.conflict-");
+    const conflictPath = await findConflictSibling(fs, "test.md");
     expect(conflictPath).toBeDefined();
-    expect(await fs.read(conflictPath!)).toEqual(remoteData);
+    expect(await fs.read(conflictPath!)).toEqual(localData);
 
-    // 원격은 로컬 버전으로 업데이트
     const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(localData);
+    expect(dl.data).toEqual(remoteData);
+    const conflictRemote = await remote.download(conflictPath!);
+    expect(conflictRemote.data).toEqual(localData);
 
     // state 갱신
     const entry = await store.getEntry("test.md");
@@ -515,16 +527,28 @@ describe("executePlan", () => {
 
   // ── noop ──
 
-  test("noop: 아무것도 하지 않음", async () => {
+  test("recordBase: sync base refreshed without transfer", async () => {
+    await fs.write("test.md", new TextEncoder().encode("same"));
+    await remote.upload("test.md", new TextEncoder().encode("same"));
+
     const plan = mkPlan({
       pathLower: "test.md",
       localPath: "test.md",
-      action: { type: "noop", reason: "same_content" },
+      action: {
+        type: "recordBase",
+        reason: "same_content",
+        localHash: "abc",
+        remoteHash: "abc",
+        rev: "rev_1",
+        pathDisplay: "test.md",
+      },
     });
 
     const result = await executePlan(plan, deps);
     expect(result.succeeded).toHaveLength(1);
-    expect(store.getEntryCount()).toBe(0);
+    expect(store.getEntryCount()).toBe(1);
+    const entry = await store.getEntry("test.md");
+    expect(entry?.basePathDisplay).toBe("test.md");
   });
 
   // ── 빈 플랜 ──
@@ -591,7 +615,7 @@ describe("executePlan", () => {
       isFileActive: (path) => path === "editing.md",
     });
     expect(result.deferred).toHaveLength(1);
-    expect(fs.has("editing.conflict.md")).toBe(false);
+    expect(await findConflictSibling(fs, "editing.md")).toBeUndefined();
   });
 
   test("upload: 활성 파일이어도 정상 업로드", async () => {
@@ -723,77 +747,9 @@ describe("executePlan", () => {
     expect(result.failed).toHaveLength(1);
   });
 
-  // ── conflict: newest 전략 ──
-
-  test("conflict newest: 로컬이 더 최신 → 로컬 유지", async () => {
-    const localData = new TextEncoder().encode("local version");
-    const remoteData = new TextEncoder().encode("remote version");
-
-    // 로컬 파일 (mtime 더 큼)
-    await fs.write("test.md", localData, 2000);
-    // 원격 파일 (serverModified 더 작음)
-    await remote.upload("test.md", remoteData);
-    // MemoryRemoteStorage의 serverModified는 Date.now()로 설정되지만,
-    // 우리가 테스트하려면 시간 차이가 필요함. 로컬 mtime이 미래값이면 됨.
-    await fs.write("test.md", localData, Date.now() + 10000);
-
-    const plan = mkPlan({
-      pathLower: "test.md",
-      localPath: "test.md",
-      action: {
-        type: "conflict",
-        localHash: await dropboxContentHash(localData),
-        remoteHash: await dropboxContentHash(remoteData),
-      },
-    });
-
-    const result = await executePlan(plan, deps, {
-      conflictStrategy: "newest",
-    });
-    expect(result.succeeded).toHaveLength(1);
-
-    // conflict 파일 없어야 함 (newest는 하나만 남김)
-    expect(fs.has("test.conflict.md")).toBe(false);
-    // 로컬 유지
-    expect(await fs.read("test.md")).toEqual(localData);
-    // 원격도 로컬 버전으로
-    const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(localData);
-  });
-
-  test("conflict newest: 원격이 더 최신 → 원격 버전으로 덮어쓰기", async () => {
-    const localData = new TextEncoder().encode("local version");
-    const remoteData = new TextEncoder().encode("remote version");
-
-    // 로컬 파일 (mtime 과거)
-    await fs.write("test.md", localData, 100);
-    // 원격 파일 (serverModified 더 큼 - Date.now())
-    await remote.upload("test.md", remoteData);
-
-    const plan = mkPlan({
-      pathLower: "test.md",
-      localPath: "test.md",
-      action: {
-        type: "conflict",
-        localHash: await dropboxContentHash(localData),
-        remoteHash: await dropboxContentHash(remoteData),
-      },
-    });
-
-    const result = await executePlan(plan, deps, {
-      conflictStrategy: "newest",
-    });
-    expect(result.succeeded).toHaveLength(1);
-
-    // 로컬이 원격 버전으로 덮어씌워짐
-    expect(await fs.read("test.md")).toEqual(remoteData);
-    // conflict 파일 없음
-    expect(fs.has("test.conflict.md")).toBe(false);
-  });
-
   // ── conflict: manual 전략 ──
 
-  test("conflict manual: 사용자가 local 선택", async () => {
+  test("conflict manual: 사용자가 local 선택 → remote canonical + local conflict copy", async () => {
     const localData = new TextEncoder().encode("local version");
     const remoteData = new TextEncoder().encode("remote version");
 
@@ -816,16 +772,15 @@ describe("executePlan", () => {
     });
     expect(result.succeeded).toHaveLength(1);
 
-    // 로컬 유지
-    expect(await fs.read("test.md")).toEqual(localData);
-    // 원격도 로컬 버전
+    expect(await fs.read("test.md")).toEqual(remoteData);
+    const conflictPath = await findConflictSibling(fs, "test.md");
+    expect(conflictPath).toBeDefined();
+    expect(await fs.read(conflictPath!)).toEqual(localData);
     const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(localData);
-    // conflict 파일 없음
-    expect(fs.has("test.conflict.md")).toBe(false);
+    expect(dl.data).toEqual(remoteData);
   });
 
-  test("conflict manual: 사용자가 remote 선택", async () => {
+  test("conflict manual: 사용자가 remote 선택 → remote canonical + local conflict copy", async () => {
     const localData = new TextEncoder().encode("local version");
     const remoteData = new TextEncoder().encode("remote version");
 
@@ -848,10 +803,10 @@ describe("executePlan", () => {
     });
     expect(result.succeeded).toHaveLength(1);
 
-    // 로컬이 원격 버전으로 덮어씌워짐
     expect(await fs.read("test.md")).toEqual(remoteData);
-    // conflict 파일 없음
-    expect(fs.has("test.conflict.md")).toBe(false);
+    const conflictPath = await findConflictSibling(fs, "test.md");
+    expect(conflictPath).toBeDefined();
+    expect(await fs.read(conflictPath!)).toEqual(localData);
   });
 
   test("conflict manual: resolver 없으면 keep_both fallback", async () => {
@@ -878,12 +833,10 @@ describe("executePlan", () => {
     expect(result.succeeded).toHaveLength(1);
 
     // keep_both fallback → conflict 파일 생성
-    expect(fs.findByPrefix("test.conflict-")).toBeDefined();
+    expect(await findConflictSibling(fs, "test.md")).toBeDefined();
   });
 
-  // ── A1: upload rev 충돌 → strategy별 분기 ──
-
-  test("upload rev 충돌 + newest: 로컬이 최신이면 로컬 유지", async () => {
+  test("upload rev 충돌 + keep_both: remote canonical + local conflict copy", async () => {
     const remoteData = new TextEncoder().encode("remote version");
     await remote.upload("test.md", remoteData);
 
@@ -906,42 +859,15 @@ describe("executePlan", () => {
     });
 
     const result = await executePlan(plan, deps, {
-      conflictStrategy: "newest",
-    });
-    expect(result.succeeded).toHaveLength(1);
-    expect(fs.findByPrefix("test.conflict-")).toBeUndefined();
-    const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(localData);
-  });
-
-  test("upload rev 충돌 + newest: 원격이 최신이면 원격으로 덮어쓰기", async () => {
-    const remoteData = new TextEncoder().encode("remote version");
-    await remote.upload("test.md", remoteData);
-
-    const localData = new TextEncoder().encode("local version");
-    await fs.write("test.md", localData, 100);
-
-    await store.setEntry({
-      pathLower: "test.md",
-      localPath: "test.md",
-      baseLocalHash: "old",
-      baseRemoteHash: "old",
-      rev: "wrong_rev",
-      lastSynced: 1000,
-    });
-
-    const plan = mkPlan({
-      pathLower: "test.md",
-      localPath: "test.md",
-      action: { type: "upload", reason: "local_modified" },
-    });
-
-    const result = await executePlan(plan, deps, {
-      conflictStrategy: "newest",
+      conflictStrategy: "keep_both",
     });
     expect(result.succeeded).toHaveLength(1);
     expect(await fs.read("test.md")).toEqual(remoteData);
-    expect(fs.findByPrefix("test.conflict-")).toBeUndefined();
+    const conflictPath = await findConflictSibling(fs, "test.md");
+    expect(conflictPath).toBeDefined();
+    expect(await fs.read(conflictPath!)).toEqual(localData);
+    const dl = await remote.download("test.md");
+    expect(dl.data).toEqual(remoteData);
   });
 
   test("upload rev 충돌 + manual: resolver로 위임 (remote 선택)", async () => {
@@ -972,9 +898,12 @@ describe("executePlan", () => {
     });
     expect(result.succeeded).toHaveLength(1);
     expect(await fs.read("test.md")).toEqual(remoteData);
+    const conflictPath = await findConflictSibling(fs, "test.md");
+    expect(conflictPath).toBeDefined();
+    expect(await fs.read(conflictPath!)).toEqual(localData);
   });
 
-  test("upload rev 충돌 + manual: merged 결과 적용", async () => {
+  test("upload rev 충돌 + manual: merged 결과를 conflict copy로", async () => {
     const remoteData = new TextEncoder().encode("remote version");
     await remote.upload("test.md", remoteData);
 
@@ -1002,49 +931,15 @@ describe("executePlan", () => {
       conflictResolver: async () => ({ type: "merged", content: merged }),
     });
     expect(result.succeeded).toHaveLength(1);
-    expect(await fs.read("test.md")).toEqual(merged);
+    expect(await fs.read("test.md")).toEqual(remoteData);
+    const conflictPath = await findConflictSibling(fs, "test.md");
+    expect(conflictPath).toBeDefined();
+    expect(await fs.read(conflictPath!)).toEqual(merged);
     const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(merged);
+    expect(dl.data).toEqual(remoteData);
   });
 
-  // ── A2: stat() 호출 검증 ──
-
-  test("conflict newest: stat()으로 mtime 조회 (list() 미호출)", async () => {
-    const localData = new TextEncoder().encode("local");
-    const remoteData = new TextEncoder().encode("remote");
-    await fs.write("test.md", localData, Date.now() + 10000);
-    await remote.upload("test.md", remoteData);
-
-    let statCalled = false;
-    const origStat = fs.stat.bind(fs);
-    fs.stat = async (path: string) => {
-      statCalled = true;
-      return origStat(path);
-    };
-
-    let listCalled = false;
-    const origList = fs.list.bind(fs);
-    fs.list = async () => {
-      listCalled = true;
-      return origList();
-    };
-
-    const plan = mkPlan({
-      pathLower: "test.md",
-      localPath: "test.md",
-      action: {
-        type: "conflict",
-        localHash: await dropboxContentHash(localData),
-        remoteHash: await dropboxContentHash(remoteData),
-      },
-    });
-
-    await executePlan(plan, deps, { conflictStrategy: "newest" });
-    expect(statCalled).toBe(true);
-    expect(listCalled).toBe(false);
-  });
-
-  test("conflict manual: 사용자 취소(null) → skip (다음 싱크에서 재감지)", async () => {
+  test("conflict manual: 사용자 취소(null) → keep_both fallback", async () => {
     const localData = new TextEncoder().encode("local version");
     const remoteData = new TextEncoder().encode("remote version");
 
@@ -1065,13 +960,74 @@ describe("executePlan", () => {
       conflictStrategy: "manual",
       conflictResolver: async () => null,
     });
-    expect(result.succeeded).toHaveLength(0);
-    expect(result.deferred).toHaveLength(1);
+    expect(result.succeeded).toHaveLength(1);
+    expect(result.deferred).toHaveLength(0);
 
-    // skip → conflict 파일 생성 안 됨, 상태 미갱신, cursor 전진 안 됨
-    expect(fs.findByPrefix("test.conflict-")).toBeUndefined();
-    // 로컬 파일 그대로
-    expect(await fs.read("test.md")).toEqual(localData);
+    expect(await findConflictSibling(fs, "test.md")).toBeDefined();
+    expect(await fs.read("test.md")).toEqual(remoteData);
+  });
+
+  test("recordBase + download in one plan both execute", async () => {
+    await remote.upload("b.md", new TextEncoder().encode("B"));
+    await fs.write("a.md", new TextEncoder().encode("A"));
+
+    const hashA = await dropboxContentHash(new TextEncoder().encode("A"));
+    const hashB = await dropboxContentHash(new TextEncoder().encode("B"));
+
+    const plan: SyncPlan = {
+      items: [
+        {
+          pathLower: "a.md",
+          localPath: "a.md",
+          action: {
+            type: "recordBase",
+            reason: "same_content",
+            localHash: hashA,
+            remoteHash: hashA,
+            rev: "rev_1",
+            pathDisplay: "a.md",
+          },
+        },
+        {
+          pathLower: "b.md",
+          localPath: "b.md",
+          action: { type: "download", reason: "new_remote" },
+        },
+      ],
+      stats: {
+        ...emptySyncPlanStats(),
+        download: 1,
+        recordBase: 1,
+      },
+    };
+
+    const result = await executePlan(plan, deps);
+    expect(result.succeeded.some((i) => i.localPath === "b.md")).toBe(true);
+    expect(fs.has("b.md")).toBe(true);
+  });
+
+  test("conflict: reuses existing device conflict copy on repeat clash", async () => {
+    const existingCopy = "test (Device test's conflicted copy 2026-07-26).md";
+    const localData = new TextEncoder().encode("local version");
+    const remoteData = new TextEncoder().encode("remote version");
+
+    await fs.write("test.md", localData);
+    await fs.write(existingCopy, new TextEncoder().encode("old copy"));
+    await remote.upload("test.md", remoteData);
+
+    const plan = mkPlan({
+      pathLower: "test.md",
+      localPath: "test.md",
+      action: {
+        type: "conflict",
+        localHash: await dropboxContentHash(localData),
+        remoteHash: await dropboxContentHash(remoteData),
+      },
+    });
+
+    await executePlan(plan, deps);
+    expect(await findConflictSibling(fs, "test.md")).toBe(existingCopy);
+    expect(await fs.read(existingCopy)).toEqual(localData);
   });
 });
 
@@ -1079,26 +1035,30 @@ describe("executePlan", () => {
 
 describe("makeConflictPath", () => {
   test("확장자가 있는 파일", () => {
-    expect(makeConflictPath("test.md")).toMatch(
-      /^test\.conflict-\d{4}-\d{2}-\d{2}T\d{4}\.md$/,
-    );
+    expect(makeConflictPath("test.md", [], {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T12:00:00Z"),
+    })).toBe("test (Device test's conflicted copy 2026-07-26).md");
   });
 
   test("경로가 있는 파일", () => {
-    expect(makeConflictPath("notes/doc.md")).toMatch(
-      /^notes\/doc\.conflict-\d{4}-\d{2}-\d{2}T\d{4}\.md$/,
-    );
+    expect(makeConflictPath("notes/doc.md", [], {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T12:00:00Z"),
+    })).toBe("notes/doc (Device test's conflicted copy 2026-07-26).md");
   });
 
   test("확장자 없는 파일", () => {
-    expect(makeConflictPath("README")).toMatch(
-      /^README\.conflict-\d{4}-\d{2}-\d{2}T\d{4}$/,
-    );
+    expect(makeConflictPath("README", [], {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T12:00:00Z"),
+    })).toBe("README (Device test's conflicted copy 2026-07-26)");
   });
 
   test("여러 점이 있는 파일", () => {
-    expect(makeConflictPath("my.file.name.md")).toMatch(
-      /^my\.file\.name\.conflict-\d{4}-\d{2}-\d{2}T\d{4}\.md$/,
-    );
+    expect(makeConflictPath("my.file.name.md", [], {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T12:00:00Z"),
+    })).toBe("my.file.name (Device test's conflicted copy 2026-07-26).md");
   });
 });

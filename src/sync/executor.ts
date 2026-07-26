@@ -11,21 +11,32 @@ import { assertValidSyncPath } from "./path-assert";
 import { runWithConcurrency } from "./concurrency";
 import {
   ConflictSkippedError,
-  downloadAndVerify,
   updateSyncState,
   dispatchConflict,
+  handleConflictKeepBoth,
+  resolveConflictCopyPath,
 } from "./conflict-handlers";
 import type { ConflictHandlerDeps } from "./conflict-handlers";
 import type { CycleContext } from "./cycle-context";
 import {
   hasNestedOtherFilesPath,
+  logRule,
+  shortHash,
   SyncHypotheses,
+  SyncLogCategories,
+  SyncRules,
   type SyncMonitorLog,
 } from "../debug/sync-monitor";
 import {
   coalesceDeleteRemote,
   type CoalesceDeleteRemoteResult,
 } from "./delete-coalesce";
+import { logTemp } from "../debug/temp-log";
+import type { DeferralTracker } from "./deferral-tracker";
+import { ACTIVE_FILE_DEFERRAL_MS } from "./deferral-tracker";
+import { moveRemotePath } from "./remote-move";
+import { buildPathNotice } from "./path-notices";
+import type { RemoteEntry } from "../types";
 
 export interface ExecutorDeps {
   fs: FileSystem;
@@ -36,8 +47,14 @@ export interface ExecutorDeps {
 export interface ExecutorConfig {
   conflictStrategy?: ConflictStrategy;
   conflictResolver?: ConflictResolver;
-  /** 파일이 현재 편집 중인지 확인. true면 download/conflict를 건너뛴다 */
+  /** Active file or dirty open tab — defer apply actions (G19/G10). */
+  shouldDeferApply?: (path: string) => boolean;
+  /** @deprecated Prefer shouldDeferApply. */
   isFileActive?: (path: string) => boolean;
+  /** G21: deleteLocal while open — true deletes here, false keeps editing (defer). */
+  confirmDeleteLocalWhileOpen?: (path: string) => Promise<boolean>;
+  reloadOpenFile?: (path: string) => Promise<void>;
+  deferralTracker?: DeferralTracker;
   /** 중단 시그널. aborted 시 나머지 항목 건너뛴다 */
   signal?: AbortSignal;
   /** 병렬 실행 동시성. 기본값 1 (순차) */
@@ -73,6 +90,8 @@ export interface ExecutorConfig {
     ok?: boolean,
     error?: string,
   ) => void;
+  /** G13: path-specific Notice when a surprising reason completes successfully. */
+  onPathNotice?: (message: string) => void;
 }
 
 /** Log items slower than this as stall candidates (permanent monitor). */
@@ -91,6 +110,94 @@ export class ItemTimeoutError extends Error {
 
 const DEFAULT_ITEM_TIMEOUT_MS = 90_000;
 
+const DEFERRABLE_APPLY_ACTIONS = new Set(["download", "conflict", "deleteLocal"]);
+
+function resolveShouldDeferApply(ctx: ExecutorContext): ((path: string) => boolean) | undefined {
+  return ctx.shouldDeferApply ?? ctx.isFileActive;
+}
+
+function shouldDeferProtectedItem(
+  item: SyncPlanItem,
+  ctx: ExecutorContext,
+  now = Date.now(),
+): boolean {
+  const shouldDeferApply = resolveShouldDeferApply(ctx);
+  if (!shouldDeferApply?.(item.localPath)) return false;
+  if (!DEFERRABLE_APPLY_ACTIONS.has(item.action.type)) return false;
+
+  const tracker = ctx.deferralTracker;
+  if (!tracker) {
+    return true;
+  }
+
+  if (tracker.boundExpired(item.localPath, now)) {
+    logTemp(ctx.log, "P4", "deferral bound expired — applying", {
+      path: item.localPath,
+      action: item.action.type,
+      elapsedMs: tracker.elapsedMs(item.localPath, now),
+      boundMs: ACTIVE_FILE_DEFERRAL_MS,
+    }, { location: "executor.shouldDeferProtectedItem" });
+    tracker.clear(item.localPath);
+    return false;
+  }
+
+  tracker.markDeferred(item.localPath, now);
+  return true;
+}
+
+async function partitionPlanItems(
+  plan: SyncPlan,
+  ctx: ExecutorContext,
+): Promise<{
+  executable: SyncPlanItem[];
+  conflicts: SyncPlanItem[];
+  deferred: SyncPlanItem[];
+}> {
+  const deferred: SyncPlanItem[] = [];
+  const executable: SyncPlanItem[] = [];
+  const conflicts: SyncPlanItem[] = [];
+
+  for (const item of plan.items) {
+    const actionType = item.action.type;
+
+    if (actionType === "deleteLocal" && resolveShouldDeferApply(ctx)?.(item.localPath)) {
+      if (ctx.confirmDeleteLocalWhileOpen) {
+        const deleteHere = await ctx.confirmDeleteLocalWhileOpen(item.localPath);
+        if (!deleteHere) {
+          if (shouldDeferProtectedItem(item, ctx)) {
+            logRule(ctx.log, SyncRules.R12, "deferring deleteLocal — keep editing", {
+              path: item.localPath,
+              action: actionType,
+              bounded: true,
+            }, { level: "info", location: "executor.partitionPlanItems" });
+            deferred.push(item);
+          } else {
+            executable.push(item);
+          }
+          continue;
+        }
+        executable.push(item);
+        continue;
+      }
+    }
+
+    if (shouldDeferProtectedItem(item, ctx)) {
+      logRule(ctx.log, SyncRules.R12, "deferring — file is open or dirty in editor", {
+        path: item.localPath,
+        action: actionType,
+        bounded: !!ctx.deferralTracker,
+      }, { level: "info", location: "executor.partitionPlanItems" });
+      deferred.push(item);
+    } else if (actionType === "conflict" && ctx.conflictStrategy === "manual") {
+      conflicts.push(item);
+    } else {
+      executable.push(item);
+    }
+  }
+
+  return { executable, conflicts, deferred };
+}
+
 /**
  * SyncPlan의 각 항목을 실행한다.
  *
@@ -105,24 +212,8 @@ export async function executePlan(
   config: ExecutorConfig = {},
 ): Promise<SyncResult> {
   const ctx: ExecutorContext = { ...deps, ...config };
-  const deferred: SyncPlanItem[] = [];
-
-  // 활성 파일 보호 + conflict 분리
-  const executable: SyncPlanItem[] = [];
-  const conflicts: SyncPlanItem[] = [];
-  for (const item of plan.items) {
-    const t = item.action.type;
-    if (
-      (t === "download" || t === "conflict" || t === "deleteLocal") &&
-      ctx.isFileActive?.(item.localPath)
-    ) {
-      deferred.push(item);
-    } else if (t === "conflict" && ctx.conflictStrategy === "manual") {
-      conflicts.push(item);
-    } else {
-      executable.push(item);
-    }
-  }
+  const { executable, conflicts, deferred: initiallyDeferred } = await partitionPlanItems(plan, ctx);
+  const deferred: SyncPlanItem[] = [...initiallyDeferred];
 
   // Peel deleteRemote into a dedicated batch/coalesce pass (no per-item soft timeout).
   const deleteRemoteItems: SyncPlanItem[] = [];
@@ -259,9 +350,22 @@ export async function executePlan(
       succeeded.push(item);
     } catch (e) {
       if (e instanceof ConflictSkippedError) {
-        ctx.onExecItem?.(item.localPath, actionType, "end", true);
-        ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
-        deferred.push(item);
+        if (shouldDeferProtectedItem(item, ctx)) {
+          ctx.onExecItem?.(item.localPath, actionType, "end", true);
+          ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
+          deferred.push(item);
+        } else {
+          logTemp(ctx.log, "P4", "manual conflict skip bound expired — applying keep_both", {
+            path: item.localPath,
+          }, { location: "executor.executePlan" });
+          const conflictResult = await handleConflictKeepBoth(item, ctx);
+          if (conflictResult.conflictSiblingPath) {
+            item.conflictSiblingPath = conflictResult.conflictSiblingPath;
+          }
+          ctx.onExecItem?.(item.localPath, actionType, "end", true);
+          ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
+          succeeded.push(item);
+        }
       } else {
         const errMsg = (e as Error).message;
         ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
@@ -329,7 +433,9 @@ async function verifyCoalescedFolderDeletes(
       continue;
     }
 
-    const hashByPath = new Map(live.map((f) => [f.pathLower, f.contentHash]));
+    const hashByPath = new Map(
+      live.filter((f) => !f.isFolder).map((f) => [f.pathLower, f.contentHash]),
+    );
     const mismatched: SyncPlanItem[] = [];
     const matched: SyncPlanItem[] = [];
     for (const item of covered) {
@@ -370,6 +476,107 @@ async function verifyCoalescedFolderDeletes(
     remainingFileItems,
     downloadItems,
   };
+}
+
+/**
+ * Live-verify a single deleteRemote before mutating Dropbox (G24).
+ * When remote content changed since planning, prefer download over delete (R5/R10).
+ */
+async function verifyIndividualDeleteRemote(
+  item: SyncPlanItem,
+  remote: RemoteStorage,
+  store: SyncStateStore,
+  log?: SyncMonitorLog,
+): Promise<"proceed" | "reclassified-download"> {
+  const base = await store.getEntry(item.pathLower);
+  try {
+    const live = await remote.download(item.localPath);
+    const liveHash = live.metadata.hash ?? "";
+    if (base?.baseRemoteHash && liveHash && liveHash !== base.baseRemoteHash) {
+      logTemp(log, "P1", "deleteRemote live check — remote modified, reclassifying to download", {
+        path: item.localPath,
+        baseHash: shortHash(base.baseRemoteHash),
+        liveHash: shortHash(liveHash),
+      }, { location: "executor.verifyIndividualDeleteRemote" });
+      item.action = {
+        type: "download",
+        reason: "remote_modified_local_deleted",
+      };
+      return "reclassified-download";
+    }
+  } catch (err) {
+    if (!isDropboxPathNotFoundError(err)) {
+      throw err;
+    }
+    logTemp(log, "P1", "deleteRemote live check — remote absent, proceeding", {
+      path: item.localPath,
+    }, { location: "executor.verifyIndividualDeleteRemote" });
+  }
+  return "proceed";
+}
+
+async function executeDownloadItem(
+  item: SyncPlanItem,
+  deps: ExecutorContext,
+): Promise<void> {
+  const { fs, remote, store } = deps;
+  const { pathLower, localPath } = item;
+
+  assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
+
+  logIntent(deps, "download", { path: localPath });
+  // G17: write to disk immediately; verify hash from disk so the buffer can GC.
+  const { data, metadata } = await remote.download(localPath);
+  const mtime = resolveWriteMtime(metadata);
+  logTemp(deps.log, "P6", "download write-before-verify", {
+    path: localPath,
+    bytes: data.length,
+    clientModified: metadata.clientModified ?? null,
+    serverModified: metadata.serverModified,
+  }, { location: "executor.executeDownloadItem" });
+  await fs.write(localPath, data, mtime);
+  const verifiedHash = await fs.computeHash(localPath);
+  if (metadata.hash && verifiedHash !== metadata.hash) {
+    throw new Error(
+      `Hash mismatch after download: expected ${metadata.hash}, got ${verifiedHash}`,
+    );
+  }
+  await updateSyncState(
+    store,
+    pathLower,
+    localPath,
+    verifiedHash,
+    verifiedHash,
+    metadata.rev,
+    metadata.pathDisplay,
+  );
+  logOutcome(deps, "download", {
+    path: localPath,
+    bytes: data.length,
+    verifiedHash: shortHash(verifiedHash),
+    rev: metadata.rev,
+    baseWritten: true,
+  });
+  emitPathNotice(deps, item, { remotePathDisplay: metadata.pathDisplay });
+  if (deps.reloadOpenFile) {
+    await deps.reloadOpenFile(localPath);
+  }
+}
+
+function resolveWriteMtime(metadata: RemoteEntry): number | undefined {
+  const mtime = metadata.clientModified ?? metadata.serverModified;
+  return mtime > 0 ? mtime : undefined;
+}
+
+function emitPathNotice(
+  deps: ExecutorContext,
+  item: SyncPlanItem,
+  context?: { remotePathDisplay?: string },
+): void {
+  const message = buildPathNotice(item, context);
+  if (message) {
+    deps.onPathNotice?.(message);
+  }
 }
 
 /**
@@ -471,6 +678,7 @@ async function executeDeleteRemoteBatch(
     deleteRemoteItems,
     existingRemotePathLowers: ctx.existingRemotePathLowers ?? [],
     blockingPathLowers,
+    log: ctx.log,
   });
 
   const verified = await verifyCoalescedFolderDeletes(
@@ -744,6 +952,34 @@ function isDropboxPathNotFoundError(err: unknown): boolean {
   return msg.includes("not_found");
 }
 
+/**
+ * Log the intent of a mutation before it is attempted. Paired with logOutcome
+ * so a truncated log still shows what was in flight when things stopped.
+ */
+function logIntent(
+  deps: ExecutorContext,
+  action: string,
+  data: Record<string, unknown>,
+): void {
+  deps.log?.(`${action} intent`, data, {
+    category: SyncLogCategories.transfer,
+    level: "debug",
+    location: `executor.${action}`,
+  });
+}
+
+function logOutcome(
+  deps: ExecutorContext,
+  action: string,
+  data: Record<string, unknown>,
+): void {
+  deps.log?.(`${action} done`, data, {
+    category: SyncLogCategories.transfer,
+    level: "debug",
+    location: `executor.${action}`,
+  });
+}
+
 async function executeItem(
   item: SyncPlanItem,
   deps: ExecutorContext,
@@ -758,26 +994,53 @@ async function executeItem(
 
       const data = await fs.read(localPath);
       const localHash = await dropboxContentHashBrowser(data);
+      const { mtime: clientModified } = await fs.stat(localPath);
 
       const base = await store.getEntry(pathLower);
       const rev = base?.rev ?? undefined;
 
+      // Whether a rev accompanies the upload is the difference between optimistic
+      // locking and a blind overwrite (G29), so it is recorded on every upload.
+      logIntent(deps, "upload", {
+        path: localPath,
+        bytes: data.length,
+        localHash: shortHash(localHash),
+        rev: rev ?? null,
+        mode: rev ? "update(rev)" : "add",
+        hasBase: !!base,
+        clientModified,
+      });
+
       let entry;
       try {
-        entry = await remote.upload(localPath, data, rev);
+        entry = await remote.upload(localPath, data, rev, clientModified);
       } catch (err) {
         if (err instanceof RevConflictError) {
+          logTemp(deps.log, "P2", "upload conflict — dispatching resolution", {
+            path: localPath,
+            hadRev: !!rev,
+          }, { location: "executor.upload" });
           try {
             const conflictResult = await dispatchConflict(item, conflictCtx);
             if (conflictResult.conflictSiblingPath) {
               item.conflictSiblingPath = conflictResult.conflictSiblingPath;
             }
           } catch (conflictErr) {
-            // Remote file was deleted — stale rev is useless.
-            // Upload fresh (no rev) to recover from the loop.
+            // Remote file was deleted — stale rev is useless; add-mode should succeed.
             if (conflictErr instanceof Error && conflictErr.message.includes("not_found")) {
-              entry = await remote.upload(localPath, data);
+              logTemp(deps.log, "P1", "rev conflict + remote deleted — add-mode retry", {
+                path: localPath,
+              }, { location: "executor.upload" });
+              logIntent(deps, "upload", {
+                path: localPath,
+                bytes: data.length,
+                mode: "add",
+                reason: "rev_conflict_then_remote_deleted",
+              });
+              entry = await remote.upload(localPath, data, undefined, clientModified);
               await updateSyncState(store, pathLower, localPath, localHash, entry.hash ?? localHash, entry.rev);
+              logOutcome(deps, "upload", { path: localPath, rev: entry.rev, baseWritten: true });
+              emitPathNotice(deps, item);
               return;
             }
             throw new Error(
@@ -790,26 +1053,37 @@ async function executeItem(
       }
 
       await updateSyncState(store, pathLower, localPath, localHash, entry.hash ?? localHash, entry.rev);
+      logOutcome(deps, "upload", {
+        path: localPath,
+        rev: entry.rev,
+        remoteHash: shortHash(entry.hash),
+        baseWritten: true,
+      });
+      emitPathNotice(deps, item);
       break;
     }
 
     case "download": {
-      assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
-
-      const result = await downloadAndVerify(remote, localPath);
-      await fs.write(localPath, result.data, result.metadata.serverModified);
-      await updateSyncState(store, pathLower, localPath, result.verifiedHash, result.verifiedHash, result.metadata.rev);
+      await executeDownloadItem(item, deps);
       break;
     }
 
     case "deleteLocal": {
+      logIntent(deps, "deleteLocal", { path: localPath });
       deps.onBeforeDeleteLocal?.(pathLower);
       await fs.delete(localPath);
       await store.deleteEntry(pathLower);
+      logOutcome(deps, "deleteLocal", { path: localPath, baseRemoved: true });
       break;
     }
 
     case "deleteRemote": {
+      logIntent(deps, "deleteRemote", { path: localPath, coalesced: false });
+      const verify = await verifyIndividualDeleteRemote(item, remote, store, deps.log);
+      if (verify === "reclassified-download") {
+        await executeDownloadItem(item, deps);
+        break;
+      }
       try {
         await remote.delete(localPath);
       } catch (err) {
@@ -834,6 +1108,7 @@ async function executeItem(
         // #endregion
       }
       await store.deleteEntry(pathLower);
+      logOutcome(deps, "deleteRemote", { path: localPath, baseRemoved: true });
       break;
     }
 
@@ -842,13 +1117,251 @@ async function executeItem(
       if (conflictResult.conflictSiblingPath) {
         item.conflictSiblingPath = conflictResult.conflictSiblingPath;
       }
+      emitPathNotice(deps, item);
+      if (deps.reloadOpenFile) {
+        await deps.reloadOpenFile(localPath);
+      }
       break;
     }
+
+    case "preserveAsConflictCopy": {
+      assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
+      const data = await fs.read(localPath);
+      const localHash = await dropboxContentHashBrowser(data);
+      const { mtime: clientModified } = await fs.stat(localPath);
+      const conflictPath = await resolveConflictCopyPath(fs, localPath, deps.log);
+      const conflictPathLower = conflictPath.toLowerCase();
+
+      logRule(deps.log, SyncRules.R10, "preserving local bytes as conflict copy — path stays deleted", {
+        path: localPath,
+        conflictCopyPath: conflictPath,
+        localHash: shortHash(localHash),
+      }, { level: "info", location: "executor.preserveAsConflictCopy" });
+
+      await fs.rename(localPath, conflictPath);
+      logIntent(deps, "upload", {
+        path: conflictPath,
+        bytes: data.length,
+        localHash: shortHash(localHash),
+        mode: "add",
+        reason: action.reason,
+      });
+      const entry = await remote.upload(conflictPath, data, undefined, clientModified);
+      await updateSyncState(
+        store,
+        conflictPathLower,
+        conflictPath,
+        localHash,
+        entry.hash ?? localHash,
+        entry.rev,
+        entry.pathDisplay,
+      );
+      item.conflictSiblingPath = conflictPath;
+      logTemp(deps.log, "P2", "R10 conflict copy uploaded; canonical path not restored", {
+        originalPath: localPath,
+        conflictCopyPath: conflictPath,
+        rev: entry.rev,
+      }, { location: "executor.preserveAsConflictCopy" });
+      logOutcome(deps, "upload", {
+        path: conflictPath,
+        rev: entry.rev,
+        baseWritten: true,
+      });
+      emitPathNotice(deps, item);
+      break;
+    }
+
+    case "recordBase": {
+      await updateSyncState(
+        store,
+        pathLower,
+        localPath,
+        action.localHash,
+        action.remoteHash,
+        action.rev,
+        action.pathDisplay,
+      );
+      logTemp(deps.log, "P3", "recordBase — refreshed sync base without transfer", {
+        path: localPath,
+        hash: shortHash(action.localHash),
+        pathDisplay: action.pathDisplay,
+      }, { location: "executor.recordBase" });
+      logOutcome(deps, "recordBase", {
+        path: localPath,
+        baseWritten: true,
+      });
+      emitPathNotice(deps, item, { remotePathDisplay: action.pathDisplay });
+      break;
+    }
+
+    case "moveLocal": {
+      logIntent(deps, "moveLocal", {
+        from: action.fromPath,
+        to: action.toPath,
+        reason: action.reason,
+      });
+      await fs.rename(action.fromPath, action.toPath);
+      await relocateSyncEntry(store, action.fromPath, action.toPath, { pathDisplay: action.toPath });
+      logTemp(deps.log, "P5", "moveLocal completed", {
+        from: action.fromPath,
+        to: action.toPath,
+        reason: action.reason,
+      }, { location: "executor.moveLocal" });
+      logOutcome(deps, "moveLocal", { from: action.fromPath, to: action.toPath });
+      emitPathNotice(deps, item, { remotePathDisplay: action.toPath });
+      break;
+    }
+
+    case "moveRemote": {
+      logIntent(deps, "moveRemote", {
+        from: action.fromPath,
+        to: action.toPath,
+        reason: action.reason,
+      });
+      const moved = await moveRemotePath(remote, action.fromPath, action.toPath);
+      await relocateSyncEntry(store, action.fromPath, action.toPath, {
+        pathDisplay: moved.pathDisplay,
+        remoteHash: moved.hash ?? undefined,
+        rev: moved.rev,
+      });
+      logTemp(deps.log, "P5", "moveRemote completed", {
+        from: action.fromPath,
+        to: action.toPath,
+        reason: action.reason,
+        pathDisplay: moved.pathDisplay,
+      }, { location: "executor.moveRemote" });
+      logOutcome(deps, "moveRemote", { from: action.fromPath, to: action.toPath, rev: moved.rev });
+      emitPathNotice(deps, item, { remotePathDisplay: moved.pathDisplay });
+      break;
+    }
+
+    case "createLocalFolder": {
+      logIntent(deps, "createLocalFolder", { path: localPath });
+      await fs.createFolder(localPath);
+      await updateFolderSyncState(store, pathLower, localPath);
+      logTemp(deps.log, "P5", "createLocalFolder completed", { path: localPath }, { location: "executor.createLocalFolder" });
+      logOutcome(deps, "createLocalFolder", { path: localPath });
+      break;
+    }
+
+    case "createRemoteFolder": {
+      logIntent(deps, "createRemoteFolder", { path: localPath });
+      const created = await remote.createFolder(localPath);
+      await updateFolderSyncState(store, pathLower, localPath, created.pathDisplay);
+      logTemp(deps.log, "P5", "createRemoteFolder completed", { path: localPath }, { location: "executor.createRemoteFolder" });
+      logOutcome(deps, "createRemoteFolder", { path: localPath });
+      break;
+    }
+
+    case "deleteLocalFolder": {
+      logIntent(deps, "deleteLocalFolder", { path: localPath });
+      await fs.deleteFolder(localPath);
+      await store.deleteEntry(pathLower);
+      logOutcome(deps, "deleteLocalFolder", { path: localPath });
+      break;
+    }
+
+    case "deleteRemoteFolder": {
+      logIntent(deps, "deleteRemoteFolder", { path: localPath });
+      await remote.delete(localPath);
+      await store.deleteEntry(pathLower);
+      logOutcome(deps, "deleteRemoteFolder", { path: localPath });
+      break;
+    }
+
+    case "moveLocalFolder": {
+      await fs.rename(action.fromPath, action.toPath);
+      await relocateFolderSyncEntry(store, action.fromPath, action.toPath);
+      logTemp(deps.log, "P5", "moveLocalFolder completed", {
+        from: action.fromPath,
+        to: action.toPath,
+      }, { location: "executor.moveLocalFolder" });
+      break;
+    }
+
+    case "moveRemoteFolder": {
+      const moved = await moveRemotePath(remote, action.fromPath, action.toPath);
+      await relocateFolderSyncEntry(store, action.fromPath, action.toPath, moved.pathDisplay);
+      logTemp(deps.log, "P5", "moveRemoteFolder completed", {
+        from: action.fromPath,
+        to: action.toPath,
+      }, { location: "executor.moveRemoteFolder" });
+      break;
+    }
+
+    case "pathCollision":
+      logTemp(deps.log, "P5", "pathCollision skipped at execute", {
+        path: localPath,
+        reason: action.reason,
+      }, { location: "executor.pathCollision" });
+      break;
 
     case "noop":
       break;
   }
 }
 
+async function relocateSyncEntry(
+  store: SyncStateStore,
+  fromPath: string,
+  toPath: string,
+  remote?: { pathDisplay?: string; remoteHash?: string; rev?: string },
+): Promise<void> {
+  const fromLower = fromPath.toLowerCase();
+  const toLower = toPath.toLowerCase();
+  const existing = await store.getEntry(fromLower) ?? await store.getEntry(toLower);
+  const entry = {
+    pathLower: toLower,
+    localPath: toPath,
+    basePathDisplay: remote?.pathDisplay ?? toPath,
+    baseLocalHash: existing?.baseLocalHash ?? null,
+    baseRemoteHash: remote?.remoteHash ?? existing?.baseRemoteHash ?? null,
+    rev: remote?.rev ?? existing?.rev ?? null,
+    lastSynced: Date.now(),
+    entryKind: existing?.entryKind,
+  };
+  await store.setEntry(entry);
+  if (fromLower !== toLower) {
+    await store.deleteEntry(fromLower);
+  }
+}
+
+async function updateFolderSyncState(
+  store: SyncStateStore,
+  pathLower: string,
+  localPath: string,
+  pathDisplay?: string,
+): Promise<void> {
+  await store.setEntry({
+    pathLower,
+    localPath,
+    basePathDisplay: pathDisplay ?? localPath,
+    baseLocalHash: null,
+    baseRemoteHash: null,
+    rev: null,
+    lastSynced: Date.now(),
+    entryKind: "folder",
+  });
+}
+
+async function relocateFolderSyncEntry(
+  store: SyncStateStore,
+  fromPath: string,
+  toPath: string,
+  pathDisplay?: string,
+): Promise<void> {
+  const fromLower = fromPath.toLowerCase();
+  const toLower = toPath.toLowerCase();
+  await updateFolderSyncState(store, toLower, toPath, pathDisplay ?? toPath);
+  if (fromLower !== toLower) {
+    await store.deleteEntry(fromLower);
+  }
+}
+
 // Re-export for backward compatibility (tests, engine 등에서 import)
-export { makeConflictPath } from "./conflict-handlers";
+export {
+  makeConflictPath,
+  findNewestConflictSibling,
+  isConflictFile,
+  conflictPathToCanonicalPath,
+} from "./conflict-handlers";

@@ -101,7 +101,7 @@ describe("fetchFileFromRemote", () => {
 
     // 원격 파일 업데이트
     const updatedContent = new TextEncoder().encode("updated content");
-    await remote.upload("notes/test.md", updatedContent);
+    await remote.upload("notes/test.md", updatedContent, first!.rev!);
 
     await fetchFileFromRemote("notes/test.md", deps);
     const second = await store.getEntry("notes/test.md");

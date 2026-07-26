@@ -1,19 +1,13 @@
 import { describe, test, expect } from "bun:test";
 import { checkDeleteGuard } from "@/sync/guards";
-import type { SyncPlan, SyncPlanItem } from "@/types";
+import type { SyncPlan, SyncPlanItem } from "@/types"
+import { emptySyncPlanStats } from "@/types";
 
 function mkPlan(...items: SyncPlanItem[]): SyncPlan {
-  const stats = {
-    upload: 0,
-    download: 0,
-    deleteLocal: 0,
-    deleteRemote: 0,
-    conflict: 0,
-    noop: 0,
-  };
+  const stats = emptySyncPlanStats();
   for (const item of items) {
-    const key = item.action.type as keyof typeof stats;
-    if (key in stats) stats[key]++;
+    const key = item.action.type;
+    if (key in stats) (stats as Record<string, number>)[key]++;
   }
   return { items, stats };
 }

@@ -12,12 +12,20 @@ import type {
 import { RevConflictError } from "../types";
 import type {
   DropboxFileMetadata,
+  DropboxFolderMetadata,
   DropboxMetadata,
   DropboxListFolderResult,
   DropboxErrorResponse,
 } from "./dropbox-types";
 import { refreshAccessToken } from "./dropbox-auth";
 import { delay, runAbortable, throwIfAborted } from "../abort-utils";
+import { SyncLogCategories, type SyncMonitorLog } from "../debug/sync-monitor";
+import { logTemp } from "../debug/temp-log";
+import {
+  formatClientModifiedIso,
+  shouldUseUploadSession,
+  splitUploadChunks,
+} from "./upload-chunk";
 
 const API_BASE = "https://api.dropboxapi.com/2";
 const CONTENT_BASE = "https://content.dropboxapi.com/2";
@@ -109,6 +117,8 @@ export interface DropboxAdapterConfig {
   getRefreshToken: () => string;
   getTokenExpiry: () => number;
   onTokenRefreshed: (accessToken: string, expiresAt: number) => void;
+  /** Structured sync monitor (optional; tests and CLI omit). */
+  log?: SyncMonitorLog;
 }
 
 /**
@@ -128,6 +138,20 @@ export class DropboxAdapter implements RemoteStorage {
   /** 현재 sync cycle의 AbortSignal (HTTP·retry 대기 중단). */
   setAbortSignal(signal: AbortSignal | undefined): void {
     this.abortSignal = signal;
+  }
+
+  /** Remote-call log line; every Dropbox mutation is recorded before it is sent. */
+  private log(
+    message: string,
+    data: Record<string, unknown>,
+    location: string,
+    level: "trace" | "debug" | "info" | "warn" = "debug",
+  ): void {
+    this.config.log?.(message, data, {
+      category: SyncLogCategories.remote,
+      level,
+      location,
+    });
   }
 
   async listChanges(cursor?: string): Promise<ListChangesResult> {
@@ -159,8 +183,8 @@ export class DropboxAdapter implements RemoteStorage {
     }
 
     const entries = result.entries
-      .filter((e): e is DropboxFileMetadata | (DropboxMetadata & { ".tag": "deleted" }) =>
-        e[".tag"] === "file" || e[".tag"] === "deleted",
+      .filter((e): e is DropboxFileMetadata | DropboxFolderMetadata | (DropboxMetadata & { ".tag": "deleted" }) =>
+        e[".tag"] === "file" || e[".tag"] === "folder" || e[".tag"] === "deleted",
       )
       .map((e) => this.toRemoteEntry(e));
 
@@ -216,17 +240,46 @@ export class DropboxAdapter implements RemoteStorage {
     path: string,
     data: Uint8Array,
     rev?: string,
+    clientModified?: number,
   ): Promise<RemoteEntry> {
     const mode = rev
       ? { ".tag": "update" as const, update: rev }
-      : { ".tag": "overwrite" as const };
+      : { ".tag": "add" as const };
 
+    // G29: rev-less uploads use add (never overwrite) so an unexpected remote file surfaces as conflict.
+    this.log("dropbox upload", {
+      path,
+      bytes: data.length,
+      mode: mode[".tag"],
+      rev: rev ?? null,
+      clientModified: clientModified ?? null,
+      session: shouldUseUploadSession(data.length),
+    }, "dropbox-adapter.upload");
+
+    if (shouldUseUploadSession(data.length)) {
+      return this.uploadViaSession(path, data, mode, clientModified, rev);
+    }
+
+    return this.uploadSingleShot(path, data, mode, clientModified, rev);
+  }
+
+  /** Single POST /files/upload — files ≤ UPLOAD_SESSION_THRESHOLD_BYTES (G16). */
+  private async uploadSingleShot(
+    path: string,
+    data: Uint8Array,
+    mode: { ".tag": "add" } | { ".tag": "update"; update: string },
+    clientModified?: number,
+    rev?: string,
+  ): Promise<RemoteEntry> {
     const apiArg = headerSafeJson({
       path: this.toRemotePath(path),
       mode,
       autorename: false,
       mute: false,
       strict_conflict: true,
+      ...(clientModified !== undefined
+        ? { client_modified: formatClientModifiedIso(clientModified) }
+        : {}),
     });
 
     const resp = await this.withRetry({
@@ -236,9 +289,10 @@ export class DropboxAdapter implements RemoteStorage {
         "Dropbox-API-Arg": apiArg,
         "Content-Type": "application/octet-stream",
       },
-      body: data.buffer as ArrayBuffer,
+      body: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer,
       on409: (errBody) => {
-        if (errBody.error_summary?.includes("conflict")) {
+        const summary = errBody.error_summary ?? "";
+        if (summary.includes("conflict") || summary.includes("path/conflict")) {
           throw new RevConflictError(
             `Rev conflict on upload: ${path}`,
             rev ?? "",
@@ -251,7 +305,117 @@ export class DropboxAdapter implements RemoteStorage {
     return this.fileMetadataToEntry(metadata);
   }
 
+  /**
+   * Resumable upload_session for large files (G16).
+   * start → append_v2 → finish preserves add/update(rev) commit semantics.
+   */
+  private async uploadViaSession(
+    path: string,
+    data: Uint8Array,
+    mode: { ".tag": "add" } | { ".tag": "update"; update: string },
+    clientModified?: number,
+    rev?: string,
+  ): Promise<RemoteEntry> {
+    const chunks = splitUploadChunks(data);
+    logTemp(this.config.log, "P6", "upload_session starting", {
+      path,
+      bytes: data.length,
+      chunks: chunks.length,
+      mode: mode[".tag"],
+    }, { location: "dropbox-adapter.uploadViaSession" });
+
+    type UploadSessionCursor = { session_id: string; offset: number };
+
+    const startResp = await this.withRetry({
+      url: `${CONTENT_BASE}/files/upload_session/start`,
+      method: "POST",
+      headers: {
+        "Dropbox-API-Arg": headerSafeJson({
+          close: false,
+          session_type: { ".tag": "sequential" },
+        }),
+        "Content-Type": "application/octet-stream",
+      },
+      body: chunks[0]!.buffer.slice(
+        chunks[0]!.byteOffset,
+        chunks[0]!.byteOffset + chunks[0]!.byteLength,
+      ) as ArrayBuffer,
+    });
+
+    const startBody = startResp.json as { session_id: string };
+    if (!startBody?.session_id) {
+      throw new Error("Dropbox upload_session/start missing session_id");
+    }
+
+    let cursor: UploadSessionCursor = {
+      session_id: startBody.session_id,
+      offset: chunks[0]!.byteLength,
+    };
+
+    for (let index = 1; index < chunks.length; index++) {
+      const chunk = chunks[index]!;
+      await this.withRetry({
+        url: `${CONTENT_BASE}/files/upload_session/append_v2`,
+        method: "POST",
+        headers: {
+          "Dropbox-API-Arg": headerSafeJson({
+            cursor,
+            close: false,
+          }),
+          "Content-Type": "application/octet-stream",
+        },
+        body: chunk.buffer.slice(
+          chunk.byteOffset,
+          chunk.byteOffset + chunk.byteLength,
+        ) as ArrayBuffer,
+      });
+      cursor = { session_id: cursor.session_id, offset: cursor.offset + chunk.byteLength };
+    }
+
+    const finishArg: Record<string, unknown> = {
+      cursor,
+      commit: {
+        path: this.toRemotePath(path),
+        mode,
+        autorename: false,
+        mute: false,
+        strict_conflict: true,
+        ...(clientModified !== undefined
+          ? { client_modified: formatClientModifiedIso(clientModified) }
+          : {}),
+      },
+    };
+
+    const finishResp = await this.withRetry({
+      url: `${CONTENT_BASE}/files/upload_session/finish`,
+      method: "POST",
+      headers: {
+        "Dropbox-API-Arg": headerSafeJson(finishArg),
+        "Content-Type": "application/octet-stream",
+      },
+      on409: (errBody) => {
+        const summary = errBody.error_summary ?? "";
+        if (summary.includes("conflict") || summary.includes("path/conflict")) {
+          throw new RevConflictError(
+            `Rev conflict on upload: ${path}`,
+            rev ?? "",
+          );
+        }
+      },
+    });
+
+    const metadata = finishResp.json as DropboxFileMetadata;
+    logTemp(this.config.log, "P6", "upload_session finished", {
+      path,
+      rev: metadata.rev,
+      bytes: data.length,
+      chunks: chunks.length,
+    }, { location: "dropbox-adapter.uploadViaSession" });
+    return this.fileMetadataToEntry(metadata);
+  }
+
   async delete(path: string): Promise<void> {
+    this.log("dropbox delete", { path }, "dropbox-adapter.delete");
     await this.rpcCall("/files/delete_v2", {
       path: this.toRemotePath(path),
     });
@@ -287,12 +451,21 @@ export class DropboxAdapter implements RemoteStorage {
           );
 
         for (const entry of result.entries) {
-          if (entry[".tag"] !== "file") continue;
-          const stripped = this.stripRemotePrefix(entry.path_lower);
-          listed.push({
-            pathLower: stripped.toLowerCase(),
-            contentHash: entry.content_hash ?? "",
-          });
+          if (entry[".tag"] === "file") {
+            const stripped = this.stripRemotePrefix(entry.path_lower);
+            listed.push({
+              pathLower: stripped.toLowerCase(),
+              contentHash: entry.content_hash ?? "",
+              isFolder: false,
+            });
+          } else if (entry[".tag"] === "folder") {
+            const stripped = this.stripRemotePrefix(entry.path_lower).replace(/\/+$/, "");
+            listed.push({
+              pathLower: stripped.toLowerCase(),
+              contentHash: "",
+              isFolder: true,
+            });
+          }
         }
 
         hasMore = result.has_more;
@@ -416,7 +589,30 @@ export class DropboxAdapter implements RemoteStorage {
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {
-    const result = await this.rpcCall<{ metadata: DropboxFileMetadata }>(
+    // Dropbox does NOT support case-only renaming via a single files/move_v2.
+    // Two-step: path → temp path → desired casing (e.g. note.md → note.md.__dbxcase__ → Note.md).
+    if (from.toLowerCase() === to.toLowerCase() && from !== to) {
+      const tempPath = `${from}.__dbxcase__`;
+      await this.moveOnce(from, tempPath);
+      return this.moveOnce(tempPath, to);
+    }
+    return this.moveOnce(from, to);
+  }
+
+  async createFolder(path: string): Promise<RemoteEntry> {
+    this.log("dropbox create_folder", { path }, "dropbox-adapter.createFolder");
+    const result = await this.rpcCall<{ metadata: DropboxFolderMetadata }>(
+      "/files/create_folder_v2",
+      {
+        path: this.toRemotePath(path),
+        autorename: false,
+      },
+    );
+    return this.toRemoteEntry(result.metadata);
+  }
+
+  private async moveOnce(from: string, to: string): Promise<RemoteEntry> {
+    const result = await this.rpcCall<{ metadata: DropboxFileMetadata | DropboxFolderMetadata }>(
       "/files/move_v2",
       {
         from_path: this.toRemotePath(from),
@@ -424,7 +620,54 @@ export class DropboxAdapter implements RemoteStorage {
         autorename: false,
       },
     );
-    return this.fileMetadataToEntry(result.metadata);
+    return this.toRemoteEntry(result.metadata);
+  }
+
+  /** Stub — durable delete evidence (R6) will call Dropbox list_revisions later. */
+  async listRevisions(path: string): Promise<
+    Array<{ rev: string; serverModified: number; deleted: boolean; hash: string | null }>
+  > {
+    const result = await this.rpcCall<import("./dropbox-types").DropboxListRevisionsResult>(
+      "/files/list_revisions",
+      {
+        path: this.toRemotePath(path),
+        mode: { ".tag": "path" },
+        limit: 100,
+      },
+    );
+
+    const revisions: Array<{
+      rev: string;
+      serverModified: number;
+      deleted: boolean;
+      hash: string | null;
+    }> = [];
+
+    if (result.is_deleted) {
+      revisions.push({
+        rev: "deleted",
+        serverModified: Date.now(),
+        deleted: true,
+        hash: null,
+      });
+    }
+
+    for (const entry of result.entries) {
+      revisions.push({
+        rev: entry.rev,
+        serverModified: new Date(entry.server_modified).getTime(),
+        deleted: false,
+        hash: entry.content_hash ?? null,
+      });
+    }
+
+    this.log("list_revisions", {
+      path,
+      entryCount: result.entries.length,
+      isDeleted: result.is_deleted,
+    }, "dropbox-adapter.listRevisions");
+
+    return revisions;
   }
 
   // ── private ──
@@ -618,6 +861,19 @@ export class DropboxAdapter implements RemoteStorage {
     if (metadata[".tag"] === "file") {
       return this.fileMetadataToEntry(metadata);
     }
+    if (metadata[".tag"] === "folder") {
+      const stripped = this.stripRemotePrefix(metadata.path_display);
+      return {
+        pathLower: stripped.toLowerCase(),
+        pathDisplay: stripped,
+        hash: null,
+        serverModified: 0,
+        rev: "",
+        size: 0,
+        deleted: false,
+        isFolder: true,
+      };
+    }
     // deleted
     const stripped = this.stripRemotePrefix(metadata.path_display);
     return {
@@ -633,11 +889,15 @@ export class DropboxAdapter implements RemoteStorage {
 
   private fileMetadataToEntry(metadata: DropboxFileMetadata): RemoteEntry {
     const stripped = this.stripRemotePrefix(metadata.path_display);
+    const clientModifiedMs = metadata.client_modified
+      ? new Date(metadata.client_modified).getTime()
+      : undefined;
     return {
       pathLower: stripped.toLowerCase(),
       pathDisplay: stripped,
       hash: metadata.content_hash ?? null,
       serverModified: new Date(metadata.server_modified).getTime(),
+      clientModified: clientModifiedMs,
       rev: metadata.rev,
       size: metadata.size,
       deleted: false,

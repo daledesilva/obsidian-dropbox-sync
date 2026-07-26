@@ -7,6 +7,10 @@ import type { App } from "obsidian";
  */
 let appRef: App | null = null;
 
+export function isDeviceSettingsStorageBound(): boolean {
+  return appRef != null;
+}
+
 export function initDeviceSettingsStorage(app: App): void {
   appRef = app;
 }

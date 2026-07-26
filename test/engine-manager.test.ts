@@ -170,11 +170,11 @@ describe("EngineManager", () => {
 
   test("reset 후 getOrCreate는 최신 옵션 사용", () => {
     let strategy = "keep_both";
-    config.getOptions = () => ({ conflictStrategy: strategy as "keep_both" | "newest" });
+    config.getOptions = () => ({ conflictStrategy: strategy as "keep_both" | "manual" });
     mgr = new EngineManager(config);
 
     mgr.getOrCreate();
-    strategy = "newest";
+    strategy = "manual";
     mgr.reset();
 
     // 새 엔진은 getOptions()를 다시 호출하므로 newest 반영

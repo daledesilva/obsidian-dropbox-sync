@@ -1,4 +1,5 @@
 import { dropboxContentHash } from "../hash";
+import { DropboxCursorResetError } from "./dropbox-adapter";
 import {
   RevConflictError,
   type FileInfo,
@@ -12,9 +13,11 @@ import type {
   FileSystem,
   RemoteDeleteBatchEntryResult,
   RemoteListedFile,
+  RemoteRevision,
   RemoteStorage,
   SyncStateStore,
 } from "./interfaces";
+import type { FolderInfo } from "../types";
 
 // re-export for backward compat
 export { RevConflictError };
@@ -28,6 +31,8 @@ interface MemoryFile {
 
 export class MemoryFileSystem implements FileSystem {
   private files = new Map<string, MemoryFile>();
+  /** Explicit empty folders (G8). */
+  private folders = new Set<string>();
 
   // eslint-disable-next-line @typescript-eslint/require-await -- async wraps sync throw into rejection
   async read(path: string): Promise<Uint8Array> {
@@ -38,7 +43,11 @@ export class MemoryFileSystem implements FileSystem {
 
   // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
   async write(path: string, data: Uint8Array, mtime?: number): Promise<void> {
-    this.files.set(path, { data, mtime: mtime ?? Date.now() });
+    const tempPath = `${path}.tmp-dropbox-sync`;
+    this.files.set(tempPath, { data, mtime: mtime ?? Date.now() });
+    this.files.delete(path);
+    this.files.set(path, this.files.get(tempPath)!);
+    this.files.delete(tempPath);
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- async wraps sync throw into rejection
@@ -67,6 +76,41 @@ export class MemoryFileSystem implements FileSystem {
       });
     }
     return result;
+  }
+
+  async listFolders(_options?: FileListOptions): Promise<FolderInfo[]> {
+    const folderPaths = new Set<string>(this.folders);
+    for (const path of this.files.keys()) {
+      const parts = path.split("/");
+      let current = "";
+      for (let i = 0; i < parts.length - 1; i++) {
+        current = current ? `${current}/${parts[i]}` : parts[i]!;
+        folderPaths.add(current);
+      }
+    }
+    return [...folderPaths].sort().map((path) => ({
+      path,
+      pathLower: path.toLowerCase(),
+    }));
+  }
+
+  async createFolder(path: string): Promise<void> {
+    this.folders.add(path);
+  }
+
+  async deleteFolder(path: string): Promise<void> {
+    this.folders.delete(path);
+    const prefix = `${path}/`;
+    for (const filePath of [...this.files.keys()]) {
+      if (filePath.startsWith(prefix) || filePath.toLowerCase().startsWith(prefix.toLowerCase())) {
+        this.files.delete(filePath);
+      }
+    }
+    for (const folderPath of [...this.folders]) {
+      if (folderPath.toLowerCase().startsWith(prefix.toLowerCase())) {
+        this.folders.delete(folderPath);
+      }
+    }
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- async wraps sync throw into rejection
@@ -113,6 +157,7 @@ interface RemoteFile {
   hash: string;
   rev: string;
   serverModified: number;
+  clientModified?: number;
   deleted: boolean;
 }
 
@@ -127,22 +172,48 @@ export class MemoryRemoteStorage implements RemoteStorage {
   deleteBatchCallCount = 0;
   /** Test helper: paths passed to the last deleteBatch call. */
   lastDeleteBatchPaths: string[] = [];
+  /**
+   * When set, {@link listChanges} paginates at this many entries per page.
+   * Lets simulation tests exercise hasMore cursor advancement.
+   */
+  pageSize: number | null = null;
   private files = new Map<string, RemoteFile>();
   private changeLog: ChangeLogEntry[] = [];
+  private revisionHistory = new Map<string, RemoteRevision[]>();
+  /** path_lower folder keys (trailing slash) for empty-folder simulation. */
+  private folders = new Set<string>();
   private seq = 0;
   private revCounter = 0;
+  private cursorInvalidated = false;
 
   // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
   async listChanges(cursor?: string): Promise<ListChangesResult> {
+    if (
+      this.cursorInvalidated &&
+      cursor !== undefined &&
+      cursor !== "" &&
+      cursor !== "0"
+    ) {
+      throw new DropboxCursorResetError("Cursor reset required");
+    }
+
     const fromSeq = cursor ? parseInt(cursor, 10) : 0;
-    const entries = this.changeLog
-      .filter((c) => c.seq > fromSeq)
-      .map((c) => c.entry);
+    const pending = this.changeLog.filter((c) => c.seq > fromSeq);
+    const limit = this.pageSize ?? pending.length;
+    const page = pending.slice(0, limit);
+    const folderEntries = this.buildFolderChangeEntries(fromSeq);
+    const entries = [...page.map((c) => c.entry), ...folderEntries];
+    const lastSeq = page.length > 0 ? page[page.length - 1].seq : this.seq;
+    const hasMore = pending.length > page.length;
+
+    if (this.cursorInvalidated && !cursor) {
+      this.cursorInvalidated = false;
+    }
 
     return {
       entries,
-      cursor: String(this.seq),
-      hasMore: false,
+      cursor: String(lastSeq),
+      hasMore,
     };
   }
 
@@ -163,6 +234,7 @@ export class MemoryRemoteStorage implements RemoteStorage {
     path: string,
     data: Uint8Array,
     rev?: string,
+    clientModified?: number,
   ): Promise<RemoteEntry> {
     const pathLower = path.toLowerCase();
     const existing = this.files.get(pathLower);
@@ -175,9 +247,22 @@ export class MemoryRemoteStorage implements RemoteStorage {
       );
     }
 
+    // G29: add-mode — path exists with different content → conflict, never overwrite.
+    if (!rev && existing && !existing.deleted) {
+      const newHash = await dropboxContentHash(data);
+      if (existing.hash !== newHash) {
+        throw new RevConflictError(
+          `Path exists with different content: ${path}`,
+          existing.rev,
+        );
+      }
+      return this.toRemoteEntry(existing);
+    }
+
     const newRev = this.nextRev();
     const hash = await dropboxContentHash(data);
     const now = Date.now();
+    const modified = clientModified ?? now;
 
     const file: RemoteFile = {
       pathLower,
@@ -186,11 +271,13 @@ export class MemoryRemoteStorage implements RemoteStorage {
       hash,
       rev: newRev,
       serverModified: now,
+      clientModified: modified,
       deleted: false,
     };
 
     this.files.set(pathLower, file);
     this.addChangeLog(this.toRemoteEntry(file));
+    this.appendRevision(pathLower, file);
 
     return this.toRemoteEntry(file);
   }
@@ -202,10 +289,16 @@ export class MemoryRemoteStorage implements RemoteStorage {
     if (!file) return;
 
     file.deleted = true;
-    this.addChangeLog({
+    const deletedEntry = {
       ...this.toRemoteEntry(file),
       deleted: true,
       hash: null,
+    };
+    this.addChangeLog(deletedEntry);
+    this.appendRevision(pathLower, {
+      ...file,
+      deleted: true,
+      hash: file.hash,
     });
   }
 
@@ -251,7 +344,17 @@ export class MemoryRemoteStorage implements RemoteStorage {
     for (const file of this.files.values()) {
       if (file.deleted) continue;
       if (file.pathLower.startsWith(prefix)) {
-        listed.push({ pathLower: file.pathLower, contentHash: file.hash });
+        listed.push({ pathLower: file.pathLower, contentHash: file.hash, isFolder: false });
+      }
+    }
+    for (const folderKey of this.folders) {
+      const normalized = folderKey.replace(/\/+$/, "").toLowerCase();
+      if (normalized === folder || normalized.startsWith(prefix)) {
+        listed.push({
+          pathLower: normalized,
+          contentHash: "",
+          isFolder: true,
+        });
       }
     }
     return listed;
@@ -270,12 +373,67 @@ export class MemoryRemoteStorage implements RemoteStorage {
     this.files.set(toLower, file);
     const entry = this.toRemoteEntry(file);
     this.addChangeLog(entry);
+    this.appendRevision(toLower, file);
     return entry;
   }
 
+  async createFolder(path: string): Promise<RemoteEntry> {
+    this.seedEmptyFolder(path);
+    return this.folderToRemoteEntry(normalizeFolderPathLower(path));
+  }
+
+  // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
+  async listRevisions(path: string): Promise<RemoteRevision[]> {
+    const pathLower = path.toLowerCase();
+    return [...(this.revisionHistory.get(pathLower) ?? [])];
+  }
+
+  /** Simulate Dropbox invalidating a delta cursor — stale cursors throw on next listChanges. */
+  invalidateCursor(): void {
+    this.cursorInvalidated = true;
+  }
+
+  /** Test helper: register an empty folder (path_lower, trailing slash). */
+  seedEmptyFolder(path: string): void {
+    const normalized = normalizeFolderPathLower(path);
+    this.folders.add(normalized);
+    this.addChangeLog(this.folderToRemoteEntry(normalized));
+  }
+
+  /** @deprecated Test helper — prefer {@link seedEmptyFolder}. */
+  seedFolder(path: string): void {
+    this.seedEmptyFolder(path);
+  }
+
+  /** Test helper: remove a tracked empty folder. */
+  deleteFolder(path: string): void {
+    const normalized = normalizeFolderPathLower(path);
+    this.folders.delete(normalized);
+    const display = normalized.replace(/\/+$/, "");
+    this.addChangeLog({
+      pathLower: display.toLowerCase(),
+      pathDisplay: display,
+      hash: null,
+      serverModified: 0,
+      rev: "",
+      size: 0,
+      deleted: true,
+      isFolder: true,
+    });
+  }
+
+  /** Test helper: list tracked folder path_lower keys. */
+  listFolders(): string[] {
+    return [...this.folders].sort();
+  }
+
+  hasFolder(path: string): boolean {
+    return this.folders.has(normalizeFolderPathLower(path));
+  }
+
   // 테스트 헬퍼
-  has(pathLower: string): boolean {
-    const file = this.files.get(pathLower);
+  has(path: string): boolean {
+    const file = this.files.get(path.toLowerCase());
     return !!file && !file.deleted;
   }
 
@@ -299,17 +457,56 @@ export class MemoryRemoteStorage implements RemoteStorage {
     this.changeLog.push({ entry, seq: ++this.seq });
   }
 
+  private appendRevision(pathLower: string, file: RemoteFile): void {
+    const record: RemoteRevision = {
+      rev: file.rev,
+      serverModified: file.serverModified,
+      deleted: file.deleted,
+      hash: file.deleted ? null : file.hash,
+    };
+    const history = this.revisionHistory.get(pathLower) ?? [];
+    history.push(record);
+    this.revisionHistory.set(pathLower, history);
+  }
+
   private toRemoteEntry(file: RemoteFile): RemoteEntry {
     return {
       pathLower: file.pathLower,
       pathDisplay: file.pathDisplay,
       hash: file.hash,
       serverModified: file.serverModified,
+      clientModified: file.clientModified,
       rev: file.rev,
       size: file.data.length,
       deleted: file.deleted,
+      isFolder: false,
     };
   }
+
+  private folderToRemoteEntry(folderKey: string): RemoteEntry {
+    const display = folderKey.replace(/\/+$/, "");
+    return {
+      pathLower: display.toLowerCase(),
+      pathDisplay: display,
+      hash: null,
+      serverModified: Date.now(),
+      rev: "",
+      size: 0,
+      deleted: false,
+      isFolder: true,
+    };
+  }
+
+  /** Include folder tags in delta listings (G8). */
+  private buildFolderChangeEntries(fromSeq: number): RemoteEntry[] {
+    if (fromSeq > 0) return [];
+    return this.listFolders().map((folderKey) => this.folderToRemoteEntry(folderKey));
+  }
+}
+
+function normalizeFolderPathLower(path: string): string {
+  const trimmed = path.replace(/\/+$/, "").toLowerCase();
+  return `${trimmed}/`;
 }
 
 // ── MemoryStateStore ──

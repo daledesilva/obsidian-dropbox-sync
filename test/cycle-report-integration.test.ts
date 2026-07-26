@@ -12,6 +12,7 @@ describe("CycleReport 통합 테스트", () => {
       {
         enableCycleReports: true,
         onCycleReport: options?.onCycleReport,
+        resurrectionResolver: async () => "upload" as const,
       },
     );
     return { fs, remote, store, engine };

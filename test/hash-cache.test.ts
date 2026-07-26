@@ -30,6 +30,7 @@ function createMockVault(files: MockFile[]) {
     modifyBinary: async () => {},
     createBinary: async () => {},
     createFolder: async () => {},
+    getRoot: () => ({ path: "", children: [] }),
     getReadBinaryCount: () => readBinaryCount,
     resetReadBinaryCount: () => { readBinaryCount = 0; },
     // 파일 추가/수정 헬퍼

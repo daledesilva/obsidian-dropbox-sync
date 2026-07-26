@@ -113,4 +113,19 @@ describe("LogManager", () => {
     await dynamic.flush();
     expect(storage.files.has("b.log")).toBe(true);
   });
+
+  test("rotates to .1 when existing file exceeds maxBytes", async () => {
+    const bulky = "x".repeat(100);
+    storage.files.set("test.log", `${bulky}\n`);
+    const rotating = new LogManager(storage, () => "test.log", {
+      maxLines: 100,
+      flushSize: 1,
+      maxBytes: 50,
+      consoleOutput: false,
+    });
+    await rotating.log("after-rotate");
+    expect(storage.files.get("test.log.1")).toContain(bulky);
+    expect(storage.files.get("test.log")).toContain("after-rotate");
+    expect(storage.files.get("test.log")).not.toContain(bulky);
+  });
 });

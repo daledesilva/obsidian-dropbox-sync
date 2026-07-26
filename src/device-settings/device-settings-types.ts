@@ -21,4 +21,19 @@ export interface DeviceSettingsV1 {
   cursorDebugOfferToken: string;
   /** Epoch ms when Connect / auto-connect last applied an offer (0 = never). */
   cursorDebugConnectedAt: number;
+  /**
+   * Promote `trace` log lines (the per-path planner decision firehose) to
+   * written output. Device-local because a 20k-file vault emits one line per
+   * file per cycle, which is right for diagnosing one machine and wrong as a
+   * default everywhere.
+   */
+  verboseDecisionLogging: boolean;
+  /** Per-machine identity for conflict copy naming and debug logs (G26). */
+  deviceId: string;
+  /** Dropbox OAuth — must not live in synced data.json (G25). */
+  accessToken: string;
+  refreshToken: string;
+  tokenExpiry: number;
+  /** Custom Dropbox app key when useCustomAppKey is enabled on synced settings. */
+  customAppKey: string;
 }

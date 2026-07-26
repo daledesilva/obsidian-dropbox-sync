@@ -9,6 +9,10 @@ import {
   type ActionSummaryPaths,
 } from "../sync/sync-reporter";
 import {
+  summarizePermanentSkips,
+  type PermanentSkipEntry,
+} from "../sync/permanent-skip";
+import {
   formatDiagnosticsMarkdown,
   type SyncCycleDiagnostics,
 } from "../sync/sync-diagnostics";
@@ -92,8 +96,10 @@ export function buildSyncResultFeedback(
   result: SyncResult,
   deletesSkipped?: number,
   pathsSkipped?: number,
+  permanentSkips?: PermanentSkipEntry[],
 ): SyncResultFeedback {
   const conflictPaths = listConflictPaths(result.succeeded);
+  const permanentSummary = summarizePermanentSkips(permanentSkips ?? []);
   // Always chip-ify successes; attach a failed chip when any items errored.
   const { summaryParts, summaryPaths } = summarizeResultParts(result);
   if (result.failed.length > 0) {
@@ -105,10 +111,11 @@ export function buildSyncResultFeedback(
       first.error instanceof PathValidationError || first.error instanceof LocalPathError
         ? "\nFix names via the incompatible-files prompt on next sync."
         : "";
+    const permanentHint = permanentSummary ? `\n${permanentSummary}` : "";
     return {
       outcome: "failed",
       summary,
-      endMessage: `Dropbox Sync: ${summary}\n${first.item.localPath}: ${detail}${pathHint}`,
+      endMessage: `Dropbox Sync: ${summary}\n${first.item.localPath}: ${detail}${pathHint}${permanentHint}`,
       noticeDuration: 8000,
       conflictPaths,
       summaryParts,
@@ -141,10 +148,11 @@ export function buildSyncResultFeedback(
   }
   if (result.succeeded.length > 0) {
     const summary = summarizeActions(result.succeeded);
+    const permanentHint = permanentSummary ? `\n${permanentSummary}` : "";
     return {
       outcome: "success",
       summary,
-      endMessage: `Dropbox Sync: ${summary}`,
+      endMessage: `Dropbox Sync: ${summary}${permanentHint}`,
       noticeDuration: 5000,
       conflictPaths,
       summaryParts,

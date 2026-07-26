@@ -11,18 +11,30 @@ export interface LogStorage {
  * The product path is a vault-root `sync-debug-*.log` so users can see and share
  * it in Obsidian — intentional, not an oversight vs plugin-folder storage.
  * Buffers writes and trims to maxLines so disk I/O stays bounded.
+ *
+ * When the active file exceeds maxBytes, it is renamed to `<path>.1` (one
+ * rotated predecessor) before the new active file is written — keeps recent
+ * cycles without unbounded growth once decision logging is dense.
  */
 export interface LogManagerOptions {
   maxLines?: number;
   flushSize?: number;
+  /** Soft size cap in bytes before rotating the active file. */
+  maxBytes?: number;
   /** false로 설정하면 console.debug 출력을 억제 */
   consoleOutput?: boolean;
 }
+
+/** Default line capacity after structured decision logging landed. */
+export const DEFAULT_LOG_MAX_LINES = 5000;
+/** Rotate the active log when it exceeds ~1.5 MB of text. */
+export const DEFAULT_LOG_MAX_BYTES = 1_500_000;
 
 export class LogManager {
   private buffer: string[] = [];
   private maxLines: number;
   private flushSize: number;
+  private maxBytes: number;
   private consoleOutput: boolean;
 
   constructor(
@@ -35,10 +47,12 @@ export class LogManager {
       // 하위 호환: (storage, getLogPath, maxLines, flushSize)
       this.maxLines = options;
       this.flushSize = flushSize ?? 10;
+      this.maxBytes = DEFAULT_LOG_MAX_BYTES;
       this.consoleOutput = true;
     } else {
-      this.maxLines = options?.maxLines ?? 200;
+      this.maxLines = options?.maxLines ?? DEFAULT_LOG_MAX_LINES;
       this.flushSize = options?.flushSize ?? 10;
+      this.maxBytes = options?.maxBytes ?? DEFAULT_LOG_MAX_BYTES;
       this.consoleOutput = options?.consoleOutput ?? true;
     }
   }
@@ -64,6 +78,13 @@ export class LogManager {
       let existing = "";
       if (await this.storage.exists(logPath)) {
         existing = await this.storage.read(logPath);
+      }
+      // Rotate before appending when the on-disk file is already over the soft
+      // size cap — keeps the predecessor as `<path>.1` for one generation.
+      if (existing.length >= this.maxBytes) {
+        const rotatedPath = `${logPath}.1`;
+        await this.storage.write(rotatedPath, existing);
+        existing = "";
       }
       const lines = existing ? existing.split("\n").filter(Boolean) : [];
       lines.push(...toWrite);

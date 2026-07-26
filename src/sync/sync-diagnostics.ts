@@ -301,9 +301,16 @@ export function countBaseNotes(baseEntries: SyncEntry[], configDir: string): num
 }
 
 /**
- * Skip catch-up delete inference when the local scan looks incomplete vs base.
- * Prefer re-download over mass deleteRemote — vault-event deletes still apply via deletedPaths.
+ * Skip catch-up delete inference when the local scan cannot be vouched complete (G22).
+ * Vault-event deletes in deletedPaths still apply.
  */
+export function shouldDeferInferredDeletes(
+  scanVouched: boolean,
+): boolean {
+  return !scanVouched;
+}
+
+/** @deprecated Use shouldDeferInferredDeletes — ratio guard replaced by vouched scan (G22). */
 export function shouldSkipInferForIncompleteLocal(
   sectionActive: boolean,
   localCount: number,
@@ -312,7 +319,7 @@ export function shouldSkipInferForIncompleteLocal(
   return sectionActive && baseCount > 20 && localCount < baseCount * 0.5;
 }
 
-/** Skip inferring plugin deletes when local scan is far below base (incomplete index). */
+/** @deprecated Use shouldDeferInferredDeletes. */
 export function shouldSkipPluginInfer(
   pluginsSectionActive: boolean,
   localPlugins: number,
@@ -321,7 +328,7 @@ export function shouldSkipPluginInfer(
   return shouldSkipInferForIncompleteLocal(pluginsSectionActive, localPlugins, basePlugins);
 }
 
-/** Skip inferring notes deletes when local scan is far below base (empty/partial vault). */
+/** @deprecated Use shouldDeferInferredDeletes. */
 export function shouldSkipNotesInfer(
   notesSectionActive: boolean,
   localNotes: number,

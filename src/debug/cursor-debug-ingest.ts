@@ -16,12 +16,23 @@ import {
   getCursorDebugSessionId,
 } from "../device-settings/device-settings";
 
+/**
+ * Severity of a log line. Only `trace` is suppressed by default — it carries
+ * the per-path decision firehose, which is one line per vault file per cycle.
+ */
+export type SyncLogLevel = "trace" | "debug" | "info" | "warn" | "error";
+
 export type CursorDebugIngestEntry = {
   hypothesisId: string;
   location: string;
   message: string;
   data?: Record<string, unknown>;
   runId?: string;
+  level?: SyncLogLevel;
+  category?: string;
+  ruleId?: string | string[];
+  scenarioRow?: number;
+  temp?: string;
 };
 
 /** Optional tags so vault log + Wi‑Fi ingest share the same filterable metadata. */
@@ -29,6 +40,23 @@ export type CursorDebugLogMeta = {
   hypothesisId?: string;
   location?: string;
   runId?: string;
+  /** Defaults to "debug" when omitted. `trace` needs verbose logging enabled. */
+  level?: SyncLogLevel;
+  /** Coarse subsystem tag — see SyncLogCategories in debug/sync-monitor.ts. */
+  category?: string;
+  /**
+   * Which principle/rule from docs/sync-scenarios.md this line is evidence for.
+   * Every rule R1-R14 must have at least one call site so behaviour can be
+   * validated from logs alone rather than by reading the implementation.
+   */
+  ruleId?: string | string[];
+  /** Scenario row number in docs/sync-scenarios.md, when the line maps to one. */
+  scenarioRow?: number;
+  /**
+   * Phase tag marking a temporary validation log (e.g. "P1-a"). Temporary logs
+   * are removed only after a test run demonstrates the fix they were added for.
+   */
+  temp?: string;
 };
 
 function normalizeIngestPath(path: string): string {
@@ -125,6 +153,11 @@ export function postCursorDebugLogLine(
     location: meta?.location ?? "main.log",
     message,
     ...(meta?.runId ? { runId: meta.runId } : {}),
+    ...(meta?.level ? { level: meta.level } : {}),
+    ...(meta?.category ? { category: meta.category } : {}),
+    ...(meta?.ruleId ? { ruleId: meta.ruleId } : {}),
+    ...(meta?.scenarioRow !== undefined ? { scenarioRow: meta.scenarioRow } : {}),
+    ...(meta?.temp ? { temp: meta.temp } : {}),
     ...(dataRecord ? { data: dataRecord } : {}),
   });
 }

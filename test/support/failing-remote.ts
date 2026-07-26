@@ -6,6 +6,7 @@ import type {
 import type {
   RemoteDeleteBatchEntryResult,
   RemoteListedFile,
+  RemoteRevision,
   RemoteStorage,
 } from "@/adapters/interfaces";
 
@@ -76,9 +77,10 @@ export class FailingRemoteStorage implements RemoteStorage {
     path: string,
     data: Uint8Array,
     rev?: string,
+    clientModified?: number,
   ): Promise<RemoteEntry> {
     this.checkFail("upload");
-    return this.inner.upload(path, data, rev);
+    return this.inner.upload(path, data, rev, clientModified);
   }
 
   async delete(path: string): Promise<void> {
@@ -99,5 +101,18 @@ export class FailingRemoteStorage implements RemoteStorage {
   async move(from: string, to: string): Promise<RemoteEntry> {
     this.checkFail("move");
     return this.inner.move(from, to);
+  }
+
+  async createFolder(path: string): Promise<RemoteEntry> {
+    this.checkFail("createFolder");
+    return this.inner.createFolder(path);
+  }
+
+  async listRevisions(path: string): Promise<RemoteRevision[]> {
+    this.checkFail("listRevisions");
+    if (!this.inner.listRevisions) {
+      throw new Error("listRevisions not implemented on inner remote");
+    }
+    return this.inner.listRevisions(path);
   }
 }

@@ -4,13 +4,107 @@
  * Permanent tags (hypothesisId "sync") stay for ongoing user diagnosis.
  * Investigation tags (H-A…H-E) isolate delete/stall/cursor flakiness on mobile.
  */
-import type { CursorDebugLogMeta } from "./cursor-debug-ingest";
+import type { CursorDebugLogMeta, SyncLogLevel } from "./cursor-debug-ingest";
 
 export type SyncMonitorLog = (
   message: string,
   data?: Record<string, unknown>,
   meta?: CursorDebugLogMeta,
 ) => void;
+
+/**
+ * Coarse subsystem tags. Combined with `ruleId` these let a reader filter the
+ * NDJSON stream down to "why did sync decide that" without reading source.
+ */
+export const SyncLogCategories = {
+  /** Cycle lifecycle: start, end, trigger, scheduling */
+  cycle: "cycle",
+  /** Local filesystem scan and scope filtering */
+  scan: "scan",
+  /** Remote listing, cursor deltas, remote snapshot construction */
+  remote: "remote",
+  /** Per-file base state reads and writes */
+  base: "base",
+  /** A named rule (R1-R14) or principle (P1-P5) being evaluated */
+  rule: "rule",
+  /** Planner classification of a single path */
+  decision: "decision",
+  /** Delete guard, path guard, folder-coalesce eligibility */
+  guard: "guard",
+  /** Executor dispatch and batching */
+  execute: "execute",
+  /** Actual bytes moving: upload, download, move, delete */
+  transfer: "transfer",
+  /** Sync state store mutations */
+  state: "state",
+  /** Cursor advancement and the reasons it was withheld */
+  cursor: "cursor",
+  /** Conflict detection and resolution */
+  conflict: "conflict",
+  /** Deferrals and their bounds */
+  defer: "defer",
+  /** User-facing notices */
+  notice: "notice",
+} as const;
+
+export type SyncLogCategory = (typeof SyncLogCategories)[keyof typeof SyncLogCategories];
+
+/**
+ * The principles and rules from docs/sync-scenarios.md, as constants so a rule
+ * tag can never be a typo'd string. Every R* here must have at least one log
+ * call site — see test/sync-log-taxonomy.test.ts, which fails if one does not.
+ */
+export const SyncRules = {
+  /** Vault is a folder of ordinary files; no bookkeeping written into it */
+  P1: "P1",
+  /** The copy on Dropbox is also a valid vault */
+  P2: "P2",
+  /** Plugin and Dropbox desktop client are both valid sync approaches */
+  P3: "P3",
+  /** Operations must work without Obsidian settings or plugins syncing */
+  P4: "P4",
+  /** Manual sync and live sync must produce the same outcomes */
+  P5: "P5",
+
+  /** Never let a conflict destroy content in either direction */
+  R1: "R1",
+  /** The version already on Dropbox keeps the canonical name */
+  R2: "R2",
+  /** Conflict copies are ordinary files and must sync everywhere */
+  R3: "R3",
+  /** A conflict copy names the device that produced it */
+  R4: "R4",
+  /** An edit beats a delete */
+  R5: "R5",
+  /** A delete needs durable evidence; without it, ask */
+  R6: "R6",
+  /** Never write directly to the destination file */
+  R7: "R7",
+  /** Content hashes decide what changed; dates only break safe ties */
+  R8: "R8",
+  /** Removing many files at once needs confirmation */
+  R9: "R9",
+  /** Durable delete evidence plus local bytes becomes a conflict copy */
+  R10: "R10",
+  /** Changing the linked folder is a re-link, not a mass delete */
+  R11: "R11",
+  /** Open editors may delay apply or delete; every deferral is bounded */
+  R12: "R12",
+  /** Debounce to settled bursts; one unresolved conflict copy per device per path */
+  R13: "R13",
+  /** Folder-level operations need a confirmed membership match */
+  R14: "R14",
+} as const;
+
+export type SyncRuleId = (typeof SyncRules)[keyof typeof SyncRules];
+
+/** Every rule id, for taxonomy coverage checks. */
+export const ALL_SYNC_RULE_IDS: SyncRuleId[] = Object.values(SyncRules);
+
+/** Rule ids only (excludes the P* principles), which is what coverage asserts on. */
+export const ALL_SYNC_RULE_IDS_R_ONLY: SyncRuleId[] = ALL_SYNC_RULE_IDS.filter((id) =>
+  id.startsWith("R"),
+);
 
 /** Stable investigation ids for iPad delete/stall flakiness. */
 export const SyncHypotheses = {
@@ -155,6 +249,96 @@ export function createSyncMonitorLog(
       hypothesisId: meta?.hypothesisId ?? SyncHypotheses.sync,
       location: meta?.location ?? "sync-monitor",
       ...(meta?.runId ? { runId: meta.runId } : {}),
+      ...(meta?.level ? { level: meta.level } : {}),
+      ...(meta?.category ? { category: meta.category } : {}),
+      ...(meta?.ruleId ? { ruleId: meta.ruleId } : {}),
+      ...(meta?.scenarioRow !== undefined ? { scenarioRow: meta.scenarioRow } : {}),
+      ...(meta?.temp ? { temp: meta.temp } : {}),
     });
   };
+}
+
+/**
+ * Record that a named rule was consulted — including when it changed nothing.
+ *
+ * Rules that only log when they fire are indistinguishable from rules that were
+ * never reached, which is the single most common reason a sync bug takes a
+ * whole session to localise. A pass is evidence too.
+ */
+export function logRule(
+  log: SyncMonitorLog | undefined,
+  ruleId: SyncRuleId | SyncRuleId[],
+  message: string,
+  data?: Record<string, unknown>,
+  meta?: Omit<CursorDebugLogMeta, "ruleId" | "category">,
+): void {
+  log?.(message, data, {
+    ...meta,
+    category: SyncLogCategories.rule,
+    ruleId,
+    level: meta?.level ?? "debug",
+  });
+}
+
+/** Three-way comparison inputs behind a single planner decision. */
+export type DecisionInputs = {
+  pathLower: string;
+  localPath?: string;
+  localHash: string | null;
+  remoteHash: string | null;
+  baseLocalHash: string | null;
+  baseRemoteHash: string | null;
+  basePathDisplay?: string | null;
+  rev?: string | null;
+  localDeleteIntended?: boolean;
+};
+
+/**
+ * Record one planner classification with the full three-way input that produced
+ * it. Emitted for every path including `noop`, because "nothing happened here"
+ * is exactly the outcome G4 showed we could not previously see.
+ *
+ * Non-actionable outcomes default to `trace` so a 20k-file vault does not write
+ * 20k lines per cycle unless verbose decision logging is on.
+ */
+export function logDecision(
+  log: SyncMonitorLog | undefined,
+  inputs: DecisionInputs,
+  actionType: string,
+  reason: string,
+  meta?: Omit<CursorDebugLogMeta, "category">,
+): void {
+  const isActionable = actionType !== "noop";
+  log?.("decision", {
+    action: actionType,
+    reason,
+    ...inputs,
+  }, {
+    ...meta,
+    category: SyncLogCategories.decision,
+    level: meta?.level ?? (isActionable ? "debug" : "trace"),
+    location: meta?.location ?? "planner.classifyChange",
+  });
+}
+
+/** Shorten a hash for log payloads; full hashes make lines unreadable on mobile. */
+export function shortHash(hash: string | null | undefined): string | null {
+  if (!hash) return hash ?? null;
+  return hash.slice(0, 8);
+}
+
+/**
+ * Render level/category/rule tags as a compact prefix for the plain-text vault
+ * log, which has no structured fields of its own. NDJSON keeps them as fields.
+ */
+export function formatLogPrefix(meta?: CursorDebugLogMeta): string {
+  if (!meta) return "";
+  const parts: string[] = [];
+  if (meta.level && meta.level !== "debug") parts.push(meta.level.toUpperCase());
+  if (meta.category) parts.push(meta.category);
+  if (meta.ruleId) {
+    parts.push(Array.isArray(meta.ruleId) ? meta.ruleId.join("+") : meta.ruleId);
+  }
+  if (meta.temp) parts.push(`TEMP:${meta.temp}`);
+  return parts.length > 0 ? `[${parts.join("|")}] ` : "";
 }

@@ -1,4 +1,5 @@
 import type { PathGuardIssue, PathGuardResult, SyncPlan, SyncPlanItem } from "../types";
+import { emptySyncPlanStats } from "../types";
 import { getPathIssues, suggestFixedPath } from "./path-validator";
 
 const PATH_CHECK_ACTIONS = new Set([
@@ -48,17 +49,10 @@ export function checkPathGuard(plan: SyncPlan, strictLocal: boolean): PathGuardR
 }
 
 function countStats(items: SyncPlanItem[]): SyncPlan["stats"] {
-  const stats = {
-    upload: 0,
-    download: 0,
-    deleteLocal: 0,
-    deleteRemote: 0,
-    conflict: 0,
-    noop: 0,
-  };
+  const stats = emptySyncPlanStats();
   for (const item of items) {
     const t = item.action.type;
-    if (t in stats) stats[t as keyof typeof stats]++;
+    if (t in stats) (stats as Record<string, number>)[t]++;
   }
   return stats;
 }

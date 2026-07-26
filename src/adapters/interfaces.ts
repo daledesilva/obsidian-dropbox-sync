@@ -1,5 +1,6 @@
 import type {
   FileInfo,
+  FolderInfo,
   RemoteEntry,
   SyncEntry,
   ListChangesResult,
@@ -22,8 +23,20 @@ export interface FileSystem {
   delete(path: string): Promise<void>;
   rename(from: string, to: string): Promise<void>;
   list(options?: FileListOptions): Promise<FileInfo[]>;
+  /** Explicit and indexed empty folders for G8. */
+  listFolders(options?: FileListOptions): Promise<FolderInfo[]>;
+  createFolder(path: string): Promise<void>;
+  deleteFolder(path: string): Promise<void>;
   stat(path: string): Promise<{ mtime: number; size: number }>;
   computeHash(path: string): Promise<string>;
+}
+
+/** One revision from {@link RemoteStorage.listRevisions} (Dropbox list_revisions shape). */
+export interface RemoteRevision {
+  rev: string;
+  serverModified: number;
+  deleted: boolean;
+  hash: string | null;
 }
 
 /** Per-path result from {@link RemoteStorage.deleteBatch}. */
@@ -45,6 +58,8 @@ export interface RemoteDeleteBatchEntryResult {
 export interface RemoteListedFile {
   pathLower: string;
   contentHash: string;
+  /** True for empty subfolders included in live folder verify (G20). */
+  isFolder?: boolean;
 }
 
 /** 원격 스토리지 추상화 (Dropbox) */
@@ -55,6 +70,8 @@ export interface RemoteStorage {
     path: string,
     data: Uint8Array,
     rev?: string,
+    /** Local mtime (Unix ms) sent as Dropbox client_modified (G11). */
+    clientModified?: number,
   ): Promise<RemoteEntry>;
   delete(path: string): Promise<void>;
   /**
@@ -69,6 +86,10 @@ export interface RemoteStorage {
    */
   listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]>;
   move(from: string, to: string): Promise<RemoteEntry>;
+  /** Create an empty folder on Dropbox (G8). */
+  createFolder(path: string): Promise<RemoteEntry>;
+  /** Dropbox list_revisions — optional until production adapter implements it (R6). */
+  listRevisions?(path: string): Promise<RemoteRevision[]>;
 }
 
 /** 동기화 상태 저장소 추상화 */

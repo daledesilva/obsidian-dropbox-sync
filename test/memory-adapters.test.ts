@@ -120,12 +120,19 @@ describe("MemoryRemoteStorage", () => {
     ).rejects.toThrow(RevConflictError);
   });
 
-  test("upload: rev 없이 덮어쓰기 가능", async () => {
-    await remote.upload("test.md", new Uint8Array([1]));
-    const updated = await remote.upload("test.md", new Uint8Array([2]));
-    expect(updated.rev).toBeTruthy();
+  test("upload: rev 없이 동일 내용이면 noop", async () => {
+    const first = await remote.upload("test.md", new Uint8Array([1]));
+    const second = await remote.upload("test.md", new Uint8Array([1]));
+    expect(second.rev).toBe(first.rev);
     const dl = await remote.download("test.md");
-    expect(dl.data).toEqual(new Uint8Array([2]));
+    expect(dl.data).toEqual(new Uint8Array([1]));
+  });
+
+  test("upload: rev 없이 다른 내용이면 RevConflictError (G29)", async () => {
+    await remote.upload("test.md", new Uint8Array([1]));
+    await expect(
+      remote.upload("test.md", new Uint8Array([2])),
+    ).rejects.toThrow(RevConflictError);
   });
 
   test("delete → download → 에러", async () => {
@@ -165,6 +172,52 @@ describe("MemoryRemoteStorage", () => {
     expect(remote.has("notes/readme.md")).toBe(true);
     const dl = await remote.download("Notes/README.md");
     expect(dl.metadata.pathLower).toBe("notes/readme.md");
+  });
+
+  test("listRevisions: upload/delete 이력", async () => {
+    await remote.upload("a.md", new Uint8Array([1]));
+    await remote.delete("a.md");
+    const revisions = await remote.listRevisions("a.md");
+    expect(revisions).toHaveLength(2);
+    expect(revisions[0].deleted).toBe(false);
+    expect(revisions[1].deleted).toBe(true);
+  });
+
+  test("invalidateCursor: stale cursor throws", async () => {
+    await remote.upload("a.md", new Uint8Array([1]));
+    const { cursor } = await remote.listChanges();
+    remote.invalidateCursor();
+    await expect(remote.listChanges(cursor)).rejects.toThrow("Cursor reset");
+    const fresh = await remote.listChanges();
+    expect(fresh.entries.length).toBeGreaterThan(0);
+  });
+
+  test("pageSize: hasMore pagination", async () => {
+    remote.pageSize = 1;
+    await remote.upload("a.md", new Uint8Array([1]));
+    await remote.upload("b.md", new Uint8Array([2]));
+    const first = await remote.listChanges();
+    expect(first.entries).toHaveLength(1);
+    expect(first.hasMore).toBe(true);
+    const second = await remote.listChanges(first.cursor);
+    expect(second.entries).toHaveLength(1);
+    expect(second.hasMore).toBe(false);
+  });
+
+  test("folders: create/list/delete", () => {
+    remote.seedEmptyFolder("Projects");
+    expect(remote.hasFolder("projects/")).toBe(true);
+    expect(remote.listFolders()).toEqual(["projects/"]);
+    remote.deleteFolder("Projects");
+    expect(remote.listFolders()).toEqual([]);
+  });
+
+  test("move: pathDisplay casing updates", async () => {
+    await remote.upload("note.md", new Uint8Array([1]));
+    const moved = await remote.move("note.md", "Note.md");
+    expect(moved.pathDisplay).toBe("Note.md");
+    expect(moved.pathLower).toBe("note.md");
+    expect(remote.has("note.md")).toBe(true);
   });
 });
 

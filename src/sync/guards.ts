@@ -1,4 +1,5 @@
 import type { DeleteGuardResult, SyncPlan, SyncPlanItem } from "../types";
+import { logRule, SyncRules, type SyncMonitorLog } from "../debug/sync-monitor";
 
 /** True for deleteLocal / deleteRemote plan actions. */
 export function isDeletePlanAction(type: string): boolean {
@@ -38,17 +39,31 @@ export function checkDeleteGuard(
   plan: SyncPlan,
   threshold: number,
   enabled = true,
+  log?: SyncMonitorLog,
 ): DeleteGuardResult {
   if (!enabled) {
+    // R9 logs even when disabled — "the guard never ran" and "the guard passed"
+    // look identical in a log that only records the blocking case.
+    logRule(log, SyncRules.R9, "delete guard disabled — not asking", {
+      deleteCount: plan.items.filter((item) => isDeletePlanAction(item.action.type)).length,
+    }, { location: "guards.checkDeleteGuard" });
     return { passed: true, deleteItems: [], filteredPlan: plan };
   }
 
   const { deleteItems, nonDeletePlan } = splitPlanDeletes(plan);
 
   if (deleteItems.length <= threshold) {
+    logRule(log, SyncRules.R9, "delete guard passed — under threshold", {
+      deleteCount: deleteItems.length,
+      threshold,
+    }, { location: "guards.checkDeleteGuard" });
     return { passed: true, deleteItems: [], filteredPlan: plan };
   }
 
+  logRule(log, SyncRules.R9, "delete guard triggered — asking before removing", {
+    deleteCount: deleteItems.length,
+    threshold,
+  }, { level: "info", location: "guards.checkDeleteGuard" });
   return {
     passed: false,
     deleteItems,

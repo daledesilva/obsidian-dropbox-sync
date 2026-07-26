@@ -20,8 +20,8 @@ describe("listFilesRecursive", () => {
       ".obsidian/plugins": { folders: ["p1"] },
       ".obsidian/plugins/p1": { files: ["main.js", "manifest.json"] },
     });
-    const files = await listFilesRecursive(adapter as never, "");
-    expect(files.map((f) => f.path).sort()).toEqual([
+    const listed = await listFilesRecursive(adapter as never, "");
+    expect(listed.files.map((f) => f.path).sort()).toEqual([
       ".obsidian/plugins/p1/main.js",
       ".obsidian/plugins/p1/manifest.json",
     ]);
@@ -33,10 +33,10 @@ describe("listFilesRecursive", () => {
       ".git": { files: ["config"] },
       notes: { files: ["a.md"] },
     });
-    const files = await listFilesRecursive(adapter as never, "", {
+    const listed = await listFilesRecursive(adapter as never, "", {
       skipDirPrefixes: [".git"],
     });
-    expect(files.map((f) => f.path)).toEqual(["notes/a.md"]);
+    expect(listed.files.map((f) => f.path)).toEqual(["notes/a.md"]);
   });
 
   test("respects abort signal", async () => {

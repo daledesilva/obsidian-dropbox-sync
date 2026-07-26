@@ -1,76 +1,121 @@
 import { describe, test, expect } from "bun:test";
-import { isConflictFile } from "@/sync/engine";
+import {
+  conflictPathToCanonicalPath,
+  isConflictFile,
+  isDropboxConflictFile,
+  isLegacyConflictFile,
+  isConflictSiblingOf,
+  makeConflictPath,
+} from "@/sync/conflict-handlers";
+import { isConflictFile as isConflictFileFromEngine } from "@/sync/engine";
 import { SyncSimulator } from "./support/sync-simulator";
 
 describe("isConflictFile", () => {
-  test("conflict 패턴 매치", () => {
+  test("legacy .conflict-* pattern", () => {
+    expect(isLegacyConflictFile("note.conflict-2026-03-06T1432.md")).toBe(true);
+    expect(isLegacyConflictFile("folder/deep/note.conflict-2026-01-01T0000.md")).toBe(true);
     expect(isConflictFile("note.conflict-2026-03-06T1432.md")).toBe(true);
-    expect(isConflictFile("folder/deep/note.conflict-2026-01-01T0000.md")).toBe(true);
-    expect(isConflictFile("test.conflict-2026-03-05T1035.txt")).toBe(true);
-    expect(isConflictFile("no-ext.conflict-2026-03-06T1432")).toBe(true);
   });
 
-  test("일반 파일은 매치 안 됨", () => {
+  test("Dropbox conflicted copy pattern", () => {
+    expect(isDropboxConflictFile("note (Device abcd's conflicted copy 2026-07-26).md")).toBe(true);
+    expect(isDropboxConflictFile("note (Device abcd's conflicted copy 2026-07-26 2).md")).toBe(true);
+    expect(isConflictFile("note (Device abcd's conflicted copy 2026-07-26).md")).toBe(true);
+  });
+
+  test("ordinary files are not conflict copies", () => {
     expect(isConflictFile("note.md")).toBe(false);
     expect(isConflictFile("conflict-notes.md")).toBe(false);
     expect(isConflictFile("my.conflict.md")).toBe(false);
     expect(isConflictFile("note.conflict-invalid.md")).toBe(false);
   });
+
+  test("engine re-exports detection helper", () => {
+    expect(isConflictFileFromEngine("note (Device x's conflicted copy 2026-07-26).md")).toBe(true);
+  });
 });
 
-describe("conflict 파일 싱크 제외", () => {
-  test("conflict 파일은 Dropbox에 업로드되지 않음", async () => {
+describe("conflict path association", () => {
+  test("maps legacy and Dropbox copies to canonical path", () => {
+    expect(conflictPathToCanonicalPath("note.conflict-2026-03-06T1432.md")).toBe("note.md");
+    expect(conflictPathToCanonicalPath("note (Device abcd's conflicted copy 2026-07-26).md")).toBe("note.md");
+    expect(conflictPathToCanonicalPath("notes/doc (Device abcd's conflicted copy 2026-07-26 2).md")).toBe("notes/doc.md");
+  });
+
+  test("isConflictSiblingOf accepts both formats", () => {
+    expect(isConflictSiblingOf("note.conflict-2026-03-06T1432.md", "note.md")).toBe(true);
+    expect(isConflictSiblingOf("note (Device abcd's conflicted copy 2026-07-26).md", "note.md")).toBe(true);
+    expect(isConflictSiblingOf("other.md", "note.md")).toBe(false);
+  });
+});
+
+describe("makeConflictPath", () => {
+  test("Dropbox format with device label and date", () => {
+    const path = makeConflictPath("test.md", [], {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T12:00:00Z"),
+    });
+    expect(path).toBe("test (Device test's conflicted copy 2026-07-26).md");
+  });
+
+  test("same-day counter when copy already exists", () => {
+    const existing = ["test (Device test's conflicted copy 2026-07-26).md"];
+    const path = makeConflictPath("test.md", existing, {
+      deviceLabel: "Device test",
+      now: new Date("2026-07-26T15:00:00Z"),
+    });
+    expect(path).toBe("test (Device test's conflicted copy 2026-07-26 2).md");
+  });
+});
+
+describe("conflict copies sync as ordinary files (G1)", () => {
+  test("local conflict copy uploads to Dropbox", async () => {
     const sim = new SyncSimulator();
     const a = sim.addDevice("A");
 
-    // 일반 파일 + conflict 파일 생성
     await a.editFile("note.md", "content");
-    await a.editFile("note.conflict-2026-03-06T1432.md", "remote version");
+    await a.editFile("note (Device abcd's conflicted copy 2026-07-26).md", "remote version");
     await a.sync();
 
-    // 일반 파일만 원격에 존재
     expect(sim.remote.has("note.md")).toBe(true);
-    expect(sim.remote.has("note.conflict-2026-03-06T1432.md")).toBe(false);
+    expect(sim.remote.has("note (Device abcd's conflicted copy 2026-07-26).md")).toBe(true);
   });
 
-  test("Dropbox에 있는 conflict 파일은 다운로드되지 않음", async () => {
+  test("remote conflict copy downloads to other devices", async () => {
     const sim = new SyncSimulator();
     const a = sim.addDevice("A");
     const b = sim.addDevice("B");
 
-    // A: 일반 파일 생성 + sync
     await a.editFile("note.md", "content");
     await a.sync();
 
-    // 원격에 직접 conflict 파일 업로드 (레거시 데이터 시뮬레이션)
     await sim.remote.upload(
-      "note.conflict-2026-03-06T1432.md",
+      "note (Device abcd's conflicted copy 2026-07-26).md",
       new TextEncoder().encode("old conflict"),
     );
 
-    // B sync: conflict 파일은 다운로드 안 됨
     await b.sync();
     expect(b.hasFile("note.md")).toBe(true);
-    expect(b.hasFile("note.conflict-2026-03-06T1432.md")).toBe(false);
+    expect(b.hasFile("note (Device abcd's conflicted copy 2026-07-26).md")).toBe(true);
   });
 
-  test("conflict 파일 삭제 시 deleteRemote가 생성되지 않음", async () => {
+  test("deleting a conflict copy produces deleteRemote", async () => {
     const sim = new SyncSimulator();
     const a = sim.addDevice("A");
 
-    // 파일 생성 + sync
     await a.editFile("note.md", "content");
     await a.sync();
 
-    // conflict 파일 생성 후 삭제 (trackDelete 호출)
-    await a.editFile("note.conflict-2026-03-06T1432.md", "conflict data");
-    await a.deleteFile("note.conflict-2026-03-06T1432.md");
+    const conflictPath = "note (Device abcd's conflicted copy 2026-07-26).md";
+    await a.editFile(conflictPath, "conflict data");
+    await a.sync();
+    expect(sim.remote.has(conflictPath)).toBe(true);
 
-    // sync: conflict 파일은 plan에 포함되지 않으므로 에러 없이 완료
+    await a.deleteFile(conflictPath);
     const { plan } = await a.sync();
-    const conflictActions = plan.items.filter((i) =>
-      i.pathLower.includes(".conflict-"),
+    const deleteActions = plan.items.filter(
+      (i) => i.action.type === "deleteRemote" && i.localPath === conflictPath,
     );
-    expect(conflictActions).toHaveLength(0);
+    expect(deleteActions.length).toBeGreaterThan(0);
   });
 });

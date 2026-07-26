@@ -174,8 +174,9 @@ describe("DropboxAdapter.listFilePathLowersUnder", () => {
 
     const listed = await adapter.listFilePathLowersUnder("notes");
     expect(listed).toEqual([
-      { pathLower: "notes/a.md", contentHash: "hash-a" },
-      { pathLower: "notes/b.md", contentHash: "hash-b" },
+      { pathLower: "notes/a.md", contentHash: "hash-a", isFolder: false },
+      { pathLower: "notes/sub", contentHash: "", isFolder: true },
+      { pathLower: "notes/b.md", contentHash: "hash-b", isFolder: false },
     ]);
     expect(httpClientMock).toHaveBeenCalledTimes(2);
   });

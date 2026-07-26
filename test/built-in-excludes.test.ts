@@ -7,14 +7,16 @@ import {
 import { isExcluded } from "@/exclude";
 
 describe("getBuiltInExcludePatterns", () => {
-  test("includes .git and sync metadata paths but not sync logs", () => {
+  test("includes .git, sync metadata, and device debug/report paths", () => {
     const patterns = getBuiltInExcludePatterns(".obsidian");
     expect(patterns).toContain(".git/");
     expect(patterns).toContain(".sync-state/");
-    expect(patterns).not.toContain("sync-logs/");
-    expect(patterns).not.toContain("_sync-log.md");
-    expect(patterns).not.toContain("sync-debug-*.log");
+    expect(patterns).toContain("sync-logs/");
+    expect(patterns).toContain("sync-debug-*.log");
     expect(patterns).toContain(".obsidian/workspace*");
+    expect(patterns).toContain(".obsidian/plugins/dropbox-sync/data.json");
+    expect(isExcluded("sync-debug-abcd.log", patterns)).toBe(true);
+    expect(isExcluded("sync-logs/_sync-log_x.md", patterns)).toBe(true);
   });
 
   test("default equals built-in", () => {

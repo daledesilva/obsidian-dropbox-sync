@@ -6,6 +6,12 @@ export interface DiskListedFile {
   size: number;
 }
 
+export interface DiskListResult {
+  files: DiskListedFile[];
+  /** Directory paths where adapter.list failed (G22 — incomplete scan signal). */
+  listErrors: string[];
+}
+
 /**
  * Recursively list files under a vault folder using DataAdapter.
  *
@@ -20,8 +26,9 @@ export async function listFilesRecursive(
     /** Skip descending into these directory prefixes (e.g. ".git/"). */
     skipDirPrefixes?: string[];
   },
-): Promise<DiskListedFile[]> {
+): Promise<DiskListResult> {
   const results: DiskListedFile[] = [];
+  const listErrors: string[] = [];
   const normalizedRoot = normalizePath(root);
   const skipPrefixes = (options?.skipDirPrefixes ?? []).map((p) =>
     p.endsWith("/") ? p.toLowerCase() : `${p.toLowerCase()}/`,
@@ -38,6 +45,7 @@ export async function listFilesRecursive(
     try {
       listed = await adapter.list(dir);
     } catch {
+      listErrors.push(dir || "/");
       return;
     }
 
@@ -64,5 +72,5 @@ export async function listFilesRecursive(
     await walk(normalizedRoot);
   }
 
-  return results;
+  return { files: results, listErrors };
 }

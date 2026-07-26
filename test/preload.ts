@@ -5,8 +5,35 @@ function normalizePath(path: string): string {
 }
 
 // obsidian 모듈 mock
+class TAbstractFile {
+  path = "";
+  children: TAbstractFile[] = [];
+}
+class TFile extends TAbstractFile {
+  stat = { mtime: 0, size: 0 };
+  extension = "md";
+}
+class TFolder extends TAbstractFile {
+  children: TAbstractFile[] = [];
+}
+class FileManager {
+  async renameFile(): Promise<void> {}
+  async trashFile(): Promise<void> {}
+}
+class Vault {
+  configDir = ".obsidian";
+  getRoot(): TFolder {
+    return new TFolder();
+  }
+}
+
 mock.module("obsidian", () => ({
   normalizePath,
+  TAbstractFile,
+  TFile,
+  TFolder,
+  FileManager,
+  Vault,
   requestUrl(): never {
     throw new Error("requestUrl is not available in tests");
   },

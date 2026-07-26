@@ -1,5 +1,6 @@
 import { describe, test, expect } from "bun:test";
 import { buildSyncSummaryMarkdown, type SyncReportInput } from "@/ui/sync-feedback";
+import { emptySyncPlanStats } from "@/types";
 
 describe("live report finalize", () => {
   test("summary section includes outcome", () => {
@@ -11,7 +12,7 @@ describe("live report finalize", () => {
       version: "0.0.0",
       plan: {
         items: [],
-        stats: { upload: 0, download: 0, deleteLocal: 0, deleteRemote: 0, conflict: 0, noop: 0 },
+        stats: emptySyncPlanStats(),
       },
       result: { succeeded: [], failed: [], deferred: [] },
     };

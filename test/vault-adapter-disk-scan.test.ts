@@ -45,6 +45,7 @@ function createMockVault(files: MockFile[], adapterTree: Record<string, { files?
     modifyBinary: async () => {},
     createBinary: async () => {},
     createFolder: async () => {},
+    getRoot: () => ({ path: "", children: [] }),
   };
 
   return vault;

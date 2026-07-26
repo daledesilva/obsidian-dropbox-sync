@@ -7,6 +7,7 @@ import {
   type ClassifyOptions,
 } from "@/sync/planner";
 import type { FileInfo, RemoteEntry, SyncEntry } from "@/types";
+import { emptySyncPlanStats } from "@/types";
 
 // ── classifyChange 단위 테스트 ──
 
@@ -266,11 +267,15 @@ describe("createPlan", () => {
       [mkBase("a.md", "hash_a"), mkBase("b.md", "hash_b")],
     );
 
-    // a.md: 양쪽 동일 → noop (플랜에 없음)
+    // a.md: 양쪽 동일 → recordBase (G4)
     // b.md: 로컬만 변경 + 원격 삭제(base에는 있지만 remote에 없음) → upload (변경 우선)
     // c.md: 새 원격 파일 → download
-    expect(plan.items).toHaveLength(2);
+    expect(plan.items).toHaveLength(3);
     expect(plan.stats.noop).toBe(1);
+    expect(plan.stats.recordBase).toBe(1);
+
+    const aAction = plan.items.find((i) => i.pathLower === "a.md");
+    expect(aAction?.action.type).toBe("recordBase");
 
     const bAction = plan.items.find((i) => i.pathLower === "b.md");
     expect(bAction?.action.type).toBe("upload");
@@ -279,27 +284,22 @@ describe("createPlan", () => {
     expect(cAction?.action.type).toBe("download");
   });
 
-  test("noop은 플랜에서 제외", () => {
+  test("same_content → recordBase in plan", () => {
     const plan = createPlan(
       [mkLocal("a.md", "same")],
       [mkRemote("a.md", "same")],
       [],
     );
-    expect(plan.items).toHaveLength(0);
+    expect(plan.items).toHaveLength(1);
+    expect(plan.items[0].action.type).toBe("recordBase");
+    expect(plan.stats.recordBase).toBe(1);
     expect(plan.stats.noop).toBe(1);
   });
 
   test("빈 입력 → 빈 플랜", () => {
     const plan = createPlan([], [], []);
     expect(plan.items).toHaveLength(0);
-    expect(plan.stats).toEqual({
-      upload: 0,
-      download: 0,
-      deleteLocal: 0,
-      deleteRemote: 0,
-      conflict: 0,
-      noop: 0,
-    });
+    expect(plan.stats).toEqual(emptySyncPlanStats());
   });
 
   test("대소문자 정규화: pathLower 기준 매칭", () => {
@@ -308,8 +308,9 @@ describe("createPlan", () => {
       [mkRemote("notes/readme.md", "same")],
       [],
     );
-    // 같은 파일로 매칭 → noop
-    expect(plan.items).toHaveLength(0);
+    // 같은 파일로 매칭 → recordBase (G4)
+    expect(plan.items).toHaveLength(1);
+    expect(plan.items[0].action.type).toBe("recordBase");
     expect(plan.stats.noop).toBe(1);
   });
 

@@ -6,6 +6,7 @@ import {
   type SyncReportInput,
 } from "@/ui/sync-feedback";
 import type { SyncPlan, SyncResult } from "@/types";
+import { emptySyncPlanStats } from "@/types";
 
 function makeResult(overrides: Partial<SyncResult> = {}): SyncResult {
   return {
@@ -19,15 +20,7 @@ function makeResult(overrides: Partial<SyncResult> = {}): SyncResult {
 function makePlan(stats: Partial<SyncPlan["stats"]> = {}): SyncPlan {
   return {
     items: [],
-    stats: {
-      upload: 0,
-      download: 0,
-      deleteLocal: 0,
-      deleteRemote: 0,
-      conflict: 0,
-      noop: 0,
-      ...stats,
-    },
+    stats: { ...emptySyncPlanStats(), ...stats },
   };
 }
 

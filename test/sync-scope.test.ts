@@ -46,10 +46,10 @@ describe("isSyncExcluded via built-in patterns", () => {
     expect(isSyncExcluded(".sync-state/entries.json", BUILT_IN)).toBe(true);
   });
 
-  test("sync logs and debug logs are not excluded by built-ins", () => {
+  test("sync logs and debug logs are excluded by built-ins", () => {
     expect(isSyncExcluded("_sync-log.md", BUILT_IN)).toBe(false);
-    expect(isSyncExcluded("sync-logs/_sync-log_2025-01-01-120000_desktop_abcd.md", BUILT_IN)).toBe(false);
-    expect(isSyncExcluded("sync-debug-abc.log", BUILT_IN)).toBe(false);
+    expect(isSyncExcluded("sync-logs/_sync-log_2025-01-01-120000_desktop_abcd.md", BUILT_IN)).toBe(true);
+    expect(isSyncExcluded("sync-debug-abc.log", BUILT_IN)).toBe(true);
   });
 
   test("normal note is not excluded", () => {
@@ -58,9 +58,9 @@ describe("isSyncExcluded via built-in patterns", () => {
 });
 
 describe("vaultEventShouldTriggerSync", () => {
-  test("sync-state excluded; sync logs trigger", () => {
-    expect(vaultEventShouldTriggerSync("sync-debug-abc.log", BUILT_IN)).toBe(true);
-    expect(vaultEventShouldTriggerSync("sync-logs/_sync-log_2025.md", BUILT_IN)).toBe(true);
+  test("sync-state excluded; sync logs excluded from vault events", () => {
+    expect(vaultEventShouldTriggerSync("sync-debug-abc.log", BUILT_IN)).toBe(false);
+    expect(vaultEventShouldTriggerSync("sync-logs/_sync-log_2025.md", BUILT_IN)).toBe(false);
     expect(vaultEventShouldTriggerSync(".sync-state/entries.json", BUILT_IN)).toBe(false);
   });
 
@@ -76,10 +76,10 @@ describe("vaultRenameShouldTriggerSync", () => {
     ).toBe(false);
   });
 
-  test("rename between sync logs triggers", () => {
+  test("rename between sync logs does not trigger", () => {
     expect(
       vaultRenameShouldTriggerSync("sync-debug-a.log", "sync-debug-b.log", BUILT_IN),
-    ).toBe(true);
+    ).toBe(false);
   });
 
   test("rename between syncable paths triggers", () => {

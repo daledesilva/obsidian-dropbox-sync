@@ -89,10 +89,12 @@ describe("대량 파일 시나리오", () => {
     await A.sync();
     await B.sync();
 
-    // 변경 없이 다시 sync
+    // 변경 없이 다시 sync — may record base (G4) but no transfer actions
     const result = await A.sync();
-    expect(result.plan.items).toHaveLength(0);
-    expect(result.plan.stats.noop).toBeGreaterThanOrEqual(0);
+    const transferItems = result.plan.items.filter(
+      (i) => i.action.type !== "recordBase" && i.action.type !== "noop",
+    );
+    expect(transferItems).toHaveLength(0);
   });
 
   test("3기기 동기화", async () => {

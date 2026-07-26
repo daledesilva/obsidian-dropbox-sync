@@ -4,6 +4,62 @@ import {
   MemoryStateStore,
 } from "@/adapters/memory";
 import { SyncEngine, type CycleResult, type SyncEngineOptions } from "@/sync/engine";
+import { findNewestConflictSibling, isConflictFile } from "@/sync/conflict-handlers";
+import type { VaultSection } from "@/sync/sync-scope";
+
+/** Thrown when {@link Device.sync} is called while the device is offline. */
+export class DeviceOfflineError extends Error {
+  constructor(deviceName: string) {
+    super(`Device offline: ${deviceName}`);
+    this.name = "DeviceOfflineError";
+  }
+}
+
+/**
+ * Sentinel returned by {@link Device.sync} when offline (alternative to throw).
+ * Prefer checking with {@link isOfflineCycleResult} when using the sentinel path.
+ */
+export type OfflineCycleResult = { offline: true };
+
+export function isOfflineCycleResult(
+  result: CycleResult | OfflineCycleResult,
+): result is OfflineCycleResult {
+  return "offline" in result && result.offline === true;
+}
+
+/**
+ * Models a device using the Dropbox desktop client (P3): writes only to remote
+ * storage with no SyncEngine or sync-state store.
+ */
+export class DropboxAppDevice {
+  constructor(
+    readonly name: string,
+    private readonly remote: MemoryRemoteStorage,
+  ) {}
+
+  async upload(path: string, content: string | Uint8Array): Promise<void> {
+    const data =
+      typeof content === "string" ? new TextEncoder().encode(content) : content;
+    await this.remote.upload(path, data);
+  }
+
+  async delete(path: string): Promise<void> {
+    await this.remote.delete(path);
+  }
+
+  async move(from: string, to: string): Promise<void> {
+    await this.remote.move(from, to);
+  }
+
+  async createFolder(path: string): Promise<void> {
+    this.remote.seedEmptyFolder(path);
+  }
+
+  async deleteFolder(path: string): Promise<void> {
+    this.remote.deleteFolder(path);
+  }
+}
+
 /**
  * 다기기 동기화 시뮬레이터.
  *
@@ -22,6 +78,11 @@ export class SyncSimulator {
     const device = new Device(name, this.remote, options);
     this.devices.set(name, device);
     return device;
+  }
+
+  /** Dropbox desktop client — remote-only writes, no plugin sync engine. */
+  addDropboxAppDevice(name: string): DropboxAppDevice {
+    return new DropboxAppDevice(name, this.remote);
   }
 
   getDevice(name: string): Device {
@@ -57,14 +118,14 @@ export class SyncSimulator {
 
   /**
    * 모든 device의 모든 파일이 일치하는지 검증.
-   * (conflict 파일 제외)
+   * (conflict copies 제외 — canonical path만)
    */
   async assertAllConsistent(): Promise<void> {
     const allPaths = new Set<string>();
     for (const device of this.devices.values()) {
       const files = await device.fs.list();
       for (const f of files) {
-        if (!f.path.includes(".conflict")) {
+        if (!isConflictFile(f.path)) {
           allPaths.add(f.path);
         }
       }
@@ -80,6 +141,7 @@ export class Device {
   readonly fs: MemoryFileSystem;
   readonly store: MemoryStateStore;
   readonly engine: SyncEngine;
+  private isOffline = false;
 
   constructor(
     readonly name: string,
@@ -88,7 +150,13 @@ export class Device {
   ) {
     this.fs = new MemoryFileSystem();
     this.store = new MemoryStateStore();
-    this.engine = new SyncEngine({ fs: this.fs, remote, store: this.store }, options);
+    this.engine = new SyncEngine(
+      { fs: this.fs, remote, store: this.store },
+      {
+        resurrectionResolver: async () => "upload",
+        ...options,
+      },
+    );
   }
 
   async editFile(path: string, content: string, mtime?: number): Promise<void> {
@@ -102,7 +170,46 @@ export class Device {
     this.engine.trackDelete(path.toLowerCase());
   }
 
+  async rename(from: string, to: string): Promise<void> {
+    await this.fs.rename(from, to);
+    if (from.toLowerCase() !== to.toLowerCase()) {
+      this.engine.trackDelete(from.toLowerCase());
+    }
+  }
+
+  goOffline(): void {
+    this.isOffline = true;
+  }
+
+  goOnline(): void {
+    this.isOffline = false;
+  }
+
+  get offline(): boolean {
+    return this.isOffline;
+  }
+
+  setSections(sections: VaultSection[], configDir = ".obsidian"): void {
+    this.engine.setSyncSections(sections, configDir);
+  }
+
+  /**
+   * Run one sync cycle. Throws {@link DeviceOfflineError} when the device is offline.
+   */
   async sync(): Promise<CycleResult> {
+    if (this.isOffline) {
+      throw new DeviceOfflineError(this.name);
+    }
+    return this.engine.runCycle();
+  }
+
+  /**
+   * Like {@link sync} but returns `{ offline: true }` instead of throwing when offline.
+   */
+  async trySync(): Promise<CycleResult | OfflineCycleResult> {
+    if (this.isOffline) {
+      return { offline: true };
+    }
     return this.engine.runCycle();
   }
 
@@ -113,6 +220,12 @@ export class Device {
 
   hasFile(path: string): boolean {
     return this.fs.has(path);
+  }
+
+  /** Newest conflict sibling for a canonical path (Dropbox or legacy format). */
+  async findConflictSibling(canonicalPath: string): Promise<string | undefined> {
+    const files = await this.fs.list();
+    return findNewestConflictSibling(files.map((f) => f.path), canonicalPath) ?? undefined;
   }
 
   /** prefix로 시작하는 파일 경로 반환 */

@@ -1,7 +1,6 @@
 import { Menu, Notice, Platform, Plugin, TFile } from "obsidian";
 import {
   DEFAULT_SETTINGS,
-  generateDeviceId,
   generateVaultInstanceId,
   getDefaultExcludePatterns,
   mergeBuiltInExcludePatterns,
@@ -30,9 +29,11 @@ import type {
   DeleteGuardResult,
   PathGuardIssue,
   PathIssueResolution,
+  SyncPlan,
   SyncPlanItem,
   SyncResult,
 } from "./types";
+import { emptySyncPlanStats } from "./types";
 import { checkDeleteGuard } from "./sync/guards";
 import {
   groupSucceededPathsByAction,
@@ -49,14 +50,37 @@ import { LongpollManager } from "./sync/longpoll";
 import { EngineManager } from "./sync/engine-manager";
 import { LogManager } from "./log-manager";
 import { postCursorDebugLogLine, type CursorDebugLogMeta } from "./debug/cursor-debug-ingest";
-import { createSyncMonitorLog, SyncHypotheses, samplePaths } from "./debug/sync-monitor";
+import {
+  createSyncMonitorLog,
+  formatLogPrefix,
+  SyncHypotheses,
+  SyncLogCategories,
+  samplePaths,
+} from "./debug/sync-monitor";
 import { registerDemoCommands } from "./debug/demo-commands";
 import {
   getCursorDebugSessionId,
+  getVerboseDecisionLogging,
+  getDeviceId,
+  getAccessToken,
+  getRefreshToken,
+  getTokenExpiry,
   initDeviceSettings,
+  migrateDeviceCredentialsFromSyncedSettings,
+  patchOAuthTokens,
+  setOAuthTokens,
+  clearOAuthTokens,
+  stripSyncedCredentialFields,
 } from "./device-settings/device-settings";
 import { tryAutoConnect } from "./debug/cursor-debug-discover";
 import { isConflictFile, type SyncEngine } from "./sync/engine";
+import { DeferralTracker } from "./sync/deferral-tracker";
+import type { PermanentSkipEntry } from "./sync/permanent-skip";
+import { computePersistentScopeFingerprint } from "./sync/scope-fingerprint";
+import {
+  reloadOpenMarkdownFile,
+  shouldDeferApplyForOpenEditors,
+} from "./sync/open-editors";
 
 import { fetchFileFromRemote } from "./deep-link";
 import {
@@ -85,7 +109,6 @@ import {
   vaultRenameShouldTriggerSync,
 } from "./sync/sync-scope";
 import { formatDiagnosticsForLog } from "./sync/sync-diagnostics";
-import type { SyncPlan } from "./types";
 import {
   formatBackgroundSectionsLabel,
   getEnabledBackgroundSections,
@@ -135,6 +158,9 @@ export default class DropboxSyncPlugin extends Plugin {
   private interactiveUi = false;
   /** Background sections used when promoting mid-cycle to interactive progress. */
   private backgroundPromoteSections: VaultSection[] | null = null;
+  /** Per-sync bounded deferral clock (G10) — fresh instance each syncNow. */
+  private deferralTracker: DeferralTracker | null = null;
+  private openFileDeleteModal: ConfirmModal | null = null;
 
   get isSyncing(): boolean {
     return this.syncing;
@@ -149,25 +175,32 @@ export default class DropboxSyncPlugin extends Plugin {
    * Central log entry: gated by debugLoggingEnabled.
    * When on, writes the vault sync-debug file and best-effort POSTs to Cursor
    * Debug ingest when device-local host/path are configured.
-   * Optional meta tags (hypothesisId / location) filter Wi‑Fi NDJSON in Debug sessions.
+   * Optional meta tags (hypothesisId / location / category / ruleId) filter
+   * Wi‑Fi NDJSON in Debug sessions.
+   *
+   * `trace` lines are the per-path planner decision firehose — one line per
+   * vault file per cycle — so they are dropped unless the device opts in.
    */
   private log(msg: string, data?: unknown, meta?: CursorDebugLogMeta): Promise<void> {
     if (!this.settings.debugLoggingEnabled) {
       return Promise.resolve();
     }
+    if (meta?.level === "trace" && !getVerboseDecisionLogging()) {
+      return Promise.resolve();
+    }
     // Fire-and-forget Wi‑Fi ingest so local flush is not delayed by requestUrl.
     postCursorDebugLogLine(msg, data, meta);
     if (!this.logger) {
-      console.debug("[Dropbox Sync]", msg, data ?? "");
+      console.debug("[Dropbox Sync]", formatLogPrefix(meta), msg, data ?? "");
       return Promise.resolve();
     }
-    return this.logger.log(msg, data);
+    return this.logger.log(`${formatLogPrefix(meta)}${msg}`, data);
   }
 
   /** Settings "Send test log" — verifies local file + optional Cursor ingest. */
   async sendDebugLogCanary(): Promise<void> {
     await this.log("cursor-debug-ingest canary", {
-      deviceId: this.settings.deviceId || "unknown",
+      deviceId: getDeviceId(),
       platform: Platform.isMobile ? "mobile" : "desktop",
     });
     await this.logger?.flush();
@@ -179,13 +212,12 @@ export default class DropboxSyncPlugin extends Plugin {
     // Vault-scoped device prefs (Cursor Debug ingest) before any log/ingest reads.
     initDeviceSettings(this.app);
 
-    await this.loadSettings();
+    const credentialsMigrated = await this.loadSettings();
 
-    let needsSave = false;
-    if (!this.settings.deviceId) {
-      this.settings.deviceId = generateDeviceId();
-      needsSave = true;
-    }
+    // Mint device id in device-local storage (G26).
+    getDeviceId();
+
+    let needsSave = credentialsMigrated;
     // Stable IndexedDB key — never vault.getName() (folder basename collisions).
     if (!this.settings.vaultInstanceId) {
       this.settings.vaultInstanceId = generateVaultInstanceId();
@@ -231,7 +263,7 @@ export default class DropboxSyncPlugin extends Plugin {
     // the file list and View logs. Do not "fix" this into plugin-private storage.
     this.logger = new LogManager(
       this.app.vault.adapter,
-      () => `sync-debug-${this.settings.deviceId || "unknown"}.log`,
+      () => `sync-debug-${getDeviceId()}.log`,
     );
 
     // Same-computer auto-join when Debug logging is already on at launch.
@@ -377,23 +409,87 @@ export default class DropboxSyncPlugin extends Plugin {
 
   // ── Settings ──
 
-  async loadSettings(): Promise<void> {
-    const raw = await this.loadData() as (Partial<PluginSettings> & { syncEnabled?: boolean }) | null;
+  async loadSettings(): Promise<boolean> {
+    const raw = await this.loadData() as (Partial<PluginSettings> & {
+      syncEnabled?: boolean;
+      deviceId?: string;
+      accessToken?: string;
+      refreshToken?: string;
+      tokenExpiry?: number;
+    }) | null;
+    const credentialsMigrated = migrateDeviceCredentialsFromSyncedSettings(
+      raw as Record<string, unknown> | null,
+    );
+    if (credentialsMigrated) {
+      stripSyncedCredentialFields((raw ?? {}) as Record<string, unknown>);
+    }
     const migrated = migrateSettings(raw);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, migrated);
     if (raw?.syncEnabled !== undefined && raw.backgroundSyncEnabled === undefined) {
       this.settings.backgroundSyncEnabled = raw.syncEnabled;
     }
+    return credentialsMigrated;
   }
 
   async saveSettings(): Promise<void> {
-    await this.saveData(this.settings);
+    const payload = { ...this.settings };
+    stripSyncedCredentialFields(payload as unknown as Record<string, unknown>);
+    await this.saveData(payload);
     this.engineMgr?.reset();
     this.applySyncState();
   }
 
   resetEngine(): void {
     this.engineMgr?.reset();
+  }
+
+  /**
+   * G15 / R11: a vault ID change is a re-link — isolate old base, cursor, and delete log.
+   * Call after the user confirms in settings; does not modify vault files.
+   */
+  async handleSyncNameRelink(newSyncName: string): Promise<void> {
+    await this.engineMgr?.clearSyncHistory();
+    this.getOrCreateEngine();
+    const store = this.engineMgr?.store;
+    if (store) {
+      await store.setMeta("linkedSyncName", newSyncName);
+    }
+    this.resetEngine();
+    void this.log("re-link — cleared sync base, cursor, and delete log", {
+      syncName: newSyncName,
+    }, {
+      category: SyncLogCategories.cycle,
+      ruleId: "R11",
+      level: "info",
+      location: "main.handleSyncNameRelink",
+    });
+  }
+
+  /** Detect settings/link drift and ask before continuing with stale cursor/base (G15). */
+  private async ensureLinkedFolder(): Promise<boolean> {
+    if (!this.settings.syncName) return true;
+    this.getOrCreateEngine();
+    const store = this.engineMgr?.store;
+    if (!store) return true;
+
+    const linked = await store.getMeta("linkedSyncName");
+    if (!linked) {
+      await store.setMeta("linkedSyncName", this.settings.syncName);
+      return true;
+    }
+    if (linked === this.settings.syncName) return true;
+
+    const confirmed = await new ConfirmModal(
+      this.app,
+      "Dropbox folder changed",
+      `This device was linked to "${linked}" but is now set to "${this.settings.syncName}".`,
+      "To sync with the new folder, local sync history for the old link (base, cursor, delete log) must be cleared. Your vault files are not deleted.",
+      "Clear and continue",
+      "Cancel",
+    ).waitForConfirmation();
+    if (!confirmed) return false;
+    await this.handleSyncNameRelink(this.settings.syncName);
+    return true;
   }
 
   // ── Auth ──
@@ -407,9 +503,7 @@ export default class DropboxSyncPlugin extends Plugin {
     const tokens = await this.auth.handleCallback(params);
     if (!tokens) return;
 
-    this.settings.accessToken = tokens.accessToken;
-    this.settings.refreshToken = tokens.refreshToken;
-    this.settings.tokenExpiry = tokens.expiresAt;
+    setOAuthTokens(tokens.accessToken, tokens.refreshToken, tokens.expiresAt);
     await this.saveSettings();
 
     new Notice("Connected to Dropbox!");
@@ -425,7 +519,7 @@ export default class DropboxSyncPlugin extends Plugin {
       return;
     }
 
-    if (!this.settings.refreshToken) {
+    if (!getRefreshToken()) {
       new Notice("Dropbox sync: not connected. Open settings to connect first.");
       return;
     }
@@ -486,7 +580,7 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   async openSyncScopeModal(): Promise<void> {
-    if (!this.settings.refreshToken) {
+    if (!getRefreshToken()) {
       new Notice("Dropbox sync: not connected. Open settings to connect.");
       return;
     }
@@ -552,12 +646,16 @@ export default class DropboxSyncPlugin extends Plugin {
       new Notice("Dropbox sync: set a vault ID in settings first.");
       return;
     }
-    if (!this.settings.refreshToken) {
+    if (!getRefreshToken()) {
       new Notice("Dropbox sync: not connected. Open settings to connect.");
       return;
     }
     if (typeof navigator !== "undefined" && !navigator.onLine) {
       await this.log("sync skipped: offline");
+      return;
+    }
+    if (!(await this.ensureLinkedFolder())) {
+      new Notice("Dropbox sync cancelled — link change not confirmed.");
       return;
     }
 
@@ -593,7 +691,7 @@ export default class DropboxSyncPlugin extends Plugin {
       try {
         liveReport = await SyncLiveReport.open(this.app, {
           startedAt,
-          deviceId: this.settings.deviceId,
+          deviceId: getDeviceId(),
           deviceType: getSyncDeviceTypeLabel(),
           version: this.manifest.version,
           scope: scopeLabel,
@@ -679,6 +777,7 @@ export default class DropboxSyncPlugin extends Plugin {
       }
       this.conflictIndex = 0;
       this.conflictTotal = 0;
+      this.deferralTracker = new DeferralTracker();
 
       // Manual: one section at a time (notes → settings → plugins → workspaces) with
       // explorer progress segments. Deletes are deferred to a trailing Deletions
@@ -696,6 +795,7 @@ export default class DropboxSyncPlugin extends Plugin {
         const aggregatedDeferredItems: SyncResult["deferred"] = [];
         let aggregatedDeletesSkipped = 0;
         let aggregatedPathsSkipped = 0;
+        let lastPermanentSkips: PermanentSkipEntry[] | undefined;
         let lastPlan: SyncPlan | undefined;
         let lastDiagnostics: typeof diagnostics;
         /** Per-section deletes held until the trailing Deletions progress segment. */
@@ -727,6 +827,9 @@ export default class DropboxSyncPlugin extends Plugin {
           aggregatedDeferredItems.push(...cycleResult.result.deferred);
           aggregatedDeletesSkipped += cycleResult.deletesSkipped ?? 0;
           aggregatedPathsSkipped += cycleResult.pathsSkipped ?? 0;
+          if (cycleResult.permanentSkips?.length) {
+            lastPermanentSkips = cycleResult.permanentSkips;
+          }
 
           const sectionPending = cycleResult.pendingDeletes ?? [];
           if (sectionPending.length > 0) {
@@ -765,6 +868,7 @@ export default class DropboxSyncPlugin extends Plugin {
             cycleResult.result,
             cycleResult.deletesSkipped,
             cycleResult.pathsSkipped,
+            cycleResult.permanentSkips,
           );
           sectionProgress.markResult(
             section,
@@ -920,14 +1024,12 @@ export default class DropboxSyncPlugin extends Plugin {
         deferredCount = aggregatedDeferredItems.length || undefined;
         pathsSkipped = aggregatedPathsSkipped || undefined;
 
-        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped, lastPermanentSkips);
         outcome = feedback.outcome;
         endMessage = feedback.endMessage;
         noticeDuration = feedback.noticeDuration;
 
-        if (aggregatedFailed.length === 0 && !aggregatedDeletesSkipped && aggregatedDeferredItems.length === 0) {
-          cursorUpdated = true;
-        }
+        cursorUpdated = engine.getLastCursorUpdated();
       } else {
         engine.setDeferDeletes(false);
         engine.setDeferCursorUpdate(false);
@@ -958,7 +1060,12 @@ export default class DropboxSyncPlugin extends Plugin {
         this.engineMgr?.persistDeleteLog();
 
         if (this.interactiveUi && this.sectionProgress && this.progressSection) {
-          const sectionFeedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
+          const sectionFeedback = buildSyncResultFeedback(
+            result,
+            deletesSkipped,
+            pathsSkipped,
+            cycleResult.permanentSkips,
+          );
           this.sectionProgress.markResult(
             this.progressSection,
             outcomeToSectionState(sectionFeedback.outcome),
@@ -994,14 +1101,12 @@ export default class DropboxSyncPlugin extends Plugin {
           this.sectionProgress.finishSegmentNotices();
         }
 
-        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped);
+        const feedback = this.reportSyncResult(result, deletesSkipped, pathsSkipped, cycleResult.permanentSkips);
         outcome = feedback.outcome;
         endMessage = feedback.endMessage;
         noticeDuration = feedback.noticeDuration;
 
-        if (result.failed.length === 0 && !deletesSkipped && !deferredCount) {
-          cursorUpdated = true;
-        }
+        cursorUpdated = cycleResult.cursorUpdated ?? engine.getLastCursorUpdated();
       }
     } catch (e) {
       // Log before UI updates — markInterrupted can throw and would otherwise
@@ -1041,8 +1146,7 @@ export default class DropboxSyncPlugin extends Plugin {
           /* progress UI must not mask auth errors */
         }
         await this.log("auth error — token revoked", e);
-        this.settings.accessToken = "";
-        this.settings.tokenExpiry = 0;
+        clearOAuthTokens();
         await this.saveSettings();
         outcome = "auth_error";
         errorMessage = "Token expired";
@@ -1081,7 +1185,7 @@ export default class DropboxSyncPlugin extends Plugin {
         deferredCount,
         pathsSkipped,
         errorMessage,
-        deviceId: this.settings.deviceId,
+        deviceId: getDeviceId(),
         version: this.manifest.version,
         diagnostics,
       };
@@ -1096,7 +1200,7 @@ export default class DropboxSyncPlugin extends Plugin {
         const markdown = buildSyncSummaryMarkdown(reportInput);
         await writeSyncLogFallback(
           this.app,
-          buildSyncLogPath(startedAt, this.settings.deviceId, getSyncDeviceTypeLabel()),
+          buildSyncLogPath(startedAt, getDeviceId(), getSyncDeviceTypeLabel()),
           markdown,
         );
       }
@@ -1107,6 +1211,7 @@ export default class DropboxSyncPlugin extends Plugin {
       this.progressSection = null;
       this.syncDeletedByEngine.clear();
       this.abortController = null;
+      this.deferralTracker = null;
       this.lastSyncTime = endedAt;
       void this.log("sync finished", {
         outcome,
@@ -1187,7 +1292,7 @@ export default class DropboxSyncPlugin extends Plugin {
 
   async checkRemoteFolder(syncName: string): Promise<number | null> {
     const appKey = getEffectiveAppKey(this.settings);
-    if (!appKey || !this.settings.accessToken) return null;
+    if (!appKey || !getAccessToken()) return null;
 
     try {
       const resp = await obsidianHttpClient({
@@ -1195,7 +1300,7 @@ export default class DropboxSyncPlugin extends Plugin {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          Authorization: `Bearer ${this.settings.accessToken}`,
+          Authorization: `Bearer ${getAccessToken()}`,
         },
         body: JSON.stringify({ path: `/${syncName}`, recursive: true, limit: 100 }),
       });
@@ -1258,24 +1363,26 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   private createEngineDeps() {
+    const syncLog = createSyncMonitorLog((msg, data, meta) => this.log(msg, data, meta));
     const fs = new VaultAdapter(
       this.app.vault,
       this.settings.excludePatterns,
       this.app.fileManager,
       this.app.vault.configDir,
     );
+    fs.log = syncLog;
     const remote = new DropboxAdapter({
       httpClient: obsidianHttpClient,
       appKey: getEffectiveAppKey(this.settings),
       remotePath: getEffectiveRemotePath(this.settings),
-      getAccessToken: () => this.settings.accessToken,
-      getRefreshToken: () => this.settings.refreshToken,
-      getTokenExpiry: () => this.settings.tokenExpiry,
+      getAccessToken,
+      getRefreshToken,
+      getTokenExpiry: () => getTokenExpiry(),
       onTokenRefreshed: (accessToken, expiresAt) => {
-        this.settings.accessToken = accessToken;
-        this.settings.tokenExpiry = expiresAt;
+        patchOAuthTokens({ accessToken, tokenExpiry: expiresAt });
         void this.saveSettings();
       },
+      log: syncLog,
     });
     // iOS uses vault files; elsewhere IndexedDB keyed by vaultInstanceId.
     const store: SyncStateStore = Platform.isIosApp
@@ -1384,7 +1491,27 @@ export default class DropboxSyncPlugin extends Plugin {
           this.deleteConfirmModal = null;
         }
       },
-      isFileActive: (path: string) => this.app.workspace.getActiveFile()?.path === path,
+      isFileActive: (path: string) => shouldDeferApplyForOpenEditors(this.app, path),
+      shouldDeferApply: (path: string) => shouldDeferApplyForOpenEditors(this.app, path),
+      confirmDeleteLocalWhileOpen: (path: string) => this.confirmDeleteLocalWhileOpen(path),
+      reloadOpenFile: (path: string) => reloadOpenMarkdownFile(this.app, path),
+      deferralTracker: this.deferralTracker ?? undefined,
+      resurrectionResolver: async (localPath: string) => {
+        const upload = await new ConfirmModal(
+          this.app,
+          "Upload local file?",
+          `"${localPath}" exists locally but not on Dropbox, and there is no deletion history for this path.`,
+          "Upload will add the file to Dropbox. Discard removes the local copy without uploading.",
+          "Upload",
+          "Discard local copy",
+        ).waitForConfirmation();
+        return upload ? "upload" : "discard";
+      },
+      persistentScopeFingerprint: computePersistentScopeFingerprint({
+        backgroundSections: getEnabledBackgroundSections(this.settings),
+        excludePatterns: this.settings.excludePatterns,
+        includeHiddenFilesAndFolders: this.settings.includeHiddenFilesAndFolders,
+      }),
       excludePatterns: this.settings.excludePatterns,
       includeHiddenFilesAndFolders: this.settings.includeHiddenFilesAndFolders,
       // Higher parallelism for many-small-file sync (e.g. plugins); Dropbox write-lock
@@ -1399,6 +1526,18 @@ export default class DropboxSyncPlugin extends Plugin {
       },
       strictLocalPaths: Platform.isIosApp || Platform.isMobile,
       onPathIssues: (issues: PathGuardIssue[]) => this.handlePathIssues(issues),
+      onPathCollisions: (items: SyncPlanItem[]) => {
+        for (const item of items) {
+          if (item.action.type !== "pathCollision") continue;
+          new Notice(
+            `Dropbox Sync: "${item.localPath}" is a ${item.action.localKind} locally but a ${item.action.remoteKind} on Dropbox — skipped to avoid data loss.`,
+            10_000,
+          );
+        }
+      },
+      onPathNotice: (message: string) => {
+        new Notice(message, 8000);
+      },
       onPlanReady: async (plan: SyncPlan) => {
         // Per-file status bar: every actionable path becomes syncing for this cycle.
         this.fileSyncStatus.markPlanSyncing(plan.items);
@@ -1489,6 +1628,8 @@ export default class DropboxSyncPlugin extends Plugin {
       this.app.vault.on("modify", (file) => {
         if (this.syncing || !(file instanceof TFile)) return;
         if (!vaultEventShouldTriggerSync(file.path, excludes)) return;
+        // G18: conflict-copy bursts settle via the existing debounced sync (row 22) —
+        // no separate conflict debounce timer is needed here.
         if (!isConflictFile(file.path)) {
           this.fileSyncStatus.markPending(
             file.path,
@@ -1512,7 +1653,7 @@ export default class DropboxSyncPlugin extends Plugin {
           });
           return;
         }
-        engine.trackDelete(p);
+        engine.trackDelete(p, file.path);
         this.engineMgr?.persistDeleteLog();
         void this.log("vault delete tracked", {
           path: p,
@@ -1529,7 +1670,10 @@ export default class DropboxSyncPlugin extends Plugin {
         this.fileSyncStatus.renamePath(oldPath, file.path);
         const triggersSync = vaultRenameShouldTriggerSync(oldPath, file.path, excludes);
         if (triggersSync && !this.suppressRenameDeleteTracking) {
-          engine.trackDelete(oldPath.toLowerCase());
+          // C1: case-only renames share path_lower — do not record a delete intent.
+          if (oldPath.toLowerCase() !== file.path.toLowerCase()) {
+            engine.trackDelete(oldPath.toLowerCase(), oldPath);
+          }
           this.engineMgr?.persistDeleteLog();
         }
         if (!this.syncing && triggersSync) {
@@ -1562,7 +1706,7 @@ export default class DropboxSyncPlugin extends Plugin {
     if (this.settings.onboardingDone) return;
     this.settings.onboardingDone = true;
     await this.saveSettings();
-    if (!this.settings.refreshToken) {
+    if (!getRefreshToken()) {
       new OnboardingModal(this.app, {
         onOpenSettings: () => this.openSettings(),
       }).open();
@@ -1584,7 +1728,7 @@ export default class DropboxSyncPlugin extends Plugin {
   private isBackgroundSyncTimerEligible(): boolean {
     return (
       this.settings.backgroundSyncEnabled
-      && !!this.settings.refreshToken
+      && !!getRefreshToken()
       && !!this.settings.syncName
     );
   }
@@ -1606,6 +1750,18 @@ export default class DropboxSyncPlugin extends Plugin {
   private scheduleDebouncedSync(): void {
     if (!this.settings.backgroundSyncEnabled) return;
     this.clearDebounceTimer();
+    // R13: settle local bursts before uploading. This debounce covers vault-event
+    // triggers only — manual sync and long-poll bypass it (G18).
+    void this.log("scheduling debounced sync for settled burst", {
+      debounceSec: this.settings.vaultEventDebounceSec,
+      appliesTo: "vault_events_only",
+      oneConflictCopyPerPath: false,
+    }, {
+      category: SyncLogCategories.cycle,
+      ruleId: "R13",
+      level: "trace",
+      location: "main.scheduleDebouncedSync",
+    });
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
       void this.syncNow();
@@ -1700,7 +1856,7 @@ export default class DropboxSyncPlugin extends Plugin {
         backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
         lastSyncTime: this.lastSyncTime,
         lastSyncSummary: this.lastSyncSummary,
-        deviceId: this.settings.deviceId,
+        deviceId: getDeviceId(),
         version: this.manifest.version,
       },
       {
@@ -1745,7 +1901,7 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private async showLogs(): Promise<void> {
     const content = await this.readLogs();
-    new LogViewerModal(this.app, content, this.settings.deviceId).open();
+    new LogViewerModal(this.app, content, getDeviceId()).open();
   }
 
   private openSettings(): void {
@@ -1766,16 +1922,14 @@ export default class DropboxSyncPlugin extends Plugin {
       {
         items: deleteItems,
         stats: {
-          upload: 0,
-          download: 0,
+          ...emptySyncPlanStats(),
           deleteLocal: deleteItems.filter((i) => i.action.type === "deleteLocal").length,
           deleteRemote: deleteItems.filter((i) => i.action.type === "deleteRemote").length,
-          conflict: 0,
-          noop: 0,
         },
       },
       this.settings.deleteThreshold,
       this.settings.deleteProtection,
+      createSyncMonitorLog((msg, data, meta) => this.log(msg, data, meta)),
     );
     if (guard.passed) return true;
 
@@ -1805,6 +1959,41 @@ export default class DropboxSyncPlugin extends Plugin {
   }
 
   /**
+   * G21: user choice when a file open here was deleted on another device.
+   * Returns true to delete locally too; false keeps editing (bounded deferral).
+   */
+  private async confirmDeleteLocalWhileOpen(path: string): Promise<boolean> {
+    if (this.openFileDeleteModal) {
+      void this.log("open-file delete guard: modal already open — keep editing", {
+        path,
+      }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.confirmDeleteLocalWhileOpen" });
+      return false;
+    }
+    const modal = new ConfirmModal(
+      this.app,
+      "File deleted elsewhere",
+      `"${path}" is open here but was deleted on another device.`,
+      "Keep editing to retain your local copy, or delete it here too.",
+      "Delete here too",
+      "Keep editing",
+    );
+    this.openFileDeleteModal = modal;
+    try {
+      const deleteHere = await modal.waitForConfirmation();
+      void this.log(
+        deleteHere
+          ? `open-file delete guard: delete here too (${path})`
+          : `open-file delete guard: keep editing (${path})`,
+        { path },
+        { hypothesisId: SyncHypotheses.guardSkip, location: "main.confirmDeleteLocalWhileOpen" },
+      );
+      return deleteHere;
+    } finally {
+      this.openFileDeleteModal = null;
+    }
+  }
+
+  /**
    * Drop orphan delete-log paths (no sync base entry and no local file).
    * Load base keys + local paths once — per-path getEntry + getFiles().some
    * was O(n²) and stalled iPad sync start with thousands of delete intents.
@@ -1823,6 +2012,7 @@ export default class DropboxSyncPlugin extends Plugin {
     );
 
     let pruned = 0;
+    engine.clearOutOfScopeDeleteIntents();
     for (const pathLower of deleteLog) {
       if (!basePathLowers.has(pathLower) && !localPathLowers.has(pathLower)) {
         engine.clearDeleteIntent(pathLower);
@@ -1867,8 +2057,9 @@ export default class DropboxSyncPlugin extends Plugin {
     result: SyncResult,
     deletesSkipped?: number,
     pathsSkipped?: number,
+    permanentSkips?: PermanentSkipEntry[],
   ): { outcome: SyncOutcome; endMessage: string; noticeDuration: number } {
-    const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped);
+    const feedback = buildSyncResultFeedback(result, deletesSkipped, pathsSkipped, permanentSkips);
     if (result.failed.length > 0) {
       for (const f of result.failed) {
         const err = f.error;

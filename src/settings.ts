@@ -6,6 +6,7 @@ export const DEFAULT_APP_KEY: string =
 import type { ConflictStrategy } from "./types";
 import type { VaultSection } from "./sync/sync-scope";
 import { SYNC_SCOPE_LABELS } from "./sync/sync-scope";
+import { getCustomAppKey } from "./device-settings/device-settings";
 
 export const VAULT_EVENT_DEBOUNCE_OPTIONS = [2, 5, 10, 30, 60] as const;
 export type VaultEventDebounceSec = (typeof VAULT_EVENT_DEBOUNCE_OPTIONS)[number];
@@ -27,9 +28,6 @@ export const DEFAULT_BACKGROUND_SYNC_SECTIONS: BackgroundSyncSections = {
 export interface PluginSettings {
   appKey: string;
   useCustomAppKey: boolean;
-  refreshToken: string;
-  accessToken: string;
-  tokenExpiry: number;
   syncInterval: number;
   /** Interval, longpoll, and file-watch triggers. Manual “Sync now” works when false. */
   backgroundSyncEnabled: boolean;
@@ -47,7 +45,6 @@ export interface PluginSettings {
   deleteThreshold: number;
   syncName: string;
   excludePatterns: string[];
-  deviceId: string;
   /**
    * Stable per-vault id for IndexedDB sync-state naming. Must not use
    * vault.getName() — folder basenames collide across vaults on one machine.
@@ -67,9 +64,6 @@ export interface PluginSettings {
 export const DEFAULT_SETTINGS: PluginSettings = {
   appKey: "",
   useCustomAppKey: false,
-  refreshToken: "",
-  accessToken: "",
-  tokenExpiry: 0,
   syncInterval: 60,
   backgroundSyncEnabled: false,
   backgroundSyncSections: { ...DEFAULT_BACKGROUND_SYNC_SECTIONS },
@@ -80,7 +74,6 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   deleteThreshold: 5,
   syncName: "",
   excludePatterns: [],
-  deviceId: "",
   vaultInstanceId: "",
   syncOnCreateDeleteRename: true,
   includeHiddenFilesAndFolders: false,
@@ -97,9 +90,15 @@ export function getBuiltInExcludePatterns(configDir: string): string[] {
     ".git/",
     ".trash/",
     ".sync-state/",
+    // Device debug log + per-sync reports stay local (C8); they are vault clutter
+    // and must not travel when Notes & files is enabled.
+    "sync-debug-*.log",
+    "sync-logs/",
     ".DS_Store",
     "Thumbs.db",
     `${configDir}/workspace*`,
+    // OAuth tokens must not sync via Plugins section (G25).
+    `${configDir}/plugins/dropbox-sync/data.json`,
   ];
 }
 
@@ -219,19 +218,14 @@ export function migrateSettings(
   ) {
     migrated.largeSyncInteractiveThreshold = 10;
   }
+  if ((migrated as { conflictStrategy?: string }).conflictStrategy === "newest") {
+    migrated.conflictStrategy = "keep_both";
+  }
   return migrated;
 }
 
-export function generateDeviceId(): string {
-  const chars = "abcdefghijklmnopqrstuvwxyz0123456789";
-  let id = "";
-  for (let i = 0; i < 4; i++) {
-    id += chars[Math.floor(Math.random() * chars.length)];
-  }
-  return id;
-}
+export { generateDeviceId } from "./device-settings/device-settings-defaults";
 
-/** UUID for vault-scoped IndexedDB; longer and collision-safe vs deviceId. */
 export function generateVaultInstanceId(): string {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
     return crypto.randomUUID();
@@ -269,8 +263,10 @@ export function getEffectiveRemotePath(settings: PluginSettings): string {
 }
 
 export function getEffectiveAppKey(settings: PluginSettings): string {
-  if (settings.useCustomAppKey && settings.appKey) {
-    return settings.appKey;
+  if (settings.useCustomAppKey) {
+    const deviceKey = getCustomAppKey();
+    if (deviceKey) return deviceKey;
+    if (settings.appKey) return settings.appKey;
   }
   return DEFAULT_APP_KEY || settings.appKey;
 }

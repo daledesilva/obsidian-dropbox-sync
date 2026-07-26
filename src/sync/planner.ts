@@ -1,12 +1,13 @@
-import type {
-  FileInfo,
-  RemoteEntry,
-  SyncEntry,
-  SyncAction,
-  SyncPlanItem,
-  SyncPlan,
-} from "../types";
+import type { FileInfo, RemoteEntry, SyncEntry, SyncAction, SyncPlanItem, SyncPlan } from "../types";
+import { emptySyncPlanStats } from "../types";
 import type { CycleContext } from "./cycle-context";
+import {
+  logDecision,
+  logRule,
+  shortHash,
+  type SyncMonitorLog,
+} from "../debug/sync-monitor";
+import { SyncRules } from "../debug/sync-monitor";
 
 /** 로컬 파일 상태 (planner 입력) */
 export interface LocalState {
@@ -25,6 +26,10 @@ export interface RemoteState {
 export interface ClassifyOptions {
   /** 로컬에서 삭제 이벤트가 기록되었는지 */
   localDeleteIntended?: boolean;
+  /** Structured rule/decision logging. Absent in pure unit tests. */
+  log?: SyncMonitorLog;
+  /** pathLower for log correlation when logging is enabled. */
+  pathLower?: string;
 }
 
 /**
@@ -44,8 +49,8 @@ export function classifyChange(
   const localExists = local !== null;
   const remoteExists = remote !== null && !remote.deleted;
 
-  if (localExists && remoteExists) return classifyBothExist(local, remote, base);
-  if (localExists && !remoteExists) return classifyLocalOnly(local, base);
+  if (localExists && remoteExists) return classifyBothExist(local, remote, base, options);
+  if (localExists && !remoteExists) return classifyLocalOnly(local, base, options);
   if (!localExists && remoteExists) return classifyRemoteOnly(remote, base, options);
   return { type: "noop", reason: "both_absent" };
 }
@@ -55,12 +60,25 @@ function classifyBothExist(
   local: LocalState,
   remote: RemoteState,
   base: SyncEntry | null,
+  options?: ClassifyOptions,
 ): SyncAction {
+  const path = options?.pathLower ?? local.path;
+
   if (local.hash === remote.hash) {
+    // R8: identical bytes are not a disagreement, whatever the dates say.
+    logRule(options?.log, SyncRules.R8, "hashes match — not a change", {
+      path,
+      hash: shortHash(local.hash),
+    }, { level: "trace", location: "planner.classifyBothExist" });
     return { type: "noop", reason: "same_content" };
   }
 
   if (!base) {
+    logRule(options?.log, [SyncRules.R1, SyncRules.R2], "conflict: differing content, no base", {
+      path,
+      localHash: shortHash(local.hash),
+      remoteHash: shortHash(remote.hash),
+    }, { location: "planner.classifyBothExist" });
     return { type: "conflict", localHash: local.hash, remoteHash: remote.hash };
   }
 
@@ -68,6 +86,13 @@ function classifyBothExist(
   const remoteChanged = remote.hash !== base.baseRemoteHash;
 
   if (localChanged && remoteChanged) {
+    logRule(options?.log, [SyncRules.R1, SyncRules.R2], "conflict: both sides changed since base", {
+      path,
+      localHash: shortHash(local.hash),
+      remoteHash: shortHash(remote.hash),
+      baseLocalHash: shortHash(base.baseLocalHash),
+      baseRemoteHash: shortHash(base.baseRemoteHash),
+    }, { location: "planner.classifyBothExist" });
     return { type: "conflict", localHash: local.hash, remoteHash: remote.hash };
   }
   if (localChanged) {
@@ -77,6 +102,13 @@ function classifyBothExist(
     return { type: "download", reason: "remote_modified" };
   }
   // 양쪽 base 대비 미변경이지만 hash가 다름 (base hash 불일치 — 복구 상황)
+  logRule(options?.log, [SyncRules.R1, SyncRules.R2], "conflict: base hashes disagree with both sides", {
+    path,
+    localHash: shortHash(local.hash),
+    remoteHash: shortHash(remote.hash),
+    baseLocalHash: shortHash(base.baseLocalHash),
+    baseRemoteHash: shortHash(base.baseRemoteHash),
+  }, { location: "planner.classifyBothExist" });
   return { type: "conflict", localHash: local.hash, remoteHash: remote.hash };
 }
 
@@ -84,15 +116,31 @@ function classifyBothExist(
 function classifyLocalOnly(
   local: LocalState,
   base: SyncEntry | null,
+  options?: ClassifyOptions,
 ): SyncAction {
+  const path = options?.pathLower ?? local.path;
+
   if (base) {
     // base 대비 변경됨 → 삭제+수정 교차 → upload (변경 우선)
     if (local.hash !== base.baseLocalHash) {
+      // R5: an edit beats a delete — the file is resurrected.
+      logRule(options?.log, SyncRules.R5, "edit beats remote delete — resurrecting", {
+        path,
+        localHash: shortHash(local.hash),
+        baseLocalHash: shortHash(base.baseLocalHash),
+      }, { level: "info", location: "planner.classifyLocalOnly" });
       return { type: "upload", reason: "local_modified_remote_deleted" };
     }
     // base 대비 미변경 → 원격에서 삭제됨
     return { type: "deleteLocal", reason: "deleted_on_remote" };
   }
+  // R6 / R10: no base and no remote — cannot tell "never existed" from "deleted
+  // while we were offline". Today we silently upload (G3); Phase 3 will ask or
+  // preserve as a conflict copy when revision evidence exists.
+  logRule(options?.log, [SyncRules.R6, SyncRules.R10], "new_local with no durable delete check", {
+    path,
+    checkedRevisions: false,
+  }, { level: "debug", location: "planner.classifyLocalOnly" });
   return { type: "upload", reason: "new_local" };
 }
 
@@ -102,16 +150,27 @@ function classifyRemoteOnly(
   base: SyncEntry | null,
   options?: ClassifyOptions,
 ): SyncAction {
+  const path = options?.pathLower ?? remote.pathDisplay;
+
   if (base) {
     // base 대비 변경됨 → 삭제+수정 교차 → download (변경 우선)
     if (remote.hash !== base.baseRemoteHash) {
+      // R5: the remote edit beats this device's delete.
+      logRule(options?.log, SyncRules.R5, "remote edit beats local delete — restoring", {
+        path,
+        remoteHash: shortHash(remote.hash),
+        baseRemoteHash: shortHash(base.baseRemoteHash),
+      }, { level: "info", location: "planner.classifyRemoteOnly" });
       return { type: "download", reason: "remote_modified_local_deleted" };
     }
     // base 대비 미변경 → 삭제 의도 확인
     if (options?.localDeleteIntended) {
       return { type: "deleteRemote", reason: "deleted_on_local" };
     }
-    // 삭제 의도 없음 → 로컬에서 빠진 파일 복구
+    // R6: absence alone is never evidence of a delete — restore rather than remove.
+    logRule(options?.log, SyncRules.R6, "missing locally with no delete intent — restoring, not deleting", {
+      path,
+    }, { location: "planner.classifyRemoteOnly" });
     return { type: "download", reason: "missing_local_restored" };
   }
   return { type: "download", reason: "new_remote" };
@@ -124,6 +183,8 @@ export interface PlanOptions {
   ctx?: CycleContext;
   /** 플랜 결정 시마다 호출 (라이브 리포트용) */
   onPlanItem?: (pathLower: string, localPath: string, actionType: string, reason: string) => void;
+  /** Structured rule/decision logging. */
+  log?: SyncMonitorLog;
 }
 
 /**
@@ -161,14 +222,7 @@ export function createPlan(
   for (const k of baseMap.keys()) allPaths.add(k);
 
   const items: SyncPlanItem[] = [];
-  const stats = {
-    upload: 0,
-    download: 0,
-    deleteLocal: 0,
-    deleteRemote: 0,
-    conflict: 0,
-    noop: 0,
-  };
+  const stats = emptySyncPlanStats();
 
   for (const pathLower of allPaths) {
     const localFile = localMap.get(pathLower) ?? null;
@@ -188,8 +242,11 @@ export function createPlan(
         }
       : null;
 
+    const localDeleteIntended = options?.localDeletedPaths?.has(pathLower);
     const classifyOpts: ClassifyOptions = {
-      localDeleteIntended: options?.localDeletedPaths?.has(pathLower),
+      localDeleteIntended,
+      log: options?.log,
+      pathLower,
     };
     const action = classifyChange(localState, remoteState, baseEntry, classifyOpts);
 
@@ -218,9 +275,46 @@ export function createPlan(
           : action.type;
     options?.onPlanItem?.(pathLower, localPath, action.type, reasonStr);
 
+    // Every path is logged, including noop. "Nothing happened here" is the
+    // outcome G4 showed we could not previously see, and it is the first thing
+    // needed when a user reports a file that will not sync.
+    logDecision(
+      options?.log,
+      {
+        pathLower,
+        localPath,
+        localHash: shortHash(localState?.hash ?? null),
+        remoteHash: shortHash(remoteState?.hash ?? null),
+        baseLocalHash: shortHash(baseEntry?.baseLocalHash ?? null),
+        baseRemoteHash: shortHash(baseEntry?.baseRemoteHash ?? null),
+        rev: remoteState?.rev ?? baseEntry?.rev ?? null,
+        localDeleteIntended: !!localDeleteIntended,
+      },
+      action.type,
+      action.type === "conflict"
+        ? `conflict(${shortHash(action.localHash)}/${shortHash(action.remoteHash)})`
+        : reasonStr,
+    );
+
     if (action.type === "noop") {
       stats.noop++;
-      continue; // noop은 플랜에 포함하지 않음
+      // G4: same_content must still write base so a later absence is not treated as new_local.
+      if (action.reason === "same_content" && localState && remoteState) {
+        items.push({
+          pathLower,
+          localPath,
+          action: {
+            type: "recordBase",
+            reason: "same_content",
+            localHash: localState.hash,
+            remoteHash: remoteState.hash,
+            rev: remoteState.rev,
+            pathDisplay: remoteState.pathDisplay,
+          },
+        });
+        stats.recordBase++;
+      }
+      continue;
     }
 
     items.push({ pathLower, localPath, action });

@@ -1,4 +1,5 @@
 import type { SyncPlanItem } from "../types";
+import { logRule, SyncRules, type SyncMonitorLog } from "../debug/sync-monitor";
 
 /** Minimum files under a folder before we prefer a folder delete over file deletes. */
 const MIN_FOLDER_COVER_COUNT = 2;
@@ -9,6 +10,8 @@ export interface CoalesceDeleteRemoteInput {
   existingRemotePathLowers: Iterable<string>;
   /** Other actionable plan paths that must not sit under a coalesced folder. */
   blockingPathLowers: Iterable<string>;
+  /** Structured rule logging (R14 membership decisions). */
+  log?: SyncMonitorLog;
 }
 
 export interface CoalesceDeleteRemoteResult {
@@ -71,6 +74,9 @@ export function coalesceDeleteRemote(
   // Vacuous "all remotes covered" when existingRemote is empty would pick shallow
   // parents (e.g. Files) and recursively wipe Dropbox — refuse folder coalesce.
   if (existingRemote.size === 0) {
+    logRule(input.log, SyncRules.R14, "folder coalesce refused — empty remote snapshot", {
+      deleteCount: deleteItems.length,
+    }, { level: "info", location: "delete-coalesce.coalesceDeleteRemote" });
     return {
       folderPaths: [],
       remainingFileItems: deleteItems,
@@ -93,22 +99,39 @@ export function coalesceDeleteRemote(
     // loop a no-op, so every candidate folder looks "complete" — callers must
     // never pass an emptied snapshot after a richer section already ran.
     let allRemoteCovered = true;
+    let uncoveredExample: string | null = null;
     for (const remotePath of existingRemote) {
       if (isUnderFolder(remotePath, folder) && !deleteSet.has(remotePath)) {
         allRemoteCovered = false;
+        uncoveredExample = remotePath;
         break;
       }
     }
-    if (!allRemoteCovered) continue;
+    if (!allRemoteCovered) {
+      // R14: the folder holds something this device did not intend to delete.
+      logRule(input.log, SyncRules.R14, "folder ineligible — membership mismatch", {
+        folder,
+        uncoveredExample,
+      }, { location: "delete-coalesce.coalesceDeleteRemote" });
+      continue;
+    }
 
     let blocked = false;
+    let blockingExample: string | null = null;
     for (const blocker of blocking) {
       if (blocker === folder || isUnderFolder(blocker, folder)) {
         blocked = true;
+        blockingExample = blocker;
         break;
       }
     }
-    if (blocked) continue;
+    if (blocked) {
+      logRule(input.log, SyncRules.R14, "folder ineligible — another pending action underneath", {
+        folder,
+        blockingExample,
+      }, { location: "delete-coalesce.coalesceDeleteRemote" });
+      continue;
+    }
 
     complete.push({
       folder,
@@ -156,6 +179,14 @@ export function coalesceDeleteRemote(
   const remainingFileItems = deleteItems.filter(
     (item) => !coveredByFolder.has(item.pathLower),
   );
+
+  if (folderPaths.length > 0) {
+    logRule(input.log, SyncRules.R14, "folder membership confirmed — coalescing to folder deletes", {
+      folderPaths,
+      coveredFiles: coveredByFolder.size,
+      remainingFiles: remainingFileItems.length,
+    }, { level: "info", location: "delete-coalesce.coalesceDeleteRemote" });
+  }
 
   return { folderPaths, remainingFileItems, folderToCoveredItems };
 }

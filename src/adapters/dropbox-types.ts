@@ -40,6 +40,11 @@ export interface DropboxListFolderResult {
   has_more: boolean;
 }
 
+export interface DropboxListRevisionsResult {
+  entries: DropboxFileMetadata[];
+  is_deleted: boolean;
+}
+
 export interface DropboxTokenResponse {
   access_token: string;
   token_type: string;

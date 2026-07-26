@@ -9,9 +9,11 @@ import {
   fetchLegacyRawLocalStorage,
   fetchLocally,
   initDeviceSettingsStorage,
+  isDeviceSettingsStorageBound,
   saveLocally,
 } from "./device-settings-storage";
 import type { DeviceSettingsV1 } from "./device-settings-types";
+import { generateDeviceId } from "./device-settings-defaults";
 
 /**
  * Same-tab App.saveLocalStorage writes do not fire the native `storage` event.
@@ -65,6 +67,18 @@ function mergeWithDefaults(partial: unknown): DeviceSettingsV1 {
     cursorDebugOfferToken:
       typeof o.cursorDebugOfferToken === "string" ? o.cursorDebugOfferToken : base.cursorDebugOfferToken,
     cursorDebugConnectedAt: connectedAt,
+    verboseDecisionLogging:
+      typeof o.verboseDecisionLogging === "boolean"
+        ? o.verboseDecisionLogging
+        : base.verboseDecisionLogging,
+    deviceId: typeof o.deviceId === "string" ? o.deviceId : base.deviceId,
+    accessToken: typeof o.accessToken === "string" ? o.accessToken : base.accessToken,
+    refreshToken: typeof o.refreshToken === "string" ? o.refreshToken : base.refreshToken,
+    tokenExpiry:
+      typeof o.tokenExpiry === "number" && o.tokenExpiry >= 0
+        ? o.tokenExpiry
+        : base.tokenExpiry,
+    customAppKey: typeof o.customAppKey === "string" ? o.customAppKey : base.customAppKey,
   };
 }
 
@@ -80,10 +94,13 @@ function coerceStoredValue(stored: unknown): DeviceSettingsV1 {
   return mergeWithDefaults(stored);
 }
 
+let memoryOnlySettings: DeviceSettingsV1 | null = null;
+
 /** Read merged device settings (never throws; corrupt storage yields defaults). */
 export function readDeviceSettings(): DeviceSettingsV1 {
   const stored = fetchLocally(DEVICE_SETTINGS_STORAGE_KEY);
   if (stored != null) return coerceStoredValue(stored);
+  if (memoryOnlySettings) return memoryOnlySettings;
 
   // Fallback if init did not run yet or migration missed a vault.
   const legacyRaw = fetchLegacyRawLocalStorage(DEVICE_SETTINGS_STORAGE_KEY);
@@ -102,6 +119,11 @@ function writeDeviceSettings(settings: DeviceSettingsV1): void {
     ...settings,
     version: 1,
   };
+  if (!isDeviceSettingsStorageBound()) {
+    memoryOnlySettings = toStore;
+    notifyDeviceSettingsChanged();
+    return;
+  }
   saveLocally(DEVICE_SETTINGS_STORAGE_KEY, toStore);
   // Drop the pre-App-API global key once vault-scoped storage is the source of truth.
   clearLegacyRawLocalStorage(DEVICE_SETTINGS_STORAGE_KEY);
@@ -154,6 +176,117 @@ export function getCursorDebugServerName(): string {
 
 export function getCursorDebugOfferToken(): string {
   return readDeviceSettings().cursorDebugOfferToken;
+}
+
+export function getVerboseDecisionLogging(): boolean {
+  return readDeviceSettings().verboseDecisionLogging;
+}
+
+/** Mint deviceId on first read if absent (G26). */
+export function getDeviceId(): string {
+  const current = readDeviceSettings();
+  if (current.deviceId) return current.deviceId;
+  const deviceId = generateDeviceId();
+  patchDeviceSettings({ deviceId });
+  return deviceId;
+}
+
+export function getAccessToken(): string {
+  return readDeviceSettings().accessToken;
+}
+
+export function getRefreshToken(): string {
+  return readDeviceSettings().refreshToken;
+}
+
+export function getTokenExpiry(): number {
+  return readDeviceSettings().tokenExpiry;
+}
+
+export function getCustomAppKey(): string {
+  return readDeviceSettings().customAppKey;
+}
+
+export function setOAuthTokens(accessToken: string, refreshToken: string, tokenExpiry: number): void {
+  patchDeviceSettings({ accessToken, refreshToken, tokenExpiry });
+}
+
+export function patchOAuthTokens(partial: {
+  accessToken?: string;
+  refreshToken?: string;
+  tokenExpiry?: number;
+}): void {
+  patchDeviceSettings(partial);
+}
+
+export function clearOAuthTokens(): void {
+  patchDeviceSettings({ accessToken: "", refreshToken: "", tokenExpiry: 0 });
+}
+
+export function setCustomAppKey(customAppKey: string): void {
+  patchDeviceSettings({ customAppKey });
+}
+
+/**
+ * One-time migration from synced plugin data.json into device-local storage (G25/G26).
+ * Returns true when any credential field was copied from synced settings.
+ */
+export function migrateDeviceCredentialsFromSyncedSettings(
+  raw: Record<string, unknown> | null | undefined,
+): boolean {
+  if (!raw || typeof raw !== "object") return false;
+
+  const current = readDeviceSettings();
+  const patch: Partial<DeviceSettingsV1> = {};
+  let migrated = false;
+
+  if (!current.deviceId && typeof raw.deviceId === "string" && raw.deviceId) {
+    patch.deviceId = raw.deviceId;
+    migrated = true;
+  }
+  if (!current.accessToken && typeof raw.accessToken === "string" && raw.accessToken) {
+    patch.accessToken = raw.accessToken;
+    migrated = true;
+  }
+  if (!current.refreshToken && typeof raw.refreshToken === "string" && raw.refreshToken) {
+    patch.refreshToken = raw.refreshToken;
+    migrated = true;
+  }
+  if (
+    !current.tokenExpiry
+    && typeof raw.tokenExpiry === "number"
+    && raw.tokenExpiry > 0
+  ) {
+    patch.tokenExpiry = raw.tokenExpiry;
+    migrated = true;
+  }
+  if (
+    !current.customAppKey
+    && typeof raw.appKey === "string"
+    && raw.appKey
+    && raw.useCustomAppKey === true
+  ) {
+    patch.customAppKey = raw.appKey;
+    migrated = true;
+  }
+
+  if (migrated) {
+    patchDeviceSettings(patch);
+  }
+  return migrated;
+}
+
+/** Strip credential fields from synced settings before persisting data.json. */
+export function stripSyncedCredentialFields(
+  settings: Record<string, unknown>,
+): void {
+  delete settings.deviceId;
+  delete settings.accessToken;
+  delete settings.refreshToken;
+  delete settings.tokenExpiry;
+  if (settings.useCustomAppKey === true) {
+    settings.appKey = "";
+  }
 }
 
 /**

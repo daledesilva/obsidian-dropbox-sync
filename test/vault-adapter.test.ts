@@ -38,7 +38,13 @@ describe("VaultAdapter write / ensureParentDir", () => {
         },
         readBinary: async () => new ArrayBuffer(0),
         remove: async () => {},
-        rename: async () => {},
+        rename: async (from: string, to: string) => {
+          const data = files.get(from);
+          if (data) {
+            files.delete(from);
+            files.set(to, data);
+          }
+        },
         stat: async () => ({ mtime: 0, size: 0 }),
       },
     };
@@ -85,7 +91,13 @@ describe("VaultAdapter write / ensureParentDir", () => {
         },
         readBinary: async () => new ArrayBuffer(0),
         remove: async () => {},
-        rename: async () => {},
+        rename: async (from: string, to: string) => {
+          const data = files.get(from);
+          if (data) {
+            files.delete(from);
+            files.set(to, data);
+          }
+        },
         stat: async () => ({ mtime: 0, size: 0 }),
       },
     };
@@ -111,11 +123,22 @@ describe("VaultAdapter write / ensureParentDir", () => {
     const folders = new Set<string>();
     let writeBinaryCalls = 0;
 
+    const fileManager = {
+      renameFile: async (file: { path: string }, to: string) => {
+        const data = files.get(file.path);
+        if (data) {
+          files.delete(file.path);
+          files.set(to, data);
+        }
+      },
+      trashFile: async () => {},
+    };
+
     const vault = {
       getFiles: () => [],
       readBinary: async () => new ArrayBuffer(0),
       getAbstractFileByPath: (path: string) => {
-        if (files.has(path)) return { stat: { mtime: 0, size: 0 }, extension: "md" };
+        if (files.has(path)) return { path, stat: { mtime: 0, size: 0 }, extension: "md" };
         if (folders.has(path)) return { children: {} };
         return null;
       },
@@ -139,7 +162,7 @@ describe("VaultAdapter write / ensureParentDir", () => {
       },
     };
 
-    const adapter = new VaultAdapter(vault as never, [], {} as never);
+    const adapter = new VaultAdapter(vault as never, [], fileManager as never);
     await adapter.write("Notes/hello.md", new TextEncoder().encode("hi"));
     expect(files.has("Notes/hello.md")).toBe(true);
     expect(writeBinaryCalls).toBe(0);

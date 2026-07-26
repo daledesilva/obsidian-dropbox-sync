@@ -5,7 +5,10 @@ import {
   MemoryStateStore,
 } from "@/adapters/memory";
 import { SyncEngine } from "@/sync/engine";
+import { executePlan } from "@/sync/executor";
 import { FailingRemoteStorage } from "../support/failing-remote";
+import { parseRetrySet, RETRY_SET_META_KEY } from "@/sync/retry-set";
+import { emptySyncPlanStats } from "@/types";
 
 describe("네트워크 실패 시나리오", () => {
   let fs: MemoryFileSystem;
@@ -19,7 +22,10 @@ describe("네트워크 실패 시나리오", () => {
     realRemote = new MemoryRemoteStorage();
     failingRemote = new FailingRemoteStorage(realRemote);
     store = new MemoryStateStore();
-    engine = new SyncEngine({ fs, remote: failingRemote, store });
+    engine = new SyncEngine(
+      { fs, remote: failingRemote, store },
+      { resurrectionResolver: async () => "upload" },
+    );
   });
 
   test("upload 실패 → 다음 cycle에서 재시도", async () => {
@@ -46,24 +52,39 @@ describe("네트워크 실패 시나리오", () => {
     expect(realRemote.has("b.md")).toBe(true);
   });
 
-  test("download 실패 → 다음 cycle에서 재시도", async () => {
-    // 원격에 파일 2개 업로드
-    await realRemote.upload("a.md", new TextEncoder().encode("A"));
+  test("download 실패 → retry set에 기록 후 재시도", async () => {
+    const downloadStore = new MemoryStateStore();
+    const downloadEngine = new SyncEngine(
+      { fs, remote: failingRemote, store: downloadStore },
+    );
+
     await realRemote.upload("b.md", new TextEncoder().encode("B"));
 
-    // 첫 번째 download 후 실패
-    failingRemote.injectFailure({ after: 1, method: "download" });
+    failingRemote.injectFailure({ after: 0, method: "download" });
 
-    const result1 = await engine.runCycle();
+    const result1 = await downloadEngine.runCycle();
     expect(result1.result.failed.length).toBeGreaterThanOrEqual(1);
+    expect(fs.has("b.md")).toBe(false);
 
-    // 실패 해제 후 재시도
+    const retryEntries = parseRetrySet(await downloadStore.getMeta(RETRY_SET_META_KEY));
+    expect(retryEntries.some((entry) => entry.localPath === "b.md")).toBe(true);
+
     failingRemote.clearFailure();
-    const result2 = await engine.runCycle();
-    expect(result2.result.failed).toHaveLength(0);
-
-    // 로컬에 둘 다 존재
-    expect(fs.has("a.md")).toBe(true);
+    const retryResult = await executePlan(
+      {
+        items: retryEntries.map((entry) => ({
+          pathLower: entry.pathLower,
+          localPath: entry.localPath,
+          action: entry.action,
+        })),
+        stats: {
+          ...emptySyncPlanStats(),
+          download: retryEntries.length,
+        },
+      },
+      { fs, remote: failingRemote, store: downloadStore },
+    );
+    expect(retryResult.failed).toHaveLength(0);
     expect(fs.has("b.md")).toBe(true);
   });
 
