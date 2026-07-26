@@ -30,39 +30,39 @@ A sync cycle is the same work whether the user pressed Sync Now or a vault chang
 
 ## General rules
 
-### Rule 1 — Never let a conflict destroy content on any device
+### R1 — Never let a conflict destroy content in either direction
 
-Both sides survive as two real files. Nothing merges automatically and no winner is picked silently.
+Both sides survive as two real files — neither the Dropbox version nor the local version may be discarded. Nothing merges automatically and no winner is picked silently.
 
-### Rule 2 — The version already on Dropbox keeps the canonical name
+### R2 — The version already on Dropbox keeps the canonical name
 
 The later upload is renamed. Dropbox's `rev` check already serialises uploads, so every device reaches the same answer without comparing anything.
 
-### Rule 3 — Conflict copies are ordinary files and must sync everywhere
+### R3 — Conflict copies are ordinary files and must sync everywhere
 
 A conflict is just as much a conflict on every other device, and we cannot know which version the user considers best. A copy that reaches only one device is one wipe away from being lost.
 
-### Rule 4 — A conflict copy names the device that produced it
+### R4 — A conflict copy names the device that produced it
 
 We use Dropbox's format exactly: `note (Dale's MacBook's conflicted copy 2026-07-26).md`. Matching it makes our copies and Dropbox's own indistinguishable, which is the point — one format for the user to learn, one pattern for us to detect. It carries a date but no time, so same-day repeats need a counter appended.
 
-### Rule 5 — An edit beats a delete
+### R5 — An edit beats a delete
 
 The modified file is resurrected, and the user who deleted it is told it came back.
 
-### Rule 6 — A delete needs durable evidence, or it will be undone
+### R6 — A delete needs durable evidence, or it will be undone
 
 A device that has never seen a path cannot tell "deleted" from "never existed", so it re-uploads and the deletion is reversed. We read that evidence from Dropbox's `list_revisions` rather than writing tombstones of our own, because a delete performed from a Dropbox-managed device would never produce a record of ours — leaving a log that is incomplete in a way nothing could detect.
 
-### Rule 7 — Never write directly to the destination file
+### R7 — Never write directly to the destination file
 
 Changes go to a temporary copy that is moved into place, so a crash mid-write cannot leave a half-written note.
 
-### Rule 8 — Content hashes decide what changed; dates only break safe ties
+### R8 — Content hashes decide what changed; dates only break safe ties
 
 A date may settle a question where **both answers are safe** — which capitalisation to adopt, what date to show the user — because a wrong clock then costs nothing. A date may never decide which version of someone's writing is discarded, because a wrong clock would silently destroy work. Two facts make this unavoidable: a rename does not change a file's modification date, and Dropbox stores no creation date at all.
 
-### Rule 9 — Removing many files at once needs confirmation
+### R9 — Removing many files at once needs confirmation
 
 When one sync would remove more files than the delete threshold — **5** by default — the device asks before anything goes, and asks again on each other device as the deletion reaches it. The threshold is a per-device preference, so devices may not all ask; each protects only itself. This applies to every row below and is not repeated in them.
 
@@ -148,7 +148,7 @@ Three things do reach Dropbox that a reader might not expect — not because syn
 | Creation date | Dropbox has no field for it, so it cannot survive a round trip and must never be load-bearing |
 | Rename timestamps | Nothing records when a path or capitalisation changed, so "the most recent rename wins" is unimplementable (`G6`) |
 | Folder entries | Only files are tracked, so empty folders and folder moves are invisible (`G8`) |
-| Deletion records | Read from Dropbox's revision history instead of being written by us (Rule 6) |
+| Deletion records | Read from Dropbox's revision history instead of being written by us (R6) |
 
 ---
 
@@ -689,7 +689,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>Creates <code>Note.md</code>, syncs</td>
 <td>Independently creates <code>note.md</code>, <b>different content</b>, syncs</td>
 <td>—</td>
-<td>A content conflict, not a capitalisation question, so Rule 2 settles it and the surviving capitalisation is A's.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — A's version<br>• <code>Note (B's conflicted copy 2026-07-26).md</code> — B's version<br>Both devices are warned the casing differed.</td>
+<td>A content conflict, not a capitalisation question, so R2 settles it and the surviving capitalisation is A's.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — A's version<br>• <code>Note (B's conflicted copy 2026-07-26).md</code> — B's version<br>Both devices are warned the casing differed.</td>
 <td>Deviates: resolves as today's row 4, and the casing difference is never surfaced</td>
 </tr>
 <tr>
@@ -1089,7 +1089,7 @@ Every row so far assumes a text note of a few kilobytes. Attachments break that 
 <td>Edits an image or PDF, syncs</td>
 <td>Edits the same file differently, syncs</td>
 <td>—</td>
-<td>An ordinary conflict, resolved by Rule 2. No merge is attempted and the bytes are never decoded as text — a binary conflict is always a two-file outcome for the user to settle.<br><b>Dropbox holds:</b><br>• the file — A's version<br>• <code>image (B's conflicted copy 2026-07-26).png</code> — B's version</td>
+<td>An ordinary conflict, resolved by R2. No merge is attempted and the bytes are never decoded as text — a binary conflict is always a two-file outcome for the user to settle.<br><b>Dropbox holds:</b><br>• the file — A's version<br>• <code>image (B's conflicted copy 2026-07-26).png</code> — B's version</td>
 <td>Matches on handling — the resolver already detects text by extension and leaves everything else as raw bytes — but inherits the same wrong winner and local-only copy as row 10.</td>
 </tr>
 <tr>
