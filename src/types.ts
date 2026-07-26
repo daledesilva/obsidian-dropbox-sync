@@ -108,8 +108,8 @@ export interface SyncPlanItem {
   localPath: string;
   action: SyncAction;
   /**
-   * Set after keep_both (or newest→keep_both) writes a remote snapshot sibling.
-   * Used by per-file status UI to open Compare without guessing the timestamp.
+   * Path of the keep_both sibling written for this item (Dropbox or legacy name).
+   * Per-file status UI uses it for Compare without re-deriving the conflict filename.
    */
   conflictSiblingPath?: string;
 }

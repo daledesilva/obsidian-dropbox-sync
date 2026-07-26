@@ -19,7 +19,7 @@ The Obsidian status bar used to show one vault-wide sync icon. That made it hard
 | syncing | This path is in the current execute set | Accent + spin | Currently syncing with Dropbox |
 | success | This path just succeeded | `--text-success` | Synced (clears after ~5s) |
 | error | This path failed | `--text-error` | Sync failed for this file |
-| conflict | keep_both wrote a `.conflict-*` sibling | `--text-error` | Both sides changed — click for details |
+| conflict | keep_both wrote a conflict sibling (Dropbox or legacy `.conflict-*` name) | `--text-error` | Both sides changed — click for details |
 
 **Click behaviour**
 

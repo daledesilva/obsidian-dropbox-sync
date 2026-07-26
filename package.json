@@ -12,7 +12,10 @@
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/",
     "test": "bun test",
-    "test:watch": "bun test --watch"
+    "test:watch": "bun test --watch",
+    "qa:generate": "node qa-test-vault/generate.mjs",
+    "qa:reset": "node qa-test-vault/generate.mjs",
+    "qa:deploy": "bun run build && mkdir -p \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync\" && cp dist/* \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync/\""
   },
   "devDependencies": {
     "@types/bun": "latest",

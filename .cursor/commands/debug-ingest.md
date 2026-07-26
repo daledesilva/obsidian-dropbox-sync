@@ -41,7 +41,8 @@ Any text after `/debug-ingest` is optional context (e.g. iPad, session id).
 
 6. **Deploy if instrumented / uncommitted**
    - Local `dist/` copy includes working-tree code; CI/release builds do not.
-   - Desktop test vault: `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/`
+   - Desktop test vault: `bun run qa:deploy` (or `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/`)
+   - Reseed vault content (keeps auth): `bun run qa:generate` — see `qa-test-vault/README.md`
    - iPad: copy built plugin into the vault’s `.obsidian/plugins/dropbox-sync/` (manual).
 
 7. **Reproduce**, then **read** `.cursor/debug-<sessionId>.log` and cite line evidence before fixing.

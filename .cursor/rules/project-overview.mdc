@@ -17,6 +17,7 @@ src/sync/                              — Planner, executor, engine, guards, lo
 src/adapters/                          — FileSystem, RemoteStorage, SyncStateStore implementations
 src/ui/                                — Settings tab, modals, status bar
 test/                                  — bun:test unit + simulation tests
+qa-test-vault/                         — Generator + runbooks for ~/Documents/sync-tester (manual Dropbox QA)
 docs/                                  — User-facing and agent tooling docs
 dist/                                  — Build output (main.js, etc.) copied into the test vault
 ```
@@ -35,8 +36,8 @@ UI Layer → SyncEngine (Planner → Executor) → Adapters (FileSystem, RemoteS
 2. **rev optimistic locking**: upload with `mode: update(rev)` for server-side conflict detection
 3. **Preserve originals**: on conflict/failure, keep both sides’ originals
 4. **path_lower keys**: Dropbox is case-insensitive; use `path_lower` as the comparison key
-5. **Dev deploy target**: after buildable changes, `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/` — Hot Reload picks up `.hotreload`; do not ask the user to reload manually
-6. **Test vault**: `~/Documents/sync-tester/` is for Dropbox integration testing, not a production vault
+5. **Dev deploy target**: after buildable changes, `bun run qa:deploy` (or `bun run build && cp dist/* ~/Documents/sync-tester/.obsidian/plugins/dropbox-sync/`) — Hot Reload picks up `.hotreload`; do not ask the user to reload manually
+6. **Test vault**: `~/Documents/sync-tester/` is for Dropbox integration testing, not a production vault. Reseed with `bun run qa:generate` / `qa:reset` (see `qa-test-vault/README.md`); generator never clobbers plugin `data.json`
 
 ## Mobile / Cursor Debug ingest (live logs)
 

@@ -1,6 +1,6 @@
 # Sync Safety
 
-When you delete a file on one device, the sync plugin needs to delete it on your other devices too. This is risky — if something goes wrong, files could be lost everywhere. That's why this plugin uses three independent safety layers.
+When you delete a file on one device, the sync plugin needs to delete it on your other devices too. This is risky — if something goes wrong, files could be lost everywhere. That's why this plugin uses layered safety around deletes, incomplete scans, and open editors.
 
 ## Layer 1: Only intentional deletions are synced
 
@@ -11,8 +11,9 @@ What this means in practice:
 - If a file is missing because of a glitch or partial sync, it will **not** be deleted from Dropbox — it will be downloaded back instead
 - If you exclude a file from sync using patterns, it will **not** be deleted from Dropbox
 - Only files you deliberately delete (or rename) in Obsidian are removed from Dropbox
+- Case-only renames (same `path_lower`) do **not** record a delete intent — they become server-side moves instead
 
-**Incomplete local scan guard (notes and plugins):** As a catch-up, the planner can *infer* deletes when a path is in the sync base and on Dropbox but missing locally. That is unsafe when the local listing is far smaller than the base (empty vault, partial index, mobile scan gaps). If the notes or plugins section is active and local count is under half of base (and base > 20), the engine **skips inferring** those deletes and clears prior non-`event` intents for that section so a bad mass-infer does not keep re-prompting. Vault delete/rename events (`event` source) still apply. Prefer re-download over mass `deleteRemote`.
+**Vouched scan completeness:** As a catch-up, the planner can *infer* deletes when a path is in the sync base and on Dropbox but missing locally. That is unsafe when the local listing is incomplete. Each section must present a positive completeness signal before inferred deletes run; when completeness is unavailable, those inferences are deferred. Vault delete/rename events (`event` source) still apply. Prefer re-download over mass `deleteRemote`.
 
 ## Layer 2: Confirmation before bulk deletions
 
@@ -40,7 +41,9 @@ flowchart LR
   Modal -->|Skip deletions| Filtered[Execute plan with deletes stripped]
 ```
 
-## Layer 3: Dropbox keeps deleted files
+## Layer 3: Live checks and Dropbox trash
+
+Before an individual remote delete runs, the executor re-checks the live Dropbox rev/hash so a mid-cycle remote edit is not wiped by a stale plan. Coalesced folder deletes re-list membership live (including empty subfolders) before `delete_batch`.
 
 Even after a file is deleted from Dropbox, it's not gone forever. Dropbox keeps deleted files in its trash:
 
@@ -49,20 +52,24 @@ Even after a file is deleted from Dropbox, it's not gone forever. Dropbox keeps 
 
 To recover a deleted file, go to [dropbox.com](https://www.dropbox.com), click **Deleted files** in the sidebar, find your file, and click **Restore**.
 
-## What are "deferred" files?
+`list_revisions` is also used when a device sees a local file with no prior base: durable deletion evidence turns a would-be re-upload into a conflict copy (or asks you when evidence has aged out). See [Sync gap closure](sync-gap-closure.md).
 
-Sometimes the plugin skips a file during sync instead of processing it:
+## Layer 4: Bounded deferrals for open notes
 
-- A file you're currently editing won't be overwritten mid-edit
-- A conflict you chose to deal with "later" is deferred to the next sync
+Sometimes the plugin briefly delays applying a download or a remote delete:
 
-These files aren't lost — they'll be handled on the next sync cycle. The sync result tells you if any files were deferred.
+- A note open in an editor (including dirty buffers in background tabs Obsidian exposes) can wait so the view reloads cleanly
+- A conflict you chose to deal with “later” can wait briefly
+
+Every deferral expires after about **60 seconds**. After the bound, the change applies (unsaved work conflicts by the normal rules) or the delete prompt is forced. Deferral changes *when* a path finishes, not *what* a later manual sync would conclude — and it must not hold the shared Dropbox cursor forever.
 
 ## Stale delete-log cleanup
 
 Before each sync cycle, the plugin **prunes** delete-log paths that have neither a sync-base entry nor a local file. Those orphans cannot produce a meaningful delete and only inflate planning.
 
 Prune loads base keys and local vault paths **once** (set membership), then walks the log — not per-path store/vault scans. The old O(n²) approach stalled iPad sync start when thousands of intents accumulated.
+
+Delete intents are also **scoped** to paths the current sync sections can act on, so an out-of-scope intent cannot freeze cursor finalize.
 
 ## Technical details
 
@@ -73,18 +80,21 @@ Prune loads base keys and local vault paths **once** (set membership), then walk
 | `DeleteConfirmModal` | Lists pending deletes; resolves `true`/`false` when the user closes it |
 | Plugin `onDeleteGuardTriggered` (`src/main.ts`) | Opens the modal and **awaits** the result for this cycle |
 | `pruneStaleDeleteLog` (`src/main.ts`) | Drops orphan delete intents with one base + one local path set |
-| `deleteRemote` (`src/sync/executor.ts`) | Dropbox `path_lookup/not_found` treated as success (remote already gone) |
+| `deleteRemote` (`src/sync/executor.ts`) | Live rev/hash check; Dropbox `path_lookup/not_found` treated as success |
 | `deleteBatch` / `coalesceDeleteRemote` | Execution-only mass remote delete; see [Remote mass deletes](remote-mass-deletes.md) |
-| `shouldSkipNotesInfer` / `shouldSkipPluginInfer` | Incomplete-scan guards; shared threshold helper `shouldSkipInferForIncompleteLocal` |
-| `SyncEngine.finalizeState` | Advances Dropbox cursor only when the cycle fully succeeded **and** the delete log is empty after clearing executed deletes |
+| Vouched scan / infer skip | Engine scan completeness signal before `inferMissingDeletes` |
+| `applyResurrectionGuard` | `list_revisions` + ask path for `new_local` uploads |
+| `DeferralTracker` / `open-editors.ts` | 60s bound; dirty background tabs; in-place reload after apply |
+| `SyncEngine.finalizeState` | Cursor checkpoint with durable retry set; delete log must not retain moot/out-of-scope intents |
 
 ## Technical Gotchas
 
 - **The modal must block the cycle.** Returning `false` immediately and deferring approval to a later debounced sync made both **Delete** and **Skip** look like Skip (especially when background sync was off). Always `await modal.waitForConfirmation()` and return that boolean.
 - **One modal at a time.** If a confirm modal is already open, a second guard trigger returns `false` (skips deletes) to avoid stacked dialogs.
 - **Threshold is independent of the interactive-progress threshold.** Delete protection uses `deleteThreshold`; large-background promotion uses `largeSyncInteractiveThreshold`.
-- **Do not advance the cursor while the delete log still has pending intents.** Multi-section manual sync used to update the cursor on a later section after an earlier section skipped deletes, which left remote files intact and the next cycle re-downloaded (or re-prompted). Clear succeeded deletes first, then require `deletedPaths.size === 0` (and no `deletesSkipped` / failures / deferred) before writing the cursor.
-- **Incomplete-scan skip is not “user deleted half the vault.”** If local notes are still ≥ 50% of base, infer still runs. Explicit Obsidian delete/rename events always stay in the delete log.
-- **`deleteRemote` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry / delete intent instead of failing the item (stale intents otherwise stick and block cursor finalize).
+- **Do not advance the cursor while scoped pending deletes remain.** Clear succeeded deletes first; transient item failures live in `retrySet` so they do not block checkpoint forever (G27).
+- **Incomplete-scan skip needs a positive vouch.** Ratio brakes alone were notes/plugins-only and still unsafe; prefer an explicit completeness signal per section.
+- **`deleteRemote` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry / delete intent instead of failing the item.
 - **Folder coalesce is gated.** Empty remote snapshots refuse folder deletes; multi-section sync unions the snapshot; live Dropbox listing + hash check must pass before recursive folder `delete_batch`. Details: [Remote mass deletes](remote-mass-deletes.md).
 - **Prune must stay O(n).** Never call `getEntry` / `vault.getFiles()` inside the per-path loop.
+- **Re-link clears base/cursor/delete log.** Changing the linked Dropbox folder is not a mass delete of the new folder’s contents (R11 / G15).

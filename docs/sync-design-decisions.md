@@ -140,9 +140,9 @@ An earlier draft used `note (Conflict from Dale's MacBook at 2026-07-26 1043).md
 
 **Cost.** Real, and worth stating plainly. Dropbox's format carries no time component, so two conflicts on the same file from the same device on the same day collide and need a counter appended. We also inherit a format we cannot change if Dropbox changes theirs.
 
-**Trap.** Adopting the format means our existing conflict-file *filter* — which currently matches only our old `.conflict-<timestamp>` names — starts matching Dropbox's copies too, and that filter excludes files from syncing entirely. Today Dropbox's copies sync as ordinary notes, which is accidentally correct. After the rename, they would silently stop. `G1` deletes the filter and must land in the same change as the rename, not after it.
+**Trap.** Adopting the format means a conflict-file *filter* that matches Dropbox names would exclude those copies from syncing. Release 0.2 landed D6 together with D8 / `G1`: detection helpers associate siblings for UI and reuse only — they never strip paths from local or remote scans.
 
-**Consequences.** Gaps `G9` and `G23`.
+**Consequences.** Gaps `G9` and `G23` (closed on `release_0.2`; see [Sync gap closure](sync-gap-closure.md)).
 
 ---
 
@@ -160,7 +160,7 @@ That second check is doing more work than it appears to. Because it queries Drop
 
 **Cost.** An extra API call per coalesced folder delete, and a class of correctness that depends on remembering to re-verify. It is a discipline, not a mechanism.
 
-**Consequences.** Gap `G24`. The known hole is that the live re-list enumerates files, so an empty subfolder inside a doomed folder is invisible to it (`G20`) — the check cannot see what the API does not report.
+**Consequences.** Gap `G24` (individual remote deletes now re-check live rev/hash) and `G20` (empty subfolders included in live verify). Closed on `release_0.2`; see [Sync gap closure](sync-gap-closure.md).
 
 ---
 
@@ -170,13 +170,11 @@ That second check is doing more work than it appears to. Because it queries Drop
 
 **Decision.** Conflict copies are ordinary files and must propagate to Dropbox and to every device.
 
-**Why.** Today they are filtered out of local scans and stripped from the remote map, so a conflict copy exists on exactly one device. That device holds the only surviving instance of the losing version — wipe it, reinstall, or simply switch to another machine, and the content is gone. Both Dropbox and Syncthing propagate conflict copies, for exactly this reason.
-
-The instinct behind the filter is understandable: conflict copies are noise, and syncing noise spreads it. But the noise is the *point*. A conflict copy is a message to the user that two versions existed, and a message delivered to one device is not delivered.
+**Why.** Filtering them out of local scans left a conflict copy on exactly one device — wipe that device and the losing version was gone. Both Dropbox and Syncthing propagate conflict copies for exactly this reason. The noise is the point: a conflict copy is a message that two versions existed, and a message delivered to one device is not delivered.
 
 **Cost.** Conflict copies appear on every device, including the ones whose users did not cause the conflict.
 
-**Consequences.** Gap `G1`, the highest-priority item on the list, and a prerequisite for D6.
+**Consequences.** Gap `G1` (closed with D6 on `release_0.2`; see [Sync gap closure](sync-gap-closure.md)).
 
 ---
 

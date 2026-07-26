@@ -218,6 +218,7 @@ export function migrateSettings(
   ) {
     migrated.largeSyncInteractiveThreshold = 10;
   }
+  // G5: "newest" discarded a side without a conflict copy — force keep_both on load.
   if ((migrated as { conflictStrategy?: string }).conflictStrategy === "newest") {
     migrated.conflictStrategy = "keep_both";
   }
