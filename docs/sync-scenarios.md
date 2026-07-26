@@ -2,25 +2,31 @@
 
 ## Guiding principles
 
-### The vault is a folder of ordinary files
+### P1 — The vault is a folder of ordinary files
 
 Users create, edit, rename and delete vault files with any tool, at any time, with Obsidian closed. Sync therefore cannot depend on having witnessed a change: the durable source of truth is a three-way comparison between what is on disk, what is on Dropbox, and what this device last recorded seeing.
 
-### The copy on Dropbox is also a valid vault
+The vault must stay that way. Plugin metadata, sync state, tombstones, manifests and other bookkeeping must not be written into it as extra files — not even excluded ones if they can live outside the vault instead. Anything a user opens in Finder or the Dropbox folder should be their notes and attachments, not machinery this plugin left behind.
+
+### P2 — The copy on Dropbox is also a valid vault
 
 The same files at the same paths, with none of the plugin's own state or metadata stored alongside them, so a user can point Obsidian straight at that folder through Dropbox's own desktop client. Devices syncing that way — marked **(Dropbox app)** in the tables — are first-class participants, and the expected desktop setup rather than an edge case.
 
 The reason is that it lets a desktop vault keep syncing while Obsidian is closed. This plugin can only work when Obsidian is running; Dropbox's client runs regardless, so a machine set up that way stays current whether or not anyone opens the app.
 
-### A Dropbox-managed device is an unmanaged writer
+### P3 — The plugin and Dropbox desktop client are both valid sync approaches
 
-It writes to the shared folder following none of our rules: no delete protection, no deferral for open notes, no base state, no plan. Anything whose correctness depends on *every* writer cooperating is therefore unavailable to us. Running both syncers over the same folder is not supported and cannot be made to work.
+Either may own a device's link to the shared folder: this plugin while Obsidian is open, or Dropbox's own client whether or not Obsidian is running. Devices marked **(Dropbox app)** in the tables are first-class participants using the latter. The Dropbox client does not follow our rules — no delete protection, no deferral for open notes, no base state, no plan — so anything whose correctness depends on *every* writer cooperating is unavailable to us. Running both syncers over the same folder on the same device is not supported and cannot be made to work.
 
-### Nothing may depend on the plugin or its settings reaching another device
+### P4 — Operations must work without Obsidian settings or plugins syncing
 
-Which sections sync is the user's choice, and "notes only" is a reasonable one — so no part of `.obsidian/` can be assumed to travel. That covers settings, workspaces, and the plugins folder alike: a user may well sync notes only and install this plugin by hand on each device, which is a sensible arrangement rather than a broken one. Each installation is then independent, configured separately, and possibly on a different version.
+"Notes only" is a reasonable sync scope, so no part of `.obsidian/` can be assumed to travel — not settings, workspaces, or the plugins folder. A user may sync notes alone and install this plugin by hand on each device; that is a sensible arrangement, not a broken one. Each installation is then independent, configured separately, and possibly on a different version.
 
-So exclude patterns, delete thresholds and conflict strategy are per-device preferences rather than shared policy, and two devices may legitimately hold different ones. Anything sync needs in order to behave correctly must be derivable from the files themselves or held per device; it may never be assumed to have travelled, and it may not assume the device at the other end is even running the same version. The corollary is that a device must never read the absence of a section it does not sync as a deletion of that section.
+Exclude patterns, delete thresholds and conflict strategy are therefore per-device preferences rather than shared policy. Anything sync needs in order to behave correctly must be derivable from the vault files themselves or held per device — never assumed to have arrived via Obsidian settings or plugins. The corollary is that a device must never read the absence of a section it does not sync as a deletion of that section.
+
+### P5 — Manual sync and live sync must produce the same outcomes
+
+A sync cycle is the same work whether the user pressed Sync Now or a vault change triggered it. Every decision — uploads, downloads, conflicts, deletes, renames, folder operations — must be valid under both. Nothing may depend on having watched the edit happen, on debounce timing, or on any other live-only signal that a cold manual sync would not see. Live triggers may choose *when* to run; they must not change *what* a run is allowed to conclude.
 
 ## General rules
 
@@ -265,7 +271,7 @@ Three things do reach Dropbox that a reader might not expect — not because syn
 <td>Modifies to <b>identical</b> content, syncs</td>
 <td>—</td>
 <td>No conflict — identical bytes are not a disagreement, whatever the dates say. B records it as in sync.<br><b>Dropbox holds:</b><br>• <code>note.md</code> — the shared content</td>
-<td>Matches, aside from the missing record as row 3</td>
+<td>Matches on transfer. Deviates on the record: noop writes nothing, so B keeps a <b>stale</b> base (old hashes) rather than refreshing it — same root cause as row 3 when there was never a base.</td>
 </tr>
 <tr>
 <td>12</td>
@@ -428,7 +434,7 @@ Having a file open is also not a claim on it. An open editor may delay an incomi
 <td>—</td>
 <td>—</td>
 <td>Removed from Dropbox, then from B and C.<br><b>Dropbox holds:</b><br>• nothing at <code>note.md</code><br>• the deletion recorded in Dropbox's own revision history, so late-arriving devices cannot undo it</td>
-<td>Deviates: the deletion works, but no durable record is kept — see rows 82 to 84.</td>
+<td>Deviates: the deletion works, and this device keeps a local delete log, but nothing durable is read from Dropbox for other devices — see rows 82 to 85.</td>
 </tr>
 <tr>
 <td>27</td>
@@ -652,7 +658,7 @@ Dropbox is case-insensitive, so it will never hold `Note.md` and `note.md` at on
 <td>—</td>
 <td>—</td>
 <td>The rename is stamped with a <b>rename timestamp</b> and propagates as a case-only move, so B and C rename their copies to match. The file's modification date is irrelevant here, and unchanged by the rename.<br><b>Dropbox holds:</b><br>• <code>Note.md</code> — one file, new capitalisation</td>
-<td>Deviates: nothing propagates, B and C keep <code>note.md</code>, and the stale delete record appears able to stall A's sync cursor.</td>
+<td>Deviates: nothing propagates, B and C keep <code>note.md</code>. The rename also calls <code>trackDelete</code> on the same <code>path_lower</code> while the file still exists, so the delete intent never clears and <b>A's sync cursor stalls</b> until that log entry is pruned or cleared.</td>
 </tr>
 <tr>
 <td>48</td>
@@ -784,7 +790,7 @@ Folders are tracked as entities in their own right, not merely implied by the fi
 <td>Creates a file inside that same folder, syncs</td>
 <td>—</td>
 <td>No conflict — creating a folder and filling it are compatible actions.<br><b>Dropbox holds:</b><br>• <code>Projects/</code><br>• <code>Projects/note.md</code> — B's file</td>
-<td>Deviates: works only because the file implies the folder</td>
+<td>Matches for the file outcome; the folder is untracked and exists only because the file's path implies it.</td>
 </tr>
 <tr>
 <td>62</td>
@@ -980,7 +986,7 @@ This is the one part of folder handling that is already implemented well: the de
 <td>Already synced</td>
 <td>Already synced, then repointed at a different (empty) Dropbox folder</td>
 <td>Recognised as a re-link rather than a mass deletion, and C is asked what it intends before anything is removed.<br><b>Dropbox holds:</b><br>• the original folder — untouched<br>• the new folder — still empty</td>
-<td>Matches in effect, but only as an unexplained bulk delete rather than a recognised re-link</td>
+<td>Deviates: changing vault ID keeps the old sync base and only resets the engine. An empty new folder is then planned as mass <b>local</b> deletes ("deleted on remote"), not a full upload. Delete protection may ask when the count exceeds the threshold — below it, local files are removed with no re-link prompt. The settings copy promises an upload; the planner does the opposite.</td>
 </tr>
 <tr>
 <td>81</td>
@@ -1225,7 +1231,7 @@ Ordered by how much user data is at risk.
 | **G12** | Write through a temporary file | 95 | A crash mid-write can currently leave a partially written note. Syncthing never writes to the destination directly. |
 | **G13** | Tell the user when something surprising happened | 35, 36, 40, 43, 44, 51 | Resurrections, rename duplicates and capitalisation normalisations are all correct behaviour that currently happens silently, which reads as data loss to the user. |
 | **G14** | Report file-versus-folder path collisions | 59 | Two different kinds of thing cannot share a path, and the clash is currently undetectable because folders are not tracked. |
-| **G15** | Recognise a re-link rather than inferring a mass delete | 80 | Correct outcome today, but by accident of bulk-delete protection rather than by understanding the situation. |
+| **G15** | Recognise a re-link rather than inferring a mass delete | 80 | Today a vault-ID change keeps the sync base, so an empty new folder is planned as mass local deletes. Delete protection may catch large cases; small vaults can lose local files. Clearing history or treating a folder change as a fresh link is required — not just a better prompt. |
 | **G16** | Upload large files through a resumable upload session | 86 | Dropbox's single-request upload endpoint stops at 150 MB. Anything larger — a video or a big PDF in an attachments folder — fails every cycle, and retrying cannot help. |
 | **G17** | Stream large downloads to disk, and skip what will not fit | 87, 93 | The whole file is currently buffered in memory before any of it is written, which is the same 400 MB attachment failing from the other direction, and hardest on the device least able to cope. |
 | **G18** | Debounce conflict evaluation and hold one conflict copy per device per file | 19, 20 | Obsidian autosaves constantly, so two people editing the same note is a stream of clashes. Without both rules, an hour of shared editing produces a pile of near-identical files instead of two. |
@@ -1238,9 +1244,52 @@ Ordered by how much user data is at risk.
 | **G25** | Exclude the plugin's own `data.json` from sync | — | It holds the Dropbox OAuth access and refresh tokens, and nothing excludes it. Enabling the Plugins section uploads those tokens to Dropbox and distributes them to every device that syncs that section. The vault debug log and `sync-logs/` reach Dropbox the same way, which is untidy rather than dangerous. |
 | **G26** | Move device identity out of synced settings | — | `deviceId` lives in `data.json` and is minted only when empty, so a device that receives a synced `data.json` adopts the sender's identity instead of generating its own. Two devices then share an ID, which collides their debug log filenames today and would collide their conflict copy names once `G9` lands — the one thing a conflict copy name exists to disambiguate. It belongs in device-local storage, which already exists for exactly this. `G25` also fixes it, by stopping the file from travelling at all. |
 
+## Concern analysis
+
+How each gap or approach concern sits against the rules and principles, and whether a fix can land without breaking them. **Breaks** = what today's behaviour (or a naive fix) violates. **Addressable?** = whether a conforming fix exists.
+
+| ID | Concern | Breaks today | Addressable without breaking rules/principles? |
+|---|---|---|---|
+| **G1** | Conflict copies stay local and are excluded from sync | R1, R3 | **Yes.** Upload the sibling; stop excluding it. Couple with G2 and G23. |
+| **G2** | Arriving device overwrites the Dropbox canonical path | R1, R2 | **Yes.** Invert `keep_both`: Dropbox keeps the name; local becomes the conflict copy. |
+| **G3** | No durable delete evidence for fresh / state-lost devices | R6, P3 | **Yes, with limits.** Read Dropbox `list_revisions` (not our tombstones — those break P1/P2/P3). Retention and per-path cost are open (Q4); after history ages out, fall back to ask — do not invent vault sidecars. |
+| **G4** | Identical content writes no sync base | R6 (enables resurrection), P1 (incomplete three-way) | **Yes.** Record base on `same_content` noop. Purely local state. |
+| **G5** | `newest` discards the loser by wall clock | R1, R8 | **Yes.** Remove it, or reduce it to "which name is canonical" while still keeping both files (R1). |
+| **G6** | No rename timestamp → case/path changes have no winner | R8 (temptation to misuse mtime), section 7 | **Tension.** Stamping into the Dropbox folder breaks P1/P2; Dropbox-app renames would not write stamps (P3). Prefer inferring from move / `server_modified` (Q2). Weaker for external renames — accept that, do not add vault metadata files. |
+| **G7** | Renames are delete + upload | P1 (external renames invisible as moves), correctness at folder scale | **Yes.** Server-side `move` + content-similarity detection so cold/manual sync (P5) sees the same move a live rename event would. Confirm case-only move (Q3). |
+| **G8** | Folders not first-class | P1/P2 (empty folders are real vault structure) | **Yes.** Track folder entries from Dropbox/local listings — no sidecar files. |
+| **G9** | Conflict names lack device identity | R4 | **Yes, only after G26.** Name from device-local identity. Doing G9 while `deviceId` still syncs via `data.json` breaks R4 in practice (colliding names). |
+| **G10** | Unbounded deferral stalls the cursor | P1 (device stops reconciling) | **Yes.** Bound then apply; conflict if needed. Must not rely on "user eventually closed the note" as a live-only signal (P5). |
+| **G11** | `client_modified` never sent | — (display/metadata, not a decision rule) | **Yes.** Send/read Dropbox's field. Does not decide conflicts (R8). |
+| **G12** | Downloads write straight to the destination | R7 | **Yes.** Temp file then move into place. |
+| **G13** | Resurrections / rename duplicates are silent | R5 (told), UX only otherwise | **Yes.** Notices only; no behaviour change. |
+| **G14** | File-vs-folder collisions undetected | — (needs G8) | **Yes**, once folders are tracked. Report, do not invent a winner that destroys content (R1). |
+| **G15** | Vault-ID change planned as mass local deletes | R9 (below threshold), P1 | **Yes.** Treat folder change as re-link: clear or isolate base, ask intent. Do not "fix" it by writing a marker file into the vault (P1). |
+| **G16** | Large uploads fail at 150 MB | — (transport) | **Yes.** Resumable upload sessions. |
+| **G17** | Large downloads buffered in memory | — (transport) | **Yes.** Stream to disk; skip + tell when space is insufficient. |
+| **G18** | Autosave stream → many conflict files; no one-copy rule | R1/R3 under load | **Yes, carefully.** Debounce may choose *when* to sync (P5 allows that). One-copy-per-device and conflict evaluation must still hold on a cold manual sync with two divergent files already on disk — not only during a live typing burst. |
+| **G19** | Only the active note is protected | R1 (background unsaved overwritten) | **Yes, with platform limits.** Protect dirty editors Obsidian exposes. Must degrade safely when the API cannot list them — never require a live-only hook that manual sync lacks (P5). |
+| **G20** | Folder-delete live re-list ignores empty subfolders | P1/P2 (removes unverified structure), G8 | **Yes**, with G8: re-list must include folders. |
+| **G21** | Open-file remote delete: no prompt | R5-adjacent, G10 | **Yes.** Modal choice; bound the wait (G10). Outcome must match what a later manual sync would do after the user chooses (P5). |
+| **G22** | Delete inference from incomplete scans | P1 vs R6 | **Yes.** Gate on vouched scan completeness; defer deletes when untrusted. Do not replace inference with tombstone files (P1/P2/P3). |
+| **G23** | Dropbox conflicted-copy names unrecognised / filter hazard | R3, P2, P3 | **Yes, only with G1.** Adopt Dropbox naming and stop excluding those paths in the same change. Accept both old `.conflict-*` and Dropbox names during rollout (P4: mixed versions). |
+| **G24** | Plan snapshot can go stale mid-cycle | P3 | **Yes.** Generalise `rev` + live re-list pattern; retry rather than force. |
+| **G25** | Plugin `data.json` (OAuth tokens) can sync | P4, security | **Yes.** Exclude it. Also stops `deviceId` travelling (helps G26). |
+| **G26** | `deviceId` in synced settings | P4, R4 (once G9 lands) | **Yes.** Move to device-local storage. Prerequisite for G9. |
+| **C1** | Case rename leaves a stuck delete intent and stalls the cursor | P1, P5 (device stops syncing) | **Yes.** Do not `trackDelete` when `path_lower` is unchanged; prune same-key intents. Part of G6/G7 work. |
+| **C2** | `list_revisions` is per-path and retention is short | R6 (after expiry), G3 | **Tension, not a veto.** Confirm API (Q4). Batch/limit calls; after expiry ask the user (row 83). Writing our own delete log into the vault would "solve" retention by breaking P1/P2/P3 — do not. |
+| **C3** | Rename-timestamp storage vs P1/P2/P3 | G6, Q2 | **Tension.** Infer from Dropbox move metadata if possible. If that is too weak for case-only races, accept device-local discovery stamps (P5-weaker for external renames) rather than vault sidecars. |
+| **C4** | Shipping G9 before G26 | R4, P4 | **Yes — by ordering.** G26 (and preferably G25) first, then G9. |
+| **C5** | Shipping Dropbox conflict naming without removing the exclude filter | R3, P2, P3 | **Yes — by coupling.** Land with G1/G23 together. |
+| **C6** | Row 82: preserve deleted path as a conflict copy | R1 vs R6 (judgement) | **Yes as policy.** Chosen outcome upholds R1 and R6 better than silent restore or silent discard. Bulk join UX optional; do not require settings sync (P4). |
+| **C7** | iOS sync state in `.sync-state/` inside the vault | P1 | **Tension.** IndexedDB is unavailable; vault files are the pragmatic host. Keep excluded and never required for correctness on other devices (P2/P4). Prefer platform APIs outside the vault when they exist; do not add more bookkeeping files. |
+| **C8** | Debug log / `sync-logs/` are ordinary vault files that sync | P1 (clutter), G25 note | **Yes for hygiene.** Exclude by default. Not a safety defect like tokens. |
+| **C9** | Live `trackDelete` / rename events vs cold discovery | P5 | **Yes.** Events may only accelerate; planner must infer the same deletes/moves from base + listings on manual sync (G7 content-similarity, G22 vouched scan). |
+| **C10** | Cursor finalize requires empty delete log | P1 (stall), C1 | **Yes.** Clear intents that the plan proved moot (same `path_lower` still present, case-only rename, etc.) so a stuck log cannot freeze all sync. |
+
 ## Open questions
 
-1. **Row 72's resolution is a judgement call.** When a fresh device holds a copy of a deleted file, the options are to restore it, delete it, or preserve it as a conflict copy. The table proposes the third because it neither undoes a shared decision nor destroys content, but it does leave a stray copy behind. Dropbox's own client would simply re-upload it.
+1. **Row 82's resolution is a judgement call.** When a fresh device holds a copy of a deleted file, the options are to restore it, delete it, or preserve it as a conflict copy. The table proposes the third because it neither undoes a shared decision nor destroys content, but it does leave a stray copy behind. Dropbox's own client would simply re-upload it.
 
 2. **Where do rename timestamps live?** They need to be readable by a device that has no local state, which points at the synced Dropbox folder — but the second principle says nothing of ours belongs there, and a Dropbox-managed device would not write them anyway. The deletion side of this problem was resolved by using Dropbox's revision history instead; renames may need the same treatment, inferring the stamp from `server_modified` on the moved file rather than recording one.
 
