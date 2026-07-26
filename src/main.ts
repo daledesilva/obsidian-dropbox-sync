@@ -51,7 +51,10 @@ import { LogManager } from "./log-manager";
 import { postCursorDebugLogLine, type CursorDebugLogMeta } from "./debug/cursor-debug-ingest";
 import { createSyncMonitorLog, SyncHypotheses, samplePaths } from "./debug/sync-monitor";
 import { registerDemoCommands } from "./debug/demo-commands";
-import { initDeviceSettings } from "./device-settings/device-settings";
+import {
+  getCursorDebugSessionId,
+  initDeviceSettings,
+} from "./device-settings/device-settings";
 import { tryAutoConnect } from "./debug/cursor-debug-discover";
 import { isConflictFile, type SyncEngine } from "./sync/engine";
 
@@ -235,43 +238,53 @@ export default class DropboxSyncPlugin extends Plugin {
     // Localhost only — mobile still uses Connect (or a prior cache).
     if (this.settings.debugLoggingEnabled) {
       // #region agent log
-      fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-        method: "POST",
-        headers: {
+      {
+        const sessionId = getCursorDebugSessionId().trim();
+        const headers: Record<string, string> = {
           "Content-Type": "application/json",
-          "X-Debug-Session-Id": "7bd7db",
-        },
-        body: JSON.stringify({
-          sessionId: "7bd7db",
-          hypothesisId: "H-onload",
-          location: "main.ts:onload",
-          message: "scheduling tryAutoConnect on load",
-          data: { debugLoggingEnabled: true },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
-      void tryAutoConnect().then((result) => {
-        // #region agent log
+        };
+        if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
         fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
           method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "X-Debug-Session-Id": "7bd7db",
-          },
+          headers,
           body: JSON.stringify({
-            sessionId: "7bd7db",
+            ...(sessionId ? { sessionId } : {}),
             hypothesisId: "H-onload",
             location: "main.ts:onload",
-            message: "tryAutoConnect settled after load",
-            data: {
-              ok: result.ok,
-              via: result.ok ? result.via : undefined,
-              reason: result.ok ? undefined : result.reason,
-            },
+            message: "scheduling tryAutoConnect on load",
+            data: { debugLoggingEnabled: true },
             timestamp: Date.now(),
           }),
         }).catch(() => {});
+      }
+      // #endregion
+      void tryAutoConnect().then((result) => {
+        // #region agent log
+        {
+          const sessionId =
+            (result.ok ? result.offer.sessionId : "")
+            || getCursorDebugSessionId().trim();
+          const headers: Record<string, string> = {
+            "Content-Type": "application/json",
+          };
+          if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
+          fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
+            method: "POST",
+            headers,
+            body: JSON.stringify({
+              ...(sessionId ? { sessionId } : {}),
+              hypothesisId: "H-onload",
+              location: "main.ts:onload",
+              message: "tryAutoConnect settled after load",
+              data: {
+                ok: result.ok,
+                via: result.ok ? result.via : undefined,
+                reason: result.ok ? undefined : result.reason,
+              },
+              timestamp: Date.now(),
+            }),
+          }).catch(() => {});
+        }
         // #endregion
         if (result.ok) {
           void this.log("cursor debug ingest auto-connected", {
@@ -638,6 +651,8 @@ export default class DropboxSyncPlugin extends Plugin {
       // Refresh callbacks/settings each cycle so log + delete guard stay current.
       engine.applyOptions(this.createEngineOptions());
       engine.setLiveReport(liveReport);
+      // Fresh coalesce snapshot per sync — sections union into it, never inherit a prior run.
+      engine.resetCoalesceRemoteSnapshot();
       const configDir = this.app.vault.configDir;
       // #region agent log
       void this.log("syncNow: before pruneStaleDeleteLog", {

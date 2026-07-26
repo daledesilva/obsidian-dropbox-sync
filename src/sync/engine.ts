@@ -11,6 +11,7 @@ import { checkPathGuard } from "./path-guard";
 import { createPlan } from "./planner";
 import type { ConflictStrategy, ConflictResolver, DeleteGuardResult } from "../types";
 import { executePlan } from "./executor";
+import { unionPathLowers } from "./delete-coalesce";
 import { checkDeleteGuard, splitPlanDeletes } from "./guards";
 import { DropboxAdapter, DropboxCursorResetError } from "../adapters/dropbox-adapter";
 import { isExcluded } from "../exclude";
@@ -172,11 +173,9 @@ export class SyncEngine {
   /** Newest Dropbox cursor from the last cycle fetch — used after deferred deletes. */
   private lastFetchedCursor: string | null = null;
   /**
-   * Non-deleted remote path_lowers from the last cycle remote map — reused by
-   * executeDeletePlan so deferred Deletions can still coalesce folder deletes.
-   * Overwriting this with an empty list (e.g. a later scoped section) makes
-   * coalesceDeleteRemote treat every folder as remotely complete — prefer union
-   * across sections and never replace a non-empty snapshot with empty.
+   * Union of non-deleted remote path_lowers across sections in this sync —
+   * reused by executeDeletePlan so deferred Deletions can still coalesce.
+   * Reset once per syncNow; each runCycle unions (never replaces with empty).
    */
   private lastExistingRemotePathLowers: string[] = [];
 
@@ -184,6 +183,14 @@ export class SyncEngine {
     private deps: SyncEngineDeps,
     private options: SyncEngineOptions = {},
   ) {}
+
+  /**
+   * Clear the coalesce remote snapshot at the start of a sync so sections
+   * cannot inherit a prior run's paths.
+   */
+  resetCoalesceRemoteSnapshot(): void {
+    this.lastExistingRemotePathLowers = [];
+  }
 
   /** Per-sync live markdown report (set before each runCycle). */
   setLiveReport(report: SyncLiveReportSink | null): void {
@@ -457,11 +464,13 @@ export class SyncEngine {
     // 4. base + delta 병합 → 전체 원격 상태
     const fullRemoteMap = this.buildFullRemoteState(baseEntries, deltaEntries);
     this.filterRemoteMapByScope(fullRemoteMap);
-    // Snapshot for delete_batch folder coalesce (including deferred Deletions).
-    // Scoped/empty sections must not wipe a richer earlier snapshot — see field comment.
-    this.lastExistingRemotePathLowers = [...fullRemoteMap.entries()]
-      .filter(([, entry]) => !entry.deleted)
-      .map(([pathLower]) => pathLower);
+    // Union into the sync-wide coalesce snapshot (never replace with an empty section).
+    this.lastExistingRemotePathLowers = unionPathLowers(
+      this.lastExistingRemotePathLowers,
+      [...fullRemoteMap.entries()]
+        .filter(([, entry]) => !entry.deleted)
+        .map(([pathLower]) => pathLower),
+    );
 
     if (this.lastDiagnostics) {
       this.lastDiagnostics.syncState.baseInScope = baseEntries.length;
@@ -1187,7 +1196,13 @@ export class SyncEngine {
     // cycle cannot advance the cursor while an earlier section still has skips pending.
     let deletesClearedFromLog = 0;
     for (const item of result.succeeded) {
-      if (item.action.type === "deleteRemote" || item.action.type === "deleteLocal") {
+      // Deletes clear intents; downloads that restored a locally-deleted path
+      // (plan-time or folder-verify hash rescue) must clear too or the cursor stalls.
+      const clearsDeleteIntent =
+        item.action.type === "deleteRemote"
+        || item.action.type === "deleteLocal"
+        || item.action.type === "download";
+      if (clearsDeleteIntent) {
         if (this.deletedPaths.delete(item.pathLower)) {
           deletesClearedFromLog++;
         }

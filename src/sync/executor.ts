@@ -2,6 +2,7 @@ import { dropboxContentHashBrowser } from "../hash.browser";
 import type {
   FileSystem,
   RemoteDeleteBatchEntryResult,
+  RemoteListedFile,
   RemoteStorage,
   SyncStateStore,
 } from "../adapters/interfaces";
@@ -21,7 +22,10 @@ import {
   SyncHypotheses,
   type SyncMonitorLog,
 } from "../debug/sync-monitor";
-import { coalesceDeleteRemote } from "./delete-coalesce";
+import {
+  coalesceDeleteRemote,
+  type CoalesceDeleteRemoteResult,
+} from "./delete-coalesce";
 
 export interface ExecutorDeps {
   fs: FileSystem;
@@ -272,6 +276,103 @@ export async function executePlan(
 }
 
 /**
+ * Live-verify coalesced folder deletes against Dropbox before recursive wipe.
+ * Exact child-set match required; content_hash ≠ base → download that path instead.
+ */
+async function verifyCoalescedFolderDeletes(
+  coalesce: CoalesceDeleteRemoteResult,
+  remote: RemoteStorage,
+  store: SyncStateStore,
+  log?: SyncMonitorLog,
+): Promise<{
+  folderPaths: string[];
+  folderToCoveredItems: Map<string, SyncPlanItem[]>;
+  remainingFileItems: SyncPlanItem[];
+  downloadItems: SyncPlanItem[];
+}> {
+  const folderPaths: string[] = [];
+  const folderToCoveredItems = new Map<string, SyncPlanItem[]>();
+  const remainingFileItems = [...coalesce.remainingFileItems];
+  const downloadItems: SyncPlanItem[] = [];
+
+  for (const folder of coalesce.folderPaths) {
+    const covered = coalesce.folderToCoveredItems.get(folder.toLowerCase())
+      ?? coalesce.folderToCoveredItems.get(folder)
+      ?? [];
+    const planned = new Set(covered.map((item) => item.pathLower));
+
+    let live: RemoteListedFile[];
+    try {
+      live = await remote.listFilePathLowersUnder(folder);
+    } catch (e) {
+      log?.("exec folder verify list failed — expanding to files", {
+        folder,
+        error: e instanceof Error ? e.message : String(e),
+        covered: covered.length,
+      }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.verifyFolder" });
+      remainingFileItems.push(...covered);
+      continue;
+    }
+
+    const livePaths = new Set(live.map((f) => f.pathLower));
+    const setsEqual =
+      livePaths.size === planned.size
+      && [...planned].every((pathLower) => livePaths.has(pathLower));
+
+    if (!setsEqual) {
+      log?.("exec folder verify set mismatch — file deletes only", {
+        folder,
+        planned: planned.size,
+        live: livePaths.size,
+      }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.verifyFolder" });
+      remainingFileItems.push(...covered);
+      continue;
+    }
+
+    const hashByPath = new Map(live.map((f) => [f.pathLower, f.contentHash]));
+    const mismatched: SyncPlanItem[] = [];
+    const matched: SyncPlanItem[] = [];
+    for (const item of covered) {
+      const base = await store.getEntry(item.pathLower);
+      const liveHash = hashByPath.get(item.pathLower) ?? "";
+      // Modification beats delete at execute time — same intent as planner.
+      if (base?.baseRemoteHash && liveHash && liveHash !== base.baseRemoteHash) {
+        mismatched.push(item);
+      } else {
+        matched.push(item);
+      }
+    }
+
+    if (mismatched.length > 0) {
+      log?.("exec folder verify hash mismatch — download changed, file-delete rest", {
+        folder,
+        mismatched: mismatched.length,
+        matched: matched.length,
+      }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.verifyFolder" });
+      for (const item of mismatched) {
+        item.action = {
+          type: "download",
+          reason: "remote_modified_local_deleted",
+        };
+        downloadItems.push(item);
+      }
+      remainingFileItems.push(...matched);
+      continue;
+    }
+
+    folderPaths.push(folder);
+    folderToCoveredItems.set(folder.toLowerCase(), covered);
+  }
+
+  return {
+    folderPaths,
+    folderToCoveredItems,
+    remainingFileItems,
+    downloadItems,
+  };
+}
+
+/**
  * Coalesce complete remote delete subtrees into folder deletes, then run
  * remote.deleteBatch. Results are expanded back to the original file-level
  * SyncPlanItems so delete-log clearing and UI counts stay unchanged.
@@ -346,6 +447,10 @@ async function executeDeleteRemoteBatch(
         await settleItem(item, false, new Error("Aborted during deleteRemote fallback"));
         continue;
       }
+      // Skip items already reclassified to download during folder verify.
+      if (item.action.type !== "deleteRemote") {
+        continue;
+      }
       const actionType = "deleteRemote";
       ctx.onExecItem?.(item.localPath, actionType, "start");
       try {
@@ -368,22 +473,56 @@ async function executeDeleteRemoteBatch(
     blockingPathLowers,
   });
 
+  const verified = await verifyCoalescedFolderDeletes(
+    coalesce,
+    ctx.remote,
+    ctx.store,
+    ctx.log,
+  );
+
+  // Restore remotely-edited files before any sibling deletes under the same tree.
+  for (const item of verified.downloadItems) {
+    if (ctx.signal?.aborted) {
+      failed.push({ item, error: new Error("Aborted during deleteRemote hash rescue download") });
+      hooks.onItemSettled();
+      continue;
+    }
+    const actionType = "download";
+    ctx.onExecItem?.(item.localPath, actionType, "start");
+    try {
+      await executeItem(item, ctx);
+      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      succeeded.push(item);
+      hooks.onItemSettled();
+    } catch (itemErr) {
+      const err = itemErr instanceof Error ? itemErr : new Error(String(itemErr));
+      ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+      failed.push({ item, error: err });
+      hooks.onItemSettled();
+    }
+  }
+
   // Folders first, then remaining files — never both a folder and its children.
   const requestPaths = [
-    ...coalesce.folderPaths,
-    ...coalesce.remainingFileItems.map((item) => item.localPath),
+    ...verified.folderPaths,
+    ...verified.remainingFileItems.map((item) => item.localPath),
   ];
-  const folderSet = new Set(coalesce.folderPaths.map((p) => p.toLowerCase()));
+  const folderSet = new Set(verified.folderPaths.map((p) => p.toLowerCase()));
   const fileItemByPath = new Map(
-    coalesce.remainingFileItems.map((item) => [item.pathLower, item]),
+    verified.remainingFileItems.map((item) => [item.pathLower, item]),
   );
 
   ctx.log?.("exec deleteRemote batch start", {
     fileItems: deleteRemoteItems.length,
-    folderPaths: coalesce.folderPaths.length,
-    remainingFiles: coalesce.remainingFileItems.length,
+    folderPaths: verified.folderPaths.length,
+    remainingFiles: verified.remainingFileItems.length,
+    rescuedDownloads: verified.downloadItems.length,
     requestPaths: requestPaths.length,
   }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteBatch" });
+
+  if (requestPaths.length === 0) {
+    return { succeeded, failed };
+  }
 
   let batchResults: RemoteDeleteBatchEntryResult[];
   try {
@@ -391,9 +530,14 @@ async function executeDeleteRemoteBatch(
   } catch (e) {
     ctx.log?.("exec deleteRemote batch failed — falling back to per-item", {
       error: e instanceof Error ? e.message : String(e),
-      count: deleteRemoteItems.length,
+      count: verified.remainingFileItems.length + verified.folderPaths.length,
     }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteBatch" });
-    await fallbackPerItem(deleteRemoteItems);
+    // Only fall back deletes still planned — rescued downloads already ran.
+    const deleteFallback = [
+      ...verified.remainingFileItems,
+      ...[...verified.folderToCoveredItems.values()].flat(),
+    ];
+    await fallbackPerItem(deleteFallback);
     return { succeeded, failed };
   }
 
@@ -414,7 +558,7 @@ async function executeDeleteRemoteBatch(
     };
 
     if (folderSet.has(pathLower)) {
-      const covered = coalesce.folderToCoveredItems.get(pathLower) ?? [];
+      const covered = verified.folderToCoveredItems.get(pathLower) ?? [];
       if (result.ok) {
         for (const item of covered) {
           await settleItem(item, true);

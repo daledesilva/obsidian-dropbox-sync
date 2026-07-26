@@ -26,8 +26,10 @@ Folder coalesce is allowed only when, using this cycle’s known remote file map
 flowchart TD
   Plan["SyncPlan deleteRemote items"] --> Peel["Peel from non-delete work"]
   Peel --> Coalesce["coalesceDeleteRemote"]
-  Coalesce --> Folders["Folder paths"]
-  Coalesce --> Files["Remaining file paths"]
+  Coalesce --> Verify["listFilePathLowersUnder + hash gate"]
+  Verify --> Folders["Verified folder paths"]
+  Verify --> Files["Remaining file paths"]
+  Verify --> Rescue["Download hash mismatches"]
   Folders --> Batch["remote.deleteBatch"]
   Files --> Batch
   Batch --> Expand["Expand to original SyncPlanItems"]
@@ -56,12 +58,12 @@ flowchart TD
 
 | Piece | Role |
 |---|---|
-| `coalesceDeleteRemote` ([`src/sync/delete-coalesce.ts`](../src/sync/delete-coalesce.ts)) | Pure coalesce; maximal folders, min cover 2 |
-| `RemoteStorage.deleteBatch` ([`src/adapters/interfaces.ts`](../src/adapters/interfaces.ts)) | Per-path results; Dropbox polls async jobs |
+| `coalesceDeleteRemote` / `unionPathLowers` ([`src/sync/delete-coalesce.ts`](../src/sync/delete-coalesce.ts)) | Pure coalesce; empty snapshot → files only; min cover 2 |
+| `RemoteStorage.deleteBatch` / `listFilePathLowersUnder` | Batch deletes + live folder verify with hashes |
 | `DropboxAdapter.deleteBatch` | `/files/delete_batch` + `/files/delete_batch/check`; chunk 1000 |
-| `executeDeleteRemoteBatch` ([`src/sync/executor.ts`](../src/sync/executor.ts)) | Coalesce → batch → expand; no 90s soft timeout around the job |
-| `lastExistingRemotePathLowers` ([`src/sync/engine.ts`](../src/sync/engine.ts)) | Snapshot of non-deleted remote path_lowers for coalesce |
-| Tests | `test/delete-coalesce.test.ts`, `test/dropbox-adapter-delete-batch.test.ts`, executor batch cases |
+| `executeDeleteRemoteBatch` ([`src/sync/executor.ts`](../src/sync/executor.ts)) | Coalesce → live verify → rescue downloads → batch → expand |
+| `lastExistingRemotePathLowers` ([`src/sync/engine.ts`](../src/sync/engine.ts)) | Per-sync union of non-deleted remotes; reset in `syncNow` |
+| Tests | `test/delete-coalesce.test.ts`, `test/dropbox-adapter-delete-batch.test.ts`, executor batch/verify cases |
 
 Related: [Sync safety](sync-safety.md) (delete protection, infer guards), [Sync execute isolation](sync-execute-isolation.md) (concurrency for non-batch work), [Conflict resolution](conflict-resolution.md) (edit vs delete at plan time).
 
@@ -73,9 +75,10 @@ If a recursive **folder** delete already wiped Dropbox before the other device s
 
 ## Technical Gotchas
 
-- **Empty remote snapshot makes coalesce unsafe.** Coalesce treats “every known remote under `F` is in the delete set” as true when the known-remote list is **empty**. A later empty section (e.g. settings) can overwrite `lastExistingRemotePathLowers` before deferred deletes run, allowing a shallow parent folder delete that wipes Dropbox children the planner never listed. Until snapshot union / empty-guard fixes land, treat large folder deletes after multi-section sync as high risk.
-- **No live Dropbox re-list before folder delete today.** Coalesce trusts the in-memory remote map only. Files on Dropbox under `F` that are missing from that map can still be removed by a recursive folder delete.
+- **Empty remote snapshot → no folder coalesce.** `coalesceDeleteRemote` returns file deletes only when `existingRemotePathLowers` is empty (vacuous coverage is unsafe).
+- **Multi-section sync unions the snapshot.** `resetCoalesceRemoteSnapshot()` runs once per `syncNow`; each section **unions** non-deleted remotes into `lastExistingRemotePathLowers` so a later empty settings map cannot wipe notes paths.
+- **Live list + hash gate before folder delete.** After coalesce, each folder is verified with `listFilePathLowersUnder`. Live file set must **exactly** match the planned delete set; otherwise expand to file deletes. If any planned path’s live `content_hash` differs from sync-base, reject that folder delete, **download** the mismatched paths, and file-delete the rest.
 - **Batch path skips per-item soft timeout.** Long `delete_batch` jobs poll until complete/failed/abort; do not wrap the whole job in the 90s item timeout.
 - **Never send a folder and its children in the same batch.** Coalesce excludes covered files from the remaining file list.
-- **Progress and delete-log stay file-level.** UI and `finalizeState` must see original `SyncPlanItem`s, not only the folder path.
+- **Progress and delete-log stay file-level.** UI and `finalizeState` must see original `SyncPlanItem`s, not only the folder path. Successful downloads that restore a delete-logged path also clear the delete intent.
 - **App/vault root must never be a folder delete target.** Coalesce skips empty/`"/"` prefixes.

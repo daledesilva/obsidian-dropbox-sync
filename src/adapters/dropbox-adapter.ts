@@ -1,5 +1,9 @@
 import type { HttpClient } from "../http-client";
-import type { RemoteDeleteBatchEntryResult, RemoteStorage } from "./interfaces";
+import type {
+  RemoteDeleteBatchEntryResult,
+  RemoteListedFile,
+  RemoteStorage,
+} from "./interfaces";
 import type {
   RemoteEntry,
   ListChangesResult,
@@ -251,6 +255,58 @@ export class DropboxAdapter implements RemoteStorage {
     await this.rpcCall("/files/delete_v2", {
       path: this.toRemotePath(path),
     });
+  }
+
+  /**
+   * Recursive live list of files under a vault-relative folder.
+   * Used before folder delete_batch so unknown Dropbox children block coalesce.
+   */
+  async listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]> {
+    const folder = folderPath.replace(/\/+$/, "");
+    if (!folder) return [];
+
+    const listed: RemoteListedFile[] = [];
+    let cursor: string | undefined;
+    let hasMore = true;
+
+    try {
+      while (hasMore) {
+        const result = cursor
+          ? await this.rpcCall<DropboxListFolderResult>(
+            "/files/list_folder/continue",
+            { cursor },
+          )
+          : await this.rpcCall<DropboxListFolderResult>(
+            "/files/list_folder",
+            {
+              path: this.toRemotePath(folder),
+              recursive: true,
+              include_deleted: false,
+              limit: 2000,
+            },
+          );
+
+        for (const entry of result.entries) {
+          if (entry[".tag"] !== "file") continue;
+          const stripped = this.stripRemotePrefix(entry.path_lower);
+          listed.push({
+            pathLower: stripped.toLowerCase(),
+            contentHash: entry.content_hash ?? "",
+          });
+        }
+
+        hasMore = result.has_more;
+        cursor = result.cursor;
+      }
+    } catch (e) {
+      // Missing folder → empty live set (folder delete will be rejected / expanded).
+      if (e instanceof Error && e.message.includes("path/not_found")) {
+        return [];
+      }
+      throw e;
+    }
+
+    return listed;
   }
 
   /**

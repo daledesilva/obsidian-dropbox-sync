@@ -11,6 +11,7 @@ import type {
   FileListOptions,
   FileSystem,
   RemoteDeleteBatchEntryResult,
+  RemoteListedFile,
   RemoteStorage,
   SyncStateStore,
 } from "./interfaces";
@@ -236,6 +237,24 @@ export class MemoryRemoteStorage implements RemoteStorage {
       results.push({ path, ok: true });
     }
     return results;
+  }
+
+  /**
+   * Test double for live folder verify: non-deleted files under folder/ prefix.
+   */
+  // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
+  async listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]> {
+    const folder = folderPath.toLowerCase().replace(/\/+$/, "");
+    if (!folder) return [];
+    const prefix = `${folder}/`;
+    const listed: RemoteListedFile[] = [];
+    for (const file of this.files.values()) {
+      if (file.deleted) continue;
+      if (file.pathLower.startsWith(prefix)) {
+        listed.push({ pathLower: file.pathLower, contentHash: file.hash });
+      }
+    }
+    return listed;
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {

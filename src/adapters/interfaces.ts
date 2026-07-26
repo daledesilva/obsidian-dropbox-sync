@@ -38,6 +38,15 @@ export interface RemoteDeleteBatchEntryResult {
   tooManyFiles?: boolean;
 }
 
+/**
+ * Live file under a folder from {@link RemoteStorage.listFilePathLowersUnder}.
+ * Used to verify folder deletes against Dropbox before recursive delete_batch.
+ */
+export interface RemoteListedFile {
+  pathLower: string;
+  contentHash: string;
+}
+
 /** 원격 스토리지 추상화 (Dropbox) */
 export interface RemoteStorage {
   listChanges(cursor?: string): Promise<ListChangesResult>;
@@ -54,6 +63,11 @@ export interface RemoteStorage {
    * Folder paths recursively delete contents on Dropbox.
    */
   deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]>;
+  /**
+   * Live-list non-deleted files under a vault-relative folder (recursive).
+   * Folder-delete coalesce requires this set to exactly match the planned deletes.
+   */
+  listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]>;
   move(from: string, to: string): Promise<RemoteEntry>;
 }
 

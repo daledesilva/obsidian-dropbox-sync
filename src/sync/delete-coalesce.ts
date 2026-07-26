@@ -21,6 +21,26 @@ export interface CoalesceDeleteRemoteResult {
 }
 
 /**
+ * Union path_lowers for multi-section coalesce snapshots.
+ * Never drops prior paths when a later scoped section contributes nothing.
+ */
+export function unionPathLowers(
+  existing: Iterable<string>,
+  additions: Iterable<string>,
+): string[] {
+  const set = new Set<string>();
+  for (const path of existing) {
+    const lower = path.toLowerCase();
+    if (lower) set.add(lower);
+  }
+  for (const path of additions) {
+    const lower = path.toLowerCase();
+    if (lower) set.add(lower);
+  }
+  return [...set];
+}
+
+/**
  * Collapse complete remote delete subtrees into folder deletes.
  * Execution optimization only — callers must still expand results to the original
  * file-level SyncPlanItems for delete-log and UI accounting.
@@ -47,6 +67,16 @@ export function coalesceDeleteRemote(
   const blocking = new Set(
     [...input.blockingPathLowers].map((p) => p.toLowerCase()),
   );
+
+  // Vacuous "all remotes covered" when existingRemote is empty would pick shallow
+  // parents (e.g. Files) and recursively wipe Dropbox — refuse folder coalesce.
+  if (existingRemote.size === 0) {
+    return {
+      folderPaths: [],
+      remainingFileItems: deleteItems,
+      folderToCoveredItems: new Map(),
+    };
+  }
 
   const candidates = collectCandidateFolders(deleteSet);
   type Scored = { folder: string; covered: string[]; depth: number };

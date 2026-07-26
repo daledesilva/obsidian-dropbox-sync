@@ -290,13 +290,13 @@ describe("executePlan", () => {
   test("deleteRemote: folder coalesce deletes prefix and clears all covered store entries", async () => {
     const paths = ["notes/a.md", "notes/b.md", "notes/c.md"];
     for (const path of paths) {
-      await remote.upload(path, new TextEncoder().encode(path));
+      const entry = await remote.upload(path, new TextEncoder().encode(path));
       await store.setEntry({
         pathLower: path,
         localPath: path,
-        baseLocalHash: "h",
-        baseRemoteHash: "h",
-        rev: "r",
+        baseLocalHash: entry.hash,
+        baseRemoteHash: entry.hash,
+        rev: entry.rev,
         lastSynced: 1000,
       });
     }
@@ -321,6 +321,78 @@ describe("executePlan", () => {
       expect(remote.has(path)).toBe(false);
       expect(await store.getEntry(path)).toBeNull();
     }
+  });
+
+  test("deleteRemote: live list extra file blocks folder delete", async () => {
+    const planned = ["notes/a.md", "notes/b.md"];
+    for (const path of [...planned, "notes/secret.md"]) {
+      const entry = await remote.upload(path, new TextEncoder().encode(path));
+      await store.setEntry({
+        pathLower: path,
+        localPath: path,
+        baseLocalHash: entry.hash,
+        baseRemoteHash: entry.hash,
+        rev: entry.rev,
+        lastSynced: 1000,
+      });
+    }
+
+    const plan = mkPlan(
+      ...planned.map((path) => ({
+        pathLower: path,
+        localPath: path,
+        action: { type: "deleteRemote" as const, reason: "deleted_on_local" },
+      })),
+    );
+
+    // Snapshot omits secret.md so coalesce proposes notes/ — live list must reject it.
+    const result = await executePlan(plan, deps, {
+      existingRemotePathLowers: planned,
+    });
+
+    expect(remote.lastDeleteBatchPaths.sort()).toEqual([...planned].sort());
+    expect(remote.lastDeleteBatchPaths).not.toContain("notes");
+    expect(result.succeeded).toHaveLength(2);
+    expect(remote.has("notes/secret.md")).toBe(true);
+  });
+
+  test("deleteRemote: live hash ≠ base downloads instead of deleting", async () => {
+    const paths = ["notes/a.md", "notes/b.md", "notes/c.md"];
+    for (const path of paths) {
+      const entry = await remote.upload(path, new TextEncoder().encode(`v1-${path}`));
+      await store.setEntry({
+        pathLower: path,
+        localPath: path,
+        baseLocalHash: entry.hash,
+        baseRemoteHash: entry.hash,
+        rev: entry.rev,
+        lastSynced: 1000,
+      });
+    }
+    // Remote edited after plan-time base — must not be wiped by folder delete.
+    await remote.upload("notes/c.md", new TextEncoder().encode("edited-on-ipad"));
+
+    const plan = mkPlan(
+      ...paths.map((path) => ({
+        pathLower: path,
+        localPath: path,
+        action: { type: "deleteRemote" as const, reason: "deleted_on_local" },
+      })),
+    );
+
+    const result = await executePlan(plan, deps, {
+      existingRemotePathLowers: paths,
+    });
+
+    expect(remote.lastDeleteBatchPaths.sort()).toEqual(["notes/a.md", "notes/b.md"]);
+    expect(remote.has("notes/c.md")).toBe(true);
+    const rescued = result.succeeded.find((i) => i.pathLower === "notes/c.md");
+    expect(rescued?.action.type).toBe("download");
+    expect(await fs.read("notes/c.md")).toEqual(
+      new TextEncoder().encode("edited-on-ipad"),
+    );
+    expect(remote.has("notes/a.md")).toBe(false);
+    expect(remote.has("notes/b.md")).toBe(false);
   });
 
   test("deleteRemote: already-absent path soft-succeeds via batch", async () => {

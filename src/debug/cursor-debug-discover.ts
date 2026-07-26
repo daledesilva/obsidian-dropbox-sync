@@ -10,6 +10,7 @@
 import { Notice, requestUrl } from "obsidian";
 import {
   getCursorDebugOfferToken,
+  getCursorDebugSessionId,
   patchDeviceSettings,
   readDeviceSettings,
 } from "../device-settings/device-settings";
@@ -104,32 +105,72 @@ function sleep(ms: number): Promise<void> {
 /** Last fetchOffer reject detail — surfaced on Connect failure Notice + LAN ingest. */
 let lastFetchOfferDebug: Record<string, unknown> = {};
 
+/**
+ * Prefer the connected device-settings session so discover logs land in the
+ * active Cursor Debug file — never a hardcoded stale session slug.
+ */
+function discoverDebugSessionId(preferred?: string): string {
+  return preferred?.trim() || getCursorDebugSessionId().trim();
+}
+
 function postDiscoverDebug(
   host: string,
   hypothesisId: string,
   message: string,
   data: Record<string, unknown>,
+  opts?: { sessionId?: string; location?: string },
 ): void {
   // Prefer LAN host (mobile); 127.0.0.1 only works on the Mac.
   const ingestHost =
     host === "localhost" || host === "127.0.0.1" ? "192.168.50.184" : host;
+  const sessionId = discoverDebugSessionId(opts?.sessionId);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
   // #region agent log
   void requestUrl({
     url: `http://${ingestHost}:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580`,
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "7bd7db",
-    },
+    headers,
     body: JSON.stringify({
-      sessionId: "7bd7db",
+      ...(sessionId ? { sessionId } : {}),
       hypothesisId,
-      location: "cursor-debug-discover.ts:fetchOffer",
+      location: opts?.location ?? "cursor-debug-discover.ts:fetchOffer",
       message,
       data,
       timestamp: Date.now(),
     }),
     throw: false,
+  }).catch(() => {});
+  // #endregion
+}
+
+/** Localhost ingest helper for discover lifecycle (auto-connect / Notice). */
+function postLocalDiscoverDebug(
+  hypothesisId: string,
+  location: string,
+  message: string,
+  data: Record<string, unknown>,
+  sessionId?: string,
+): void {
+  const sid = discoverDebugSessionId(sessionId);
+  const headers: Record<string, string> = {
+    "Content-Type": "application/json",
+  };
+  if (sid) headers["X-Debug-Session-Id"] = sid;
+  // #region agent log
+  fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      ...(sid ? { sessionId: sid } : {}),
+      hypothesisId,
+      location,
+      message,
+      data,
+      timestamp: Date.now(),
+    }),
   }).catch(() => {});
   // #endregion
 }
@@ -225,29 +266,19 @@ export function notifyCursorDebugConnected(offer: CursorDebugOffer): void {
   const message = name
     ? `A remote computer (${name}) was connected to for debug logging.`
     : "A remote computer was connected to for debug logging.";
-  // #region agent log
-  fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "7bd7db",
+  postLocalDiscoverDebug(
+    "H-notify",
+    "cursor-debug-discover.ts:notifyCursorDebugConnected",
+    "showing connect Notice",
+    {
+      noticeMs: CONNECTED_NOTICE_MS,
+      hasServerName: !!name,
+      host: offer.host,
+      port: offer.port,
+      sessionId: offer.sessionId,
     },
-    body: JSON.stringify({
-      sessionId: "7bd7db",
-      hypothesisId: "H-notify",
-      location: "cursor-debug-discover.ts:notifyCursorDebugConnected",
-      message: "showing connect Notice",
-      data: {
-        noticeMs: CONNECTED_NOTICE_MS,
-        hasServerName: !!name,
-        host: offer.host,
-        port: offer.port,
-        sessionId: offer.sessionId,
-      },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
+    offer.sessionId,
+  );
   new Notice(message, CONNECTED_NOTICE_MS);
 }
 
@@ -337,70 +368,38 @@ export async function tryAutoConnect(
   opts?: { notify?: boolean },
 ): Promise<DiscoverResult> {
   const notify = opts?.notify !== false;
-  // #region agent log
-  fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "7bd7db",
-    },
-    body: JSON.stringify({
-      sessionId: "7bd7db",
-      hypothesisId: "H-auto",
-      location: "cursor-debug-discover.ts:tryAutoConnect",
-      message: "tryAutoConnect start",
-      data: { notify, hadCache: hasCachedIngestConnection() },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
+  postLocalDiscoverDebug(
+    "H-auto",
+    "cursor-debug-discover.ts:tryAutoConnect",
+    "tryAutoConnect start",
+    { notify, hadCache: hasCachedIngestConnection() },
+  );
   for (const host of LOCAL_HOSTS) {
     const offer = await fetchOffer(host);
     if (offer) {
-      // #region agent log
-      fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Debug-Session-Id": "7bd7db",
+      postLocalDiscoverDebug(
+        "H-auto",
+        "cursor-debug-discover.ts:tryAutoConnect",
+        "tryAutoConnect success",
+        {
+          notify,
+          via: host,
+          offerHost: offer.host,
+          offerPort: offer.port,
+          offerSession: offer.sessionId,
         },
-        body: JSON.stringify({
-          sessionId: "7bd7db",
-          hypothesisId: "H-auto",
-          location: "cursor-debug-discover.ts:tryAutoConnect",
-          message: "tryAutoConnect success",
-          data: {
-            notify,
-            via: host,
-            offerHost: offer.host,
-            offerPort: offer.port,
-            offerSession: offer.sessionId,
-          },
-          timestamp: Date.now(),
-        }),
-      }).catch(() => {});
-      // #endregion
+        offer.sessionId,
+      );
       applyOffer(offer, { notify });
       return { ok: true, offer, via: host };
     }
   }
-  // #region agent log
-  fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "X-Debug-Session-Id": "7bd7db",
-    },
-    body: JSON.stringify({
-      sessionId: "7bd7db",
-      hypothesisId: "H-auto",
-      location: "cursor-debug-discover.ts:tryAutoConnect",
-      message: "tryAutoConnect failed — no localhost offer",
-      data: { notify },
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
+  postLocalDiscoverDebug(
+    "H-auto",
+    "cursor-debug-discover.ts:tryAutoConnect",
+    "tryAutoConnect failed — no localhost offer",
+    { notify },
+  );
   return { ok: false, reason: "No offer on localhost" };
 }
 

@@ -115,3 +115,84 @@ describe("DropboxAdapter.deleteBatch", () => {
     expect(results[0]!.tooManyFiles).toBe(true);
   });
 });
+
+describe("DropboxAdapter.listFilePathLowersUnder", () => {
+  beforeEach(() => {
+    httpClientMock.mockReset();
+  });
+
+  test("pages through list_folder/continue and returns files with hashes", async () => {
+    const adapter = createAdapter("/vault");
+    httpClientMock
+      .mockResolvedValueOnce(
+        okResp({
+          entries: [
+            {
+              ".tag": "file",
+              name: "a.md",
+              path_lower: "/vault/notes/a.md",
+              path_display: "/vault/notes/a.md",
+              id: "id:a",
+              client_modified: "2020-01-01T00:00:00Z",
+              server_modified: "2020-01-01T00:00:00Z",
+              rev: "r1",
+              size: 1,
+              content_hash: "hash-a",
+            },
+            {
+              ".tag": "folder",
+              name: "sub",
+              path_lower: "/vault/notes/sub",
+              path_display: "/vault/notes/sub",
+              id: "id:folder",
+            },
+          ],
+          cursor: "c1",
+          has_more: true,
+        }),
+      )
+      .mockResolvedValueOnce(
+        okResp({
+          entries: [
+            {
+              ".tag": "file",
+              name: "b.md",
+              path_lower: "/vault/notes/b.md",
+              path_display: "/vault/notes/b.md",
+              id: "id:b",
+              client_modified: "2020-01-01T00:00:00Z",
+              server_modified: "2020-01-01T00:00:00Z",
+              rev: "r2",
+              size: 1,
+              content_hash: "hash-b",
+            },
+          ],
+          cursor: "c2",
+          has_more: false,
+        }),
+      );
+
+    const listed = await adapter.listFilePathLowersUnder("notes");
+    expect(listed).toEqual([
+      { pathLower: "notes/a.md", contentHash: "hash-a" },
+      { pathLower: "notes/b.md", contentHash: "hash-b" },
+    ]);
+    expect(httpClientMock).toHaveBeenCalledTimes(2);
+  });
+
+  test("path/not_found returns empty list", async () => {
+    const adapter = createAdapter();
+    httpClientMock.mockResolvedValueOnce({
+      status: 409,
+      json: {
+        error_summary: "path/not_found/...",
+        error: { ".tag": "path", path: { ".tag": "not_found" } },
+      },
+      text: "path/not_found",
+      headers: {},
+      arrayBuffer: new ArrayBuffer(0),
+    });
+    const listed = await adapter.listFilePathLowersUnder("missing");
+    expect(listed).toEqual([]);
+  });
+});

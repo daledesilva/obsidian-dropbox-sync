@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { coalesceDeleteRemote } from "@/sync/delete-coalesce";
+import { coalesceDeleteRemote, unionPathLowers } from "@/sync/delete-coalesce";
 import type { SyncPlanItem } from "@/types";
 
 function deleteItem(path: string): SyncPlanItem {
@@ -123,5 +123,37 @@ describe("coalesceDeleteRemote", () => {
 
     expect(result.folderPaths).toEqual(["notes/old"]);
     expect(result.remainingFileItems.map((i) => i.pathLower)).toEqual(["notes/keep.md"]);
+  });
+
+  test("empty existingRemote refuses all folder coalesce", () => {
+    const items = [
+      deleteItem("notes/a.md"),
+      deleteItem("notes/b.md"),
+      deleteItem("notes/c.md"),
+    ];
+    const result = coalesceDeleteRemote({
+      deleteRemoteItems: items,
+      existingRemotePathLowers: [],
+      blockingPathLowers: [],
+    });
+
+    expect(result.folderPaths).toEqual([]);
+    expect(result.remainingFileItems).toHaveLength(3);
+  });
+});
+
+describe("unionPathLowers", () => {
+  test("keeps prior notes remotes when a later section adds nothing", () => {
+    const afterNotes = unionPathLowers([], ["notes/a.md", "notes/b.md"]);
+    const afterSettings = unionPathLowers(afterNotes, []);
+    expect(afterSettings.sort()).toEqual(["notes/a.md", "notes/b.md"]);
+  });
+
+  test("unions distinct section paths", () => {
+    const merged = unionPathLowers(
+      ["notes/a.md"],
+      [".obsidian/app.json", "Notes/A.md"],
+    );
+    expect(merged.sort()).toEqual([".obsidian/app.json", "notes/a.md"]);
   });
 });

@@ -5,6 +5,7 @@ import type {
 } from "@/types";
 import type {
   RemoteDeleteBatchEntryResult,
+  RemoteListedFile,
   RemoteStorage,
 } from "@/adapters/interfaces";
 
@@ -29,7 +30,13 @@ export class FailingRemoteStorage implements RemoteStorage {
   injectFailure(opts: {
     after: number;
     error?: Error;
-    method?: "upload" | "download" | "delete" | "deleteBatch" | "listChanges";
+    method?:
+      | "upload"
+      | "download"
+      | "delete"
+      | "deleteBatch"
+      | "listChanges"
+      | "listFilePathLowersUnder";
   }): void {
     this.failAfter = opts.after;
     this.failError = opts.error ?? new Error("Network error");
@@ -82,6 +89,11 @@ export class FailingRemoteStorage implements RemoteStorage {
   async deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]> {
     this.checkFail("deleteBatch");
     return this.inner.deleteBatch(paths);
+  }
+
+  async listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]> {
+    this.checkFail("listFilePathLowersUnder");
+    return this.inner.listFilePathLowersUnder(folderPath);
   }
 
   async move(from: string, to: string): Promise<RemoteEntry> {
