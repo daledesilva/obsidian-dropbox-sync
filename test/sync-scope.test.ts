@@ -111,7 +111,8 @@ describe("isPathInScope", () => {
   });
 
   test("workspaces scope", () => {
-    // workspace.json is in exclude list; workspaces/ folder is the syncable workspace scope
+    // workspace.json and workspaces/ are both Workspaces-section paths (not built-in excludes).
+    expect(isPathInScope(".obsidian/workspace.json", "workspaces", CONFIG, BUILT_IN)).toBe(true);
     expect(isPathInScope(".obsidian/workspaces/foo.json", "workspaces", CONFIG, BUILT_IN)).toBe(true);
     expect(isPathInScope(".obsidian/app.json", "workspaces", CONFIG, BUILT_IN)).toBe(false);
   });
@@ -162,11 +163,20 @@ describe("countEntry and assessRemoteFiles", () => {
     expect(counts.excluded).toBe(1);
   });
 
-  test("workspace pattern in exclude list reduces workspace counts", () => {
-    const counts = emptyScopeCounts();
-    countEntry(counts, ".obsidian/workspace.json", CONFIG, BUILT_IN);
-    expect(counts.workspaces).toBe(0);
-    expect(counts.excluded).toBe(1);
+  test("workspace.json counts as workspaces unless explicitly excluded", () => {
+    const included = emptyScopeCounts();
+    countEntry(included, ".obsidian/workspace.json", CONFIG, BUILT_IN);
+    expect(included.workspaces).toBe(1);
+    expect(included.excluded).toBe(0);
+
+    // Users can still add workspace* themselves; it is no longer a built-in.
+    const excluded = emptyScopeCounts();
+    countEntry(excluded, ".obsidian/workspace.json", CONFIG, [
+      ...BUILT_IN,
+      ".obsidian/workspace*",
+    ]);
+    expect(excluded.workspaces).toBe(0);
+    expect(excluded.excluded).toBe(1);
   });
 
   test("resolveSyncScope: explicit choice updates last used", () => {

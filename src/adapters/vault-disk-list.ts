@@ -13,6 +13,21 @@ export interface DiskListResult {
 }
 
 /**
+ * Resolve a child path from adapter.list().
+ * Desktop FileSystemAdapter returns vault-relative paths (e.g. ".obsidian/plugins");
+ * some mocks/adapters return basenames ("plugins"). Never double-prefix the dir.
+ */
+export function resolveListedChildPath(dir: string, entry: string): string {
+  const entryNorm = normalizePath(entry);
+  if (!dir) return entryNorm;
+  const dirNorm = normalizePath(dir);
+  if (entryNorm === dirNorm || entryNorm.startsWith(`${dirNorm}/`)) {
+    return entryNorm;
+  }
+  return normalizePath(`${dirNorm}/${entryNorm}`);
+}
+
+/**
  * Recursively list files under a vault folder using DataAdapter.
  *
  * Obsidian's Vault API does not fully index dot-folders such as `.obsidian`
@@ -51,7 +66,7 @@ export async function listFilesRecursive(
 
     for (const name of listed.files) {
       options?.signal?.throwIfAborted();
-      const path = dir ? `${dir}/${name}` : name;
+      const path = resolveListedChildPath(dir, name);
       try {
         const st = await adapter.stat(path);
         if (!st) continue;
@@ -62,7 +77,7 @@ export async function listFilesRecursive(
     }
 
     for (const folder of listed.folders) {
-      const child = dir ? `${dir}/${folder}` : folder;
+      const child = resolveListedChildPath(dir, folder);
       if (shouldSkipDir(child)) continue;
       await walk(child);
     }

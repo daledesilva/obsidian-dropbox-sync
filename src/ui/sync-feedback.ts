@@ -97,6 +97,8 @@ export function buildSyncResultFeedback(
   deletesSkipped?: number,
   pathsSkipped?: number,
   permanentSkips?: PermanentSkipEntry[],
+  /** R6 ask Cancel/defer — held new_local uploads this cycle (not “up to date”). */
+  resurrectionDeferred?: number,
 ): SyncResultFeedback {
   const conflictPaths = listConflictPaths(result.succeeded);
   const permanentSummary = summarizePermanentSkips(permanentSkips ?? []);
@@ -147,16 +149,62 @@ export function buildSyncResultFeedback(
     };
   }
   if (result.succeeded.length > 0) {
+    // Succeeded recordBase/mkdir-only cycles have empty chips — treat as idle,
+    // not "78 synced" plain text with nothing to click.
+    if (summaryParts.length === 0) {
+      if (resurrectionDeferred && resurrectionDeferred > 0) {
+        const summary =
+          resurrectionDeferred === 1 ? "skipped" : `skipped ${resurrectionDeferred}`;
+        return {
+          outcome: "partial",
+          summary,
+          endMessage: `Dropbox Sync: ${summary} (local files not uploaded)`,
+          noticeDuration: 5000,
+          conflictPaths,
+          summaryParts: [],
+          summaryPaths: {},
+        };
+      }
+      return {
+        outcome: "up_to_date",
+        summary: "up to date",
+        endMessage: "Dropbox Sync: up to date",
+        noticeDuration: 4000,
+        conflictPaths,
+        summaryParts: [],
+        summaryPaths: {},
+      };
+    }
     const summary = summarizeActions(result.succeeded);
     const permanentHint = permanentSummary ? `\n${permanentSummary}` : "";
+    const deferredHint =
+      resurrectionDeferred && resurrectionDeferred > 0
+        ? `, ${resurrectionDeferred} skipped`
+        : "";
     return {
-      outcome: "success",
-      summary,
-      endMessage: `Dropbox Sync: ${summary}${permanentHint}`,
+      outcome: deferredHint ? "partial" : "success",
+      summary: `${summary}${deferredHint}`,
+      endMessage: `Dropbox Sync: ${summary}${permanentHint}${
+        deferredHint ? ` (${resurrectionDeferred} local upload(s) skipped)` : ""
+      }`,
       noticeDuration: 5000,
       conflictPaths,
       summaryParts,
       summaryPaths,
+    };
+  }
+  // Cancel / outside-dismiss on R6 ask removes uploads from the plan — not “up to date”.
+  if (resurrectionDeferred && resurrectionDeferred > 0) {
+    const summary =
+      resurrectionDeferred === 1 ? "skipped" : `skipped ${resurrectionDeferred}`;
+    return {
+      outcome: "partial",
+      summary,
+      endMessage: `Dropbox Sync: ${summary} (local files not uploaded)`,
+      noticeDuration: 5000,
+      conflictPaths,
+      summaryParts: [],
+      summaryPaths: {},
     };
   }
   return {

@@ -1,6 +1,7 @@
 import { App, Platform, PluginSettingTab, Setting, Notice, TFile } from "obsidian";
 import type { ConflictStrategy } from "../types";
 import type DropboxSyncPlugin from "../main";
+import { AppKeyModal } from "./app-key-modal";
 import { ConfirmModal } from "./confirm-modal";
 import {
   countEnabledBackgroundSections,
@@ -862,6 +863,9 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
   // ── App Key (disconnect 상태에서만 변경 가능) ──
   private renderAppKey(containerEl: HTMLElement): void {
     const isConnected = !!getRefreshToken();
+    const needsCustomKey = this.plugin.settings.useCustomAppKey || !DEFAULT_APP_KEY;
+    const storedAppKey = getCustomAppKey() || this.plugin.settings.appKey;
+    const hasStoredAppKey = !!storedAppKey;
 
     if (DEFAULT_APP_KEY) {
       const appKeyDesc = (() => {
@@ -889,26 +893,51 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
         );
     }
 
-    if (this.plugin.settings.useCustomAppKey || !DEFAULT_APP_KEY) {
-      new Setting(containerEl)
-        .setName("App key")
-        .setDesc(
-          isConnected
-            ? "Disconnect first to change App Key."
-            : "Create an app at dropbox.com/developers/apps",
-        )
-        .addText((text) =>
-          text
-            .setPlaceholder(DEFAULT_APP_KEY || "Your App Key")
-            .setValue(getCustomAppKey() || this.plugin.settings.appKey)
-            .setDisabled(isConnected)
-            .onChange(async (value) => {
-              setCustomAppKey(value.trim());
-              this.plugin.settings.appKey = "";
-              await this.plugin.saveSettings();
-            }),
-        );
+    if (!needsCustomKey) return;
+
+    const appKeyDesc = (() => {
+      const frag = document.createDocumentFragment();
+      if (isConnected) {
+        frag.appendText("Disconnect first to change App Key.");
+        return frag;
+      }
+      if (hasStoredAppKey) {
+        frag.appendText("App key saved on this device. Connect to Dropbox above, or change the key.");
+      } else {
+        frag.appendText("Required before Connect. Create an app at dropbox.com/developers/apps, then submit the key.");
+      }
+      return frag;
+    })();
+
+    new Setting(containerEl)
+      .setName("App key")
+      .setDesc(appKeyDesc)
+      .addButton((btn) => {
+        btn
+          .setButtonText(hasStoredAppKey ? "Change app key" : "Set app key")
+          .setDisabled(isConnected)
+          .onClick(() => void this.openAppKeyModal());
+        if (!hasStoredAppKey && !isConnected) {
+          btn.setCta();
+        }
+      });
+  }
+
+  /** Modal submit persists the device key and re-renders so Connect appears. */
+  private async openAppKeyModal(): Promise<void> {
+    const current = getCustomAppKey() || this.plugin.settings.appKey;
+    const submitted = await new AppKeyModal(this.app, current).waitForSubmit();
+    if (submitted === null) return;
+
+    setCustomAppKey(submitted);
+    // Keep synced appKey empty — credentials stay device-local (G25/G26).
+    this.plugin.settings.appKey = "";
+    if (DEFAULT_APP_KEY) {
+      this.plugin.settings.useCustomAppKey = true;
     }
+    await this.plugin.saveSettings();
+    new Notice("App key saved. You can connect to Dropbox now.");
+    this.display();
   }
 
   private updateExcludeCount(setting: Setting): void {

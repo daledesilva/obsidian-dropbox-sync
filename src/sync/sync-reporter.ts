@@ -195,7 +195,9 @@ export function summarizeActionParts(
 /** 동기화 결과를 아이콘 요약 문자열로 변환. 예: "↑2 • ↓1 • 🚫 1 conflict" */
 export function summarizeActions(items: { action: { type: string } }[]): string {
   const parts = summarizeActionParts(items);
-  if (parts.length === 0) return `${items.length} synced`;
+  // recordBase / mkdir / noop succeed without a user-facing transfer chip —
+  // never fall back to "N synced" prose (that looked like a transfer with no chip).
+  if (parts.length === 0) return "up to date";
   return parts.map(formatActionSummaryPart).join(ACTION_SUMMARY_SEPARATOR);
 }
 

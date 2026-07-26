@@ -6,3 +6,18 @@ dist/
 data.json
 .cursor/debug-ingest-offer.json
 .cursor/debug-*.log
+
+# Generated QA vault content (tooling + templates stay tracked)
+qa-test-vault/*
+!qa-test-vault/generate.mjs
+!qa-test-vault/README.md
+!qa-test-vault/SIMULATION_COVERAGE.md
+!qa-test-vault/templates/
+!qa-test-vault/templates/**
+
+# obsidian-launcher download cache (if pointed at the repo)
+.obsidian-cache/
+
+# qa:open ingest relay
+.cursor/qa-ingest-relay.pid
+.cursor/qa-ingest-relay.log

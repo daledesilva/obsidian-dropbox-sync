@@ -29,6 +29,15 @@ function emptyStats(): SyncPlan["stats"] {
   return emptySyncPlanStats();
 }
 
+/**
+ * Vault / sync-root folder row — createRemoteFolder("/") becomes remote "//"
+ * under the Dropbox sync prefix and Dropbox rejects it. Never plan create for root.
+ */
+export function isSyncRootFolderPath(path: string): boolean {
+  const trimmed = path.trim();
+  return trimmed === "" || trimmed === "/";
+}
+
 function baseDisplayPath(base: SyncEntry | null | undefined): string | null {
   if (!base) return null;
   return base.basePathDisplay ?? base.localPath;
@@ -448,7 +457,8 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
             action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
           });
         }
-      } else {
+      } else if (!isSyncRootFolderPath(pathLower) && !isSyncRootFolderPath(localPath)) {
+        // Root already exists as the sync folder — create_folder("/") → remote "//".
         items.push({
           pathLower,
           localPath,
@@ -468,7 +478,8 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
           localPath,
           action: { type: "deleteRemoteFolder", reason: "deleted_on_local" },
         });
-      } else {
+      } else if (!isSyncRootFolderPath(pathLower) && !isSyncRootFolderPath(localPath)) {
+        // Local vault root is already present — do not mkdir "".
         items.push({
           pathLower,
           localPath,

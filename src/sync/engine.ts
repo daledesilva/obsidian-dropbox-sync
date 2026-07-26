@@ -40,6 +40,12 @@ import {
   type ScopeFingerprint,
 } from "./scope-fingerprint";
 import { applyResurrectionGuard, type ResurrectionResolver } from "./resurrection-guard";
+import {
+  mergeResurrectionDeferredSet,
+  parseResurrectionDeferredSet,
+  RESURRECTION_DEFERRED_META_KEY,
+  serializeResurrectionDeferredSet,
+} from "./resurrection-deferred";
 import { classifyVaultPath } from "./sync-scope";
 import {
   countByActionType,
@@ -195,6 +201,11 @@ export interface CycleResult {
   cursorUpdated?: boolean;
   /** Paths durably skipped after permanent failure classification (G17). */
   permanentSkips?: PermanentSkipEntry[];
+  /**
+   * new_local uploads held by R6 ask Cancel/defer (or no resolver).
+   * Distinct from pathsSkipped (incompatible names) so the UI can say “skipped”.
+   */
+  resurrectionDeferred?: number;
 }
 
 /**
@@ -320,15 +331,6 @@ export class SyncEngine {
     }
     this.deletedPaths.add(pathLower);
     this.deleteIntentSources.set(pathLower, "event");
-    // #region agent log
-    // If vault events emit nested Files/Other/Files paths, they are being created live.
-    if (hasNestedOtherFilesPath(pathLower)) {
-      this.log("trackDelete nested Files/Other/Files path", {
-        path: pathLower,
-        source: "event",
-      }, { hypothesisId: SyncHypotheses.pathShape, location: "engine.trackDelete" });
-    }
-    // #endregion
   }
 
   /** 잘못 기록된 삭제 의도 제거 (경로 rename 등) */
@@ -347,15 +349,6 @@ export class SyncEngine {
       }
       if (hasNestedOtherFilesPath(p)) nestedOtherFiles++;
     }
-    // #region agent log
-    if (nestedOtherFiles > 0) {
-      this.log("restoreDeleteLog contains nested Files/Other/Files paths", {
-        totalRestored: paths.length,
-        nestedOtherFiles,
-        sample: samplePaths(paths.filter((p) => hasNestedOtherFilesPath(p))),
-      }, { hypothesisId: SyncHypotheses.pathShape, location: "engine.restoreDeleteLog" });
-    }
-    // #endregion
   }
 
   /** Drop all delete intents (settings “Clear sync history”). */
@@ -628,20 +621,6 @@ export class SyncEngine {
         inferredSkippedNotes: inferred.skippedNotesInfer,
       };
       emitDiagnosticsPhaseLines(this.liveReport, "intent", this.lastDiagnostics);
-      // #region agent log
-      this.log("delete intent after infer", {
-        totalInLog: this.deletedPaths.size,
-        fromVaultEvents: intentSources.event,
-        fromPersistedLog: intentSources.persisted,
-        inferredThisCycle: inferred.count,
-        inferredSkippedPlugin: inferred.skippedPluginInfer,
-        inferredSkippedNotes: inferred.skippedNotesInfer,
-        inferredSample: inferred.sample,
-        localInScope: localFiles.length,
-        baseInScope: baseEntries.length,
-        remoteInScope: fullRemoteMap.size,
-      }, { hypothesisId: SyncHypotheses.reInferDeletes, location: "engine.inferMissingDeletes" });
-      // #endregion
     }
 
     // 6. 동기화 계획 생성
@@ -682,7 +661,11 @@ export class SyncEngine {
       await this.options.onPathCollisions?.(collisionItems);
     }
 
-    const retryEntries = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
+    // Retry set is vault-global, but this cycle may be a single manual section —
+    // only merge retries whose paths are in the active section filter.
+    const retryEntriesAll = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
+    const retryEntries = retryEntriesAll
+      .filter((entry) => this.pathInScope(entry.localPath));
     const permanentSkips = parsePermanentSkipSet(await store.getMeta(PERMANENT_SKIP_META_KEY));
     const mergedPlanItems = mergeRetryItemsIntoPlan(plan.items, retryEntries);
     const mergedWithoutPermanent = filterPermanentSkippedItems(mergedPlanItems, permanentSkips);
@@ -705,18 +688,47 @@ export class SyncEngine {
 
     // R6/R10 only on fresh join (no cursor). Cursor holders recreating after their own
     // delete must not be forced into preserveAsConflictCopy.
-    const resurrectionPlan = await applyResurrectionGuard(planWithRetry, remote, {
+    const previouslyDeferred = parseResurrectionDeferredSet(
+      await store.getMeta(RESURRECTION_DEFERRED_META_KEY),
+    );
+    const resurrectionResult = await applyResurrectionGuard(planWithRetry, remote, {
       resolver: this.options.resurrectionResolver,
       log: this.options.log,
       hasSyncCursor: Boolean(cursorAtStart),
+      previouslyDeferredPathLowers: new Set(previouslyDeferred),
     });
+    const resurrectionPlan = resurrectionResult.plan;
+    const resurrectionDeferred = resurrectionResult.deferredNewLocalCount;
+
+    // Persist Cancel/"skip for now" so a later sync with a cursor still re-asks.
+    if (
+      resurrectionResult.deferPathsToRemember.length > 0
+      || resurrectionResult.deferPathsToClear.length > 0
+    ) {
+      const nextDeferred = mergeResurrectionDeferredSet(
+        previouslyDeferred,
+        resurrectionResult.deferPathsToRemember,
+        resurrectionResult.deferPathsToClear,
+      );
+      await store.setMeta(
+        RESURRECTION_DEFERRED_META_KEY,
+        serializeResurrectionDeferredSet(nextDeferred),
+      );
+      logTemp(this.options.log, "P3", "updated resurrection deferred set", {
+        remember: resurrectionResult.deferPathsToRemember.length,
+        clear: resurrectionResult.deferPathsToClear.length,
+        nextSize: nextDeferred.length,
+      }, { location: "engine.runCycle" });
+    }
 
     if (resurrectionPlan.items.length !== planWithRetry.items.length
-      || resurrectionPlan.stats.preserveAsConflictCopy > 0) {
+      || resurrectionPlan.stats.preserveAsConflictCopy > 0
+      || resurrectionDeferred > 0) {
       logTemp(this.options.log, "P3", "resurrection guard adjusted plan", {
         before: planWithRetry.items.length,
         after: resurrectionPlan.items.length,
         preserveAsConflictCopy: resurrectionPlan.stats.preserveAsConflictCopy,
+        deferredNewLocalCount: resurrectionDeferred,
       }, { location: "engine.runCycle" });
     }
 
@@ -743,33 +755,6 @@ export class SyncEngine {
       ),
     }, { hypothesisId: SyncHypotheses.sync, location: "engine.plan" });
 
-    // #region agent log
-    // H-path: confirm Files/Other vs Files/Other/Files dual paths are stale history
-    // (persisted/inferred intents for missing remotes) vs newly invented this cycle.
-    {
-      const localPathLowers = new Set(localFiles.map((f) => f.path.toLowerCase()));
-      const remotePathLowers = new Set(fullRemoteMap.keys());
-      const shapeSummary = summarizeDeleteRemotePathShapes({
-        deleteRemotePaths: plan.items
-          .filter((i) => i.action.type === "deleteRemote")
-          .map((i) => i.localPath),
-        deleteLogPaths: this.deletedPaths,
-        intentSource: (pathLower) => this.deleteIntentSources.get(pathLower),
-        remotePathLowers,
-        localPathLowers,
-      });
-      if (
-        shapeSummary.nestedOtherFilesCount > 0
-        || shapeSummary.pairCount > 0
-        || shapeSummary.sample.length > 0
-      ) {
-        this.log("deleteRemote path-shape analysis", shapeSummary, {
-          hypothesisId: SyncHypotheses.pathShape,
-          location: "engine.plan.pathShape",
-        });
-      }
-    }
-    // #endregion
 
     // Host may promote large background syncs to interactive UI before execute.
     await this.options.onPlanReady?.(planForExecute);
@@ -901,28 +886,6 @@ export class SyncEngine {
     const deleteFailed = result.failed.filter(
       (f) => f.item.action.type === "deleteRemote" || f.item.action.type === "deleteLocal",
     );
-    // #region agent log
-    this.log("phase execute done", {
-      durationMs: Date.now() - execStart,
-      succeeded: result.succeeded.length,
-      failed: result.failed.length,
-      deferred: result.deferred.length,
-      succeededByAction: countByActionType(result.succeeded),
-      failedByAction: countByActionType(result.failed.map((f) => f.item)),
-      deleteSucceeded: deleteSucceeded.length,
-      deleteFailed: deleteFailed.length,
-      deleteSucceededSample: samplePaths(deleteSucceeded.map((i) => `${i.action.type}:${i.localPath}`)),
-      deleteFailedSample: samplePaths(
-        deleteFailed.map((f) => `${f.item.action.type}:${f.item.localPath}:${f.error.message}`),
-      ),
-      timeoutFailures: result.failed.filter((f) => f.error.name === "ItemTimeoutError").length,
-    }, {
-      hypothesisId: deleteFailed.length > 0 || (deletesSkipped === 0 && deleteSucceeded.length === 0 && (planActions.deleteRemote || planActions.deleteLocal))
-        ? SyncHypotheses.deleteNotExecuted
-        : SyncHypotheses.sync,
-      location: "engine.execute",
-    });
-    // #endregion
 
     // 9. 상태 갱신
     await this.finalizeState(store, result, latestCursor, deletesSkipped);
@@ -963,6 +926,7 @@ export class SyncEngine {
         diagnostics: this.lastDiagnostics ?? undefined,
         cursorUpdated,
         permanentSkips: this.lastPermanentSkips.length > 0 ? this.lastPermanentSkips : undefined,
+        resurrectionDeferred: resurrectionDeferred || undefined,
       };
     }
 
@@ -976,6 +940,7 @@ export class SyncEngine {
       diagnostics: this.lastDiagnostics ?? undefined,
       cursorUpdated,
       permanentSkips: this.lastPermanentSkips.length > 0 ? this.lastPermanentSkips : undefined,
+      resurrectionDeferred: resurrectionDeferred || undefined,
     };
   }
 
@@ -1404,16 +1369,6 @@ export class SyncEngine {
 
     if (this.options.onDeleteGuardTriggered) {
       const approved = await this.options.onDeleteGuardTriggered(guard);
-      // #region agent log
-      this.log("delete guard user decision", {
-        approved,
-        deleteCount: guard.deleteItems.length,
-        threshold,
-        deleteRemote,
-        deleteLocal,
-        sample: samplePaths(guard.deleteItems.map((i) => `${i.action.type}:${i.localPath}`)),
-      }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.applyDeleteGuard" });
-      // #endregion
       if (approved) {
         return { planToExecute: plan, deletesSkipped: 0 };
       }
@@ -1505,27 +1460,6 @@ export class SyncEngine {
 
     this.lastCursorUpdated = canUpdateCursor;
 
-    // #region agent log
-    this.log("finalize state", {
-      cursorUpdated: canUpdateCursor,
-      deferCursorUpdate: !!this.options.deferCursorUpdate,
-      failed: result.failed.length,
-      deferred: result.deferred.length,
-      deletesSkipped,
-      pendingDeleteLog,
-      retrySetSize: nextRetry.length,
-      blockReasons: [
-        ...(this.options.deferCursorUpdate ? ["deferCursorUpdate"] : []),
-        ...(deletesSkipped > 0 ? [`deletesSkipped:${deletesSkipped}`] : []),
-        ...(result.deferred.length > 0 ? [`deferred:${result.deferred.length}`] : []),
-        ...(pendingDeleteLog > 0 ? [`pendingDeleteLog:${pendingDeleteLog}`] : []),
-      ],
-      deleteLogBefore,
-      deletesClearedFromLog,
-      deleteLogAfter: this.deletedPaths.size,
-      latestCursorPrefix: latestCursor.slice(0, 12),
-    }, { hypothesisId: SyncHypotheses.cursorStall, location: "engine.finalizeState" });
-    // #endregion
   }
 }
 

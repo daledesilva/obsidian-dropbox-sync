@@ -29,7 +29,9 @@ const result = await Bun.build({
   target: "browser",
   sourcemap: isWatch ? "inline" : "none",
   define: {
-    __DROPBOX_APP_KEY__: JSON.stringify(env.DROPBOX_APP_KEY ?? ""),
+    // App key is public (client id). Prefer .env / CI secret; fall back to shipped default.
+    __DROPBOX_APP_KEY__: JSON.stringify(env.DROPBOX_APP_KEY || "6k4qrpx2wtbkmfs"),
+
   },
 });
 

@@ -2,7 +2,9 @@ import { describe, test, expect } from "bun:test";
 import {
   getBuiltInExcludePatterns,
   getDefaultExcludePatterns,
+  isObsoleteWorkspaceExcludePattern,
   mergeBuiltInExcludePatterns,
+  migrateSettings,
 } from "@/settings";
 import { isExcluded } from "@/exclude";
 
@@ -13,10 +15,22 @@ describe("getBuiltInExcludePatterns", () => {
     expect(patterns).toContain(".sync-state/");
     expect(patterns).toContain("sync-logs/");
     expect(patterns).toContain("sync-debug-*.log");
-    expect(patterns).toContain(".obsidian/workspace*");
+    // Workspaces are section-gated — not a built-in exclude.
+    expect(patterns).not.toContain(".obsidian/workspace*");
     expect(patterns).toContain(".obsidian/plugins/dropbox-sync/data.json");
     expect(isExcluded("sync-debug-abcd.log", patterns)).toBe(true);
     expect(isExcluded("sync-logs/_sync-log_x.md", patterns)).toBe(true);
+  });
+
+  test("migrateSettings strips legacy workspace* excludes", () => {
+    expect(isObsoleteWorkspaceExcludePattern(".obsidian/workspace*")).toBe(true);
+    const migrated = migrateSettings({
+      excludePatterns: [".obsidian/workspace*", "*.pdf", ".obsidian/plugins/dropbox-sync/data.json"],
+    });
+    expect(migrated.excludePatterns).toEqual([
+      "*.pdf",
+      ".obsidian/plugins/dropbox-sync/data.json",
+    ]);
   });
 
   test("default equals built-in", () => {

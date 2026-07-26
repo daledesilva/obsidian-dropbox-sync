@@ -12,8 +12,13 @@ import {
   type ActionSummaryType,
 } from "../sync/sync-reporter";
 import type { VaultSection } from "../sync/sync-scope";
-import { ActionPathsModal } from "./action-paths-modal";
+import {
+  ActionPathsModal,
+  type ChipLogLine,
+} from "./action-paths-modal";
 import { SyncCancelConfirmModal } from "./sync-cancel-confirm-modal";
+
+export type { ChipLogLine };
 
 export type SectionProgressState = "pending" | "active" | "success" | "partial" | "failed";
 
@@ -51,6 +56,11 @@ export interface SectionProgressSegment {
    * Cleared on markResult so finished chips show count-only values.
    */
   summaryTotals: ActionSummaryTotals;
+  /**
+   * Live attempt/retry/fail/success log per chip while execute runs.
+   * Cleared on markResult; finished chips use summaryPaths only.
+   */
+  liveChipLogs: Partial<Record<ActionSummaryType, ChipLogLine[]>>;
 }
 
 export interface SectionProgressResultOptions {
@@ -90,9 +100,9 @@ export function isFileExplorerVisible(app: App): boolean {
  * settle into final counts on markResult. Finished sections with errors show a
  * failed chip plus upload/download/etc. for successes (not prose like
  * "8 failed, 406 ok"). Cancel mid-execute keeps earned chips and appends
- * Cancelled. Chip click opens a path-list modal that appends as items succeed.
- * Fallback aggregate count link is used only when the plan has no
- * upload/download work.
+ * Cancelled. Chip click opens a path/log modal (attempts + retries while live,
+ * settled path lists when finished). Fallback aggregate count link is used only
+ * when the plan has no upload/download work.
  * The Deletions detail text line is omitted when not actively deleting (counts already
  * appear as trash chips on vault-section lines).
  * Expanded footer: accent-styled Cancel (centered); the Cancel row collapses when complete.
@@ -135,13 +145,18 @@ export class SyncSectionProgress {
    */
   private recentPathsFollowActive = false;
   /**
-   * Path modal opened from a summary chip — kept so live successes can append while open.
+   * Path modal opened from a summary chip — kept so live log lines can append while open.
    */
   private openPathModal: {
     section: ProgressSegmentId;
     actionType: ActionSummaryType;
     modal: ActionPathsModal;
   } | null = null;
+  /**
+   * Keys `${section}|${actionType}|${path}` already started this execute phase —
+   * a second start becomes a "retrying" log line.
+   */
+  private liveChipStartedKeys = new Set<string>();
 
   /**
    * @param onCancel Confirmed cancel from the panel — typically aborts the in-flight sync.
@@ -154,6 +169,7 @@ export class SyncSectionProgress {
   /** Show N segments for the selected sections (files → settings → plugins → workspaces order). */
   show(sections: VaultSection[]): void {
     this.closeOpenPathModal();
+    this.liveChipStartedKeys.clear();
     this.segments = sections.map((section) => ({
       section,
       state: "pending" as const,
@@ -166,6 +182,7 @@ export class SyncSectionProgress {
       summaryParts: [],
       summaryPaths: {},
       summaryTotals: {},
+      liveChipLogs: {},
     }));
     // Sticky for the run: closed at start keeps Notices even if the user opens explorer later.
     this.segmentNoticesEnabled = !isFileExplorerVisible(this.app);
@@ -236,6 +253,7 @@ export class SyncSectionProgress {
       summaryParts: [],
       summaryPaths: {},
       summaryTotals: {},
+      liveChipLogs: {},
     });
     this.render();
   }
@@ -255,6 +273,8 @@ export class SyncSectionProgress {
     seg.summaryParts = [];
     seg.summaryPaths = {};
     seg.summaryTotals = {};
+    seg.liveChipLogs = {};
+    this.clearLiveChipStartedKeysForSection(section);
     // Scan peek does not apply during execute chips — drop it for this section.
     if (this.recentPathsExpandedSection === section) {
       this.recentPathsExpandedSection = null;
@@ -264,7 +284,7 @@ export class SyncSectionProgress {
 
   /**
    * Seed upload/download chips from the plan before execute starts.
-   * Shows 0/total chips immediately; successes append via recordLiveActionSuccess.
+   * Shows 0/total chips immediately; live log lines append via recordLiveAction*.
    */
   beginLiveActionProgress(
     section: ProgressSegmentId,
@@ -290,8 +310,51 @@ export class SyncSectionProgress {
     seg.summaryTotals = totals;
     seg.summaryParts = parts;
     seg.summaryPaths = {};
+    seg.liveChipLogs = {};
+    this.clearLiveChipStartedKeysForSection(section);
     // Chip row replaces the aggregate count link when any upload/download work exists.
     this.renderDetail();
+  }
+
+  /**
+   * Executor item start — first start is "attempt", later starts for the same
+   * path+action are "retrying" (new line each time).
+   */
+  recordLiveActionStart(
+    section: ProgressSegmentId,
+    actionType: string,
+    path: string,
+  ): void {
+    if (!isLiveProgressActionType(actionType)) return;
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    const key = liveChipStartKey(section, actionType, trimmed);
+    const kind: ChipLogLine["kind"] = this.liveChipStartedKeys.has(key)
+      ? "retrying"
+      : "attempt";
+    this.liveChipStartedKeys.add(key);
+    this.appendLiveChipLog(section, actionType, { kind, path: trimmed });
+  }
+
+  /**
+   * Executor item failure during live execute — append a failed log line so the
+   * chip modal shows activity even when nothing has succeeded yet.
+   */
+  recordLiveActionFailure(
+    section: ProgressSegmentId,
+    actionType: string,
+    path: string,
+    error?: string,
+  ): void {
+    if (!isLiveProgressActionType(actionType)) return;
+    const trimmed = path.trim();
+    if (!trimmed) return;
+    const shortError = error?.trim() ? truncateChipError(error.trim()) : undefined;
+    this.appendLiveChipLog(section, actionType, {
+      kind: "failed",
+      path: trimmed,
+      text: shortError,
+    });
   }
 
   /**
@@ -327,16 +390,8 @@ export class SyncSectionProgress {
     if (valueEl) {
       // Tick only the completed span so slash/total keep theme-aware styling.
       setLiveProgressValue(valueEl, paths.length, total);
-      // Enable the chip once the first path exists (was disabled at 0 / total).
       const chip = valueEl.closest(".dbx-sync-explorer-progress-summary-chip");
-      if (chip instanceof HTMLElement && paths.length === 1) {
-        chip.removeClass("dbx-sync-explorer-progress-summary-chip-disabled");
-        chip.removeAttribute("aria-disabled");
-        chip.setAttr(
-          "aria-label",
-          `${actionSummaryModalTitle(actionType)} (${formatActionProgressValue(paths.length, total)})`,
-        );
-      } else if (chip instanceof HTMLElement) {
+      if (chip instanceof HTMLElement) {
         chip.setAttr(
           "aria-label",
           `${actionSummaryModalTitle(actionType)} (${formatActionProgressValue(paths.length, total)})`,
@@ -346,12 +401,35 @@ export class SyncSectionProgress {
       this.renderDetail();
     }
 
+    // Success also goes into the live log (and open modal) as a success line.
+    this.appendLiveChipLog(section, actionType, { kind: "success", path: trimmed });
+  }
+
+  /** Append one live chip log line and mirror into an open modal for that chip. */
+  private appendLiveChipLog(
+    section: ProgressSegmentId,
+    actionType: ActionSummaryType,
+    line: ChipLogLine,
+  ): void {
+    const seg = this.segments.find((s) => s.section === section);
+    if (!seg || seg.state !== "active" || seg.phase !== "sync") return;
+    const logs = seg.liveChipLogs[actionType] ?? [];
+    logs.push(line);
+    seg.liveChipLogs[actionType] = logs;
+
     if (
       this.openPathModal
       && this.openPathModal.section === section
       && this.openPathModal.actionType === actionType
     ) {
-      this.openPathModal.modal.appendPath(trimmed);
+      this.openPathModal.modal.appendLine(line);
+    }
+  }
+
+  private clearLiveChipStartedKeysForSection(section: ProgressSegmentId): void {
+    const prefix = `${section}|`;
+    for (const key of [...this.liveChipStartedKeys]) {
+      if (key.startsWith(prefix)) this.liveChipStartedKeys.delete(key);
     }
   }
 
@@ -378,6 +456,20 @@ export class SyncSectionProgress {
   updateOperationProgress(section: ProgressSegmentId, completed: number, total: number): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg || seg.state !== "active") return;
+    // Local hash progress is vault/config-wide (e.g. 96 indexed files, 110 after
+    // .obsidian disk merge) — not the section's sync plan. Keep "Scanning…" until
+    // execute seeds real upload/download totals.
+    if (seg.phase === "scan") {
+      seg.completed = 0;
+      seg.total = 0;
+      seg.description = "Scanning changes…";
+      const fill = this.fillEls.get(section);
+      if (fill) {
+        fill.style.width = `${fillPercent(seg)}%`;
+      }
+      return;
+    }
+
     const hadCountLink = seg.total > 0;
     seg.completed = completed;
     seg.total = total;
@@ -389,6 +481,15 @@ export class SyncSectionProgress {
     if (fill) {
       fill.style.width = `${fillPercent(seg)}%`;
     }
+
+    // Keep live ↑/↓ chips in lockstep with the bar when the plan is a single
+    // upload-or-download wave (common for first sync / plugin pulls). Per-item
+    // recordLiveActionSuccess can miss DOM ticks under heavy concurrency; the
+    // bar already has the authoritative completed/total from the executor.
+    if (seg.phase === "sync") {
+      this.syncSingleLiveActionChip(section, seg, completed);
+    }
+
     const countText = this.countTextEls.get(section);
     if (countText && total > 0) {
       countText.setText(`${completed}/${total}`);
@@ -396,6 +497,53 @@ export class SyncSectionProgress {
     }
     // First time a total appears (or count host missing) — build the accent link once.
     if (total > 0 && !hadCountLink) {
+      this.renderDetail();
+    }
+  }
+
+  /**
+   * When exactly one live action type (upload or download) has a plan total,
+   * mirror executor completed into that chip. Mixed upload+download plans keep
+   * per-success chip ticks from recordLiveActionSuccess instead.
+   */
+  private syncSingleLiveActionChip(
+    section: ProgressSegmentId,
+    seg: SectionProgressSegment,
+    completed: number,
+  ): void {
+    const liveTypes = LIVE_PROGRESS_ACTION_TYPES.filter(
+      (type) => (seg.summaryTotals[type] ?? 0) > 0,
+    );
+    if (liveTypes.length !== 1) return;
+    const actionType = liveTypes[0];
+    const actionTotal = seg.summaryTotals[actionType];
+    if (!actionTotal) return;
+
+    const nextCount = Math.min(Math.max(0, completed), actionTotal);
+    const part = seg.summaryParts.find((p) => p.type === actionType);
+    if (part) {
+      // Never move the chip backwards if per-item success ticks got ahead.
+      if (nextCount < part.count) return;
+      part.count = nextCount;
+    } else {
+      seg.summaryParts.push({ type: actionType, count: nextCount });
+    }
+
+    const valueEl = this.chipValueEls.get(chipValueKey(section, actionType));
+    if (valueEl) {
+      setLiveProgressValue(valueEl, nextCount, actionTotal);
+      if (nextCount > 0) {
+        const chip = valueEl.closest(".dbx-sync-explorer-progress-summary-chip");
+        if (chip instanceof HTMLElement) {
+          chip.removeClass("dbx-sync-explorer-progress-summary-chip-disabled");
+          chip.removeAttribute("aria-disabled");
+          chip.setAttr(
+            "aria-label",
+            `${actionSummaryModalTitle(actionType)} (${formatActionProgressValue(nextCount, actionTotal)})`,
+          );
+        }
+      }
+    } else if (hasLiveActionChips(seg)) {
       this.renderDetail();
     }
   }
@@ -433,8 +581,10 @@ export class SyncSectionProgress {
     seg.summaryPaths = options?.summaryPaths
       ? cloneSummaryPaths(options.summaryPaths)
       : {};
-    // Drop live totals so finished chips render count-only (not completed/total).
+    // Drop live totals/logs so finished chips render count-only path lists.
     seg.summaryTotals = {};
+    seg.liveChipLogs = {};
+    this.clearLiveChipStartedKeysForSection(section);
     // Finished segments show a full bar in their outcome color.
     if (seg.total <= 0) {
       seg.total = 1;
@@ -590,8 +740,9 @@ export class SyncSectionProgress {
   }
 
   /**
-   * Open the path-list modal for a summary chip (live or finished).
-   * Keeps a reference while open so execute successes can append without reopening.
+   * Open the path/log modal for a summary chip (live or finished).
+   * Live: attempt/retry/fail log (may be empty → "Waiting for activity…").
+   * Finished: settled success/fail path lists from summaryPaths.
    */
   private openSummaryChipModal(
     section: ProgressSegmentId,
@@ -599,8 +750,19 @@ export class SyncSectionProgress {
   ): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg) return;
+
+    const isLive =
+      seg.state === "active"
+      && seg.phase === "sync"
+      && (seg.summaryTotals[actionType] ?? 0) > 0;
+    const liveLogs = seg.liveChipLogs[actionType] ?? [];
     const paths = seg.summaryPaths[actionType] ?? [];
-    if (paths.length === 0) return;
+
+    // Finished chips still need at least one path; live chips open with totals alone.
+    if (!isLive && paths.length === 0 && liveLogs.length === 0) {
+      return;
+    }
+
 
     // Reuse the already-open modal for the same chip instead of stacking duplicates.
     if (
@@ -608,16 +770,27 @@ export class SyncSectionProgress {
       && this.openPathModal.section === section
       && this.openPathModal.actionType === actionType
     ) {
-      this.openPathModal.modal.setPaths(paths);
+      if (isLive) {
+        this.openPathModal.modal.setLines([...liveLogs], { useEventCount: true });
+      } else {
+        this.openPathModal.modal.setPaths(paths);
+      }
       return;
     }
 
     this.closeOpenPathModal();
-    const modal = new ActionPathsModal(
-      this.app,
-      actionSummaryModalTitle(actionType),
-      [...paths],
-    );
+    const modal = isLive
+      ? new ActionPathsModal(
+        this.app,
+        actionSummaryModalTitle(actionType),
+        [...liveLogs],
+        { useEventCount: true },
+      )
+      : new ActionPathsModal(
+        this.app,
+        actionSummaryModalTitle(actionType),
+        [...paths],
+      );
     this.openPathModal = { section, actionType, modal };
     modal.setOnCloseCallback(() => {
       if (this.openPathModal?.modal === modal) {
@@ -844,7 +1017,7 @@ export class SyncSectionProgress {
 
     const summaryChip = target.closest(".dbx-sync-explorer-progress-summary-chip");
     if (summaryChip instanceof HTMLElement && this.detailEl.contains(summaryChip)) {
-      // Disabled chips (0 completed) are not clickable — wait for the first success.
+      // Disabled only for finished chips with no paths — live planned chips stay clickable.
       if (summaryChip.hasClass("dbx-sync-explorer-progress-summary-chip-disabled")) return;
       const section = summaryChip.dataset.section as ProgressSegmentId | undefined;
       const actionType = summaryChip.dataset.actionType as ActionSummaryType | undefined;
@@ -885,8 +1058,11 @@ export class SyncSectionProgress {
       } else if (seg.state === "active" && hasLiveActionChips(seg)) {
         // Execute with upload/download plan totals — same chips as finished, live done/total.
         this.renderSummaryChips(line, seg, true);
+      } else if (seg.state === "active" && seg.phase === "scan") {
+        // Never show vault-hash N/M during scan — only "Scanning…" until plan totals exist.
+        line.createSpan({ text: "Scanning changes…" });
       } else if (seg.state === "active" && seg.total > 0) {
-        // Scan (or sync without upload/download): accent count link toggles recent-path peek.
+        // Sync without upload/download chips: accent count link toggles recent-path peek.
         const countLink = line.createEl("a", {
           cls: "dbx-sync-explorer-progress-count-link",
           href: "#",
@@ -1013,6 +1189,7 @@ export class SyncSectionProgress {
     const chips = line.createDiv({ cls: "dbx-sync-explorer-progress-summary-chips" });
     for (const part of seg.summaryParts) {
       const paths = seg.summaryPaths[part.type] ?? [];
+      const liveLogs = seg.liveChipLogs[part.type] ?? [];
       const total = seg.summaryTotals[part.type];
       const showLiveProgress = isLive && total !== undefined;
       const valueText = showLiveProgress
@@ -1031,8 +1208,10 @@ export class SyncSectionProgress {
           "aria-label": `${actionSummaryModalTitle(part.type)} (${valueText})`,
         },
       });
-      // Chips without paths stay non-interactive until the first success lands.
-      if (paths.length === 0) {
+      // Live chips with a plan total are always clickable (log modal). Finished chips
+      // need at least one path (or live log leftover) before they open.
+      const canOpen = showLiveProgress || paths.length > 0 || liveLogs.length > 0;
+      if (!canOpen) {
         chip.addClass("dbx-sync-explorer-progress-summary-chip-disabled");
         chip.setAttr("aria-disabled", "true");
       }
@@ -1121,6 +1300,21 @@ function cloneSummaryPaths(paths: ActionSummaryPaths): ActionSummaryPaths {
 /** Stable key for in-place chip value updates during execute. */
 function chipValueKey(section: ProgressSegmentId, actionType: ActionSummaryType): string {
   return `${section}:${actionType}`;
+}
+
+/** Tracks first vs subsequent executor starts for retrying log lines. */
+function liveChipStartKey(
+  section: ProgressSegmentId,
+  actionType: string,
+  path: string,
+): string {
+  return `${section}|${actionType}|${path}`;
+}
+
+/** Keep failed-chip error snippets short enough for one modal row. */
+function truncateChipError(message: string, maxLen = 80): string {
+  if (message.length <= maxLen) return message;
+  return `${message.slice(0, maxLen - 1)}…`;
 }
 
 /** True when the active segment should show live upload/download chips instead of N/M. */

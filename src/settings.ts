@@ -1,7 +1,17 @@
 declare const __DROPBOX_APP_KEY__: string;
 
-export const DEFAULT_APP_KEY: string =
+/**
+ * Public Dropbox app key (client id) shipped with the plugin.
+ * Safe to commit: Dropbox app keys are embedded in clients; keep the app secret
+ * out of the repo and out of the plugin (PKCE does not need it).
+ */
+export const SHIPPED_APP_KEY = "6k4qrpx2wtbkmfs";
+
+const BAKED_APP_KEY: string =
   typeof __DROPBOX_APP_KEY__ !== "undefined" ? __DROPBOX_APP_KEY__ : "";
+
+/** Effective built-in key: CI/`.env` bake-in wins, otherwise the shipped default. */
+export const DEFAULT_APP_KEY: string = BAKED_APP_KEY || SHIPPED_APP_KEY;
 
 import type { ConflictStrategy } from "./types";
 import type { VaultSection } from "./sync/sync-scope";
@@ -96,10 +106,16 @@ export function getBuiltInExcludePatterns(configDir: string): string[] {
     "sync-logs/",
     ".DS_Store",
     "Thumbs.db",
-    `${configDir}/workspace*`,
+    // Workspaces are gated by the Workspaces section toggle — not a built-in exclude.
     // OAuth tokens must not sync via Plugins section (G25).
     `${configDir}/plugins/dropbox-sync/data.json`,
   ];
+}
+
+/** Former built-in exclude; section toggles own workspaces now — strip on migrate. */
+export function isObsoleteWorkspaceExcludePattern(pattern: string): boolean {
+  // Matches ".obsidian/workspace*", "*/workspace*", bare "workspace*".
+  return /(^|\/)workspace\*$/i.test(pattern.trim());
 }
 
 /** 최초 설정용 — built-in 목록과 동일 */
@@ -196,6 +212,12 @@ export function migrateSettings(
   if (!migrated.backgroundSyncSections) {
     migrated.backgroundSyncSections = { ...DEFAULT_BACKGROUND_SYNC_SECTIONS };
   }
+  // Drop legacy workspace* excludes so the Workspaces section can sync them.
+  if (Array.isArray(migrated.excludePatterns)) {
+    migrated.excludePatterns = migrated.excludePatterns.filter(
+      (pattern) => !isObsoleteWorkspaceExcludePattern(pattern),
+    );
+  }
   if (
     migrated.vaultEventDebounceSec === undefined
     || !VAULT_EVENT_DEBOUNCE_OPTIONS.includes(migrated.vaultEventDebounceSec as VaultEventDebounceSec)
@@ -264,7 +286,9 @@ export function getEffectiveRemotePath(settings: PluginSettings): string {
 }
 
 export function getEffectiveAppKey(settings: PluginSettings): string {
-  if (settings.useCustomAppKey) {
+  // Builds without a baked-in key always read the device/custom key. Custom
+  // override also wins when the user opts in via settings.
+  if (settings.useCustomAppKey || !DEFAULT_APP_KEY) {
     const deviceKey = getCustomAppKey();
     if (deviceKey) return deviceKey;
     if (settings.appKey) return settings.appKey;

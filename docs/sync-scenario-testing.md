@@ -11,7 +11,7 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 | Unit / planner | Pure decisions, adapters in memory | `bun test` under `test/` |
 | Scenario matrix | One test slot per scenario row 1–101 | `test/simulation/scenario-matrix.test.ts` |
 | Coverage map | Which rows are real vs `todo` | `qa-test-vault/SIMULATION_COVERAGE.md` |
-| Manual QA vault | Real Dropbox + Obsidian runbooks | `bun run qa:generate` / `qa:deploy` → `~/Documents/sync-tester` |
+| Manual QA vault | Real Dropbox + sandboxed Obsidian | `bun run qa:open` → in-repo `qa-test-vault/` via `obsidian-launcher` |
 
 `test.todo` rows are intentional: open-editor deferral, large binaries, and re-link UI need harness work or a human Dropbox peer. Claiming a row means adding a `run` and updating the coverage map.
 
@@ -22,7 +22,7 @@ flowchart LR
   Spec[docs/sync-scenarios.md rows] --> Matrix[scenario-matrix.test.ts]
   Matrix --> Sims[SyncSimulator + MemoryRemote]
   Spec --> Runbooks[qa-test-vault runbooks]
-  Runbooks --> Vault["~/Documents/sync-tester"]
+  Runbooks --> Vault["qa-test-vault/ + obsidian-launcher"]
   Vault --> Ingest[Cursor Debug NDJSON]
 ```
 
@@ -37,8 +37,8 @@ flowchart LR
 
 ### Manual QA cycle
 
-1. `bun run qa:generate` reseeds `_seeds/` and `_runbooks/` without wiping plugin `data.json`.
-2. `bun run qa:deploy` builds and copies into the vault plugin folder (Hot Reload picks up `.hotreload`).
+1. `bun run qa:open` builds, reseeds `qa-test-vault/`, and launches sandboxed Obsidian (`obsidian-launcher watch --plugin ./dist`). OAuth/`data.json` persist (no `--copy` by default).
+2. Or `qa:generate` + `qa:deploy` into `SYNC_TESTER_VAULT` / `~/Documents/sync-tester` for system Obsidian.
 3. Follow a runbook; capture decisions via debug ingest — see [Cursor Debug ingest](cursor-debug-ingest.md).
 
 ## Technical details
@@ -50,7 +50,7 @@ flowchart LR
 | `MemoryRemoteStorage.expireRevisions` | Clears revision history for row 83 ask path |
 | `RecordingLog` | Captures `ruleId` / message for taxonomy checks |
 | `applyResurrectionGuard({ hasSyncCursor })` | R10 only on fresh join — see [Sync gap closure](sync-gap-closure.md) |
-| `qa:generate` / `qa:reset` / `qa:deploy` | `package.json` scripts |
+| `qa:open` / `open-qa` / `qa:generate` / `qa:deploy` | `package.json` + `obsidian-launcher` |
 
 ## Technical Gotchas
 

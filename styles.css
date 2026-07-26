@@ -407,9 +407,36 @@
   white-space: nowrap;
 }
 
+.dbx-sync-action-paths-empty-hidden {
+  display: none;
+}
+
+/* Live chip log kinds — retrying/failed stay readable without competing with success paths. */
+.dbx-sync-action-paths-kind-retrying {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.dbx-sync-action-paths-kind-failed {
+  color: var(--text-error, var(--color-red));
+}
+
+.dbx-sync-action-paths-kind-attempt {
+  color: var(--text-muted);
+}
+
 @keyframes dbx-sync-pulse {
   0%, 100% { opacity: 1; }
   50% { opacity: 0.45; }
+}
+
+/* ── Resurrection ask (R6 batch) ── */
+
+.dbx-sync-resurrection-ask-list {
+  max-height: 12em;
+  overflow: auto;
+  margin: 0.5em 0 1em;
+  padding-left: 1.25em;
 }
 
 /* ── Conflict Modal ── */

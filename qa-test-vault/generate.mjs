@@ -1,12 +1,19 @@
 #!/usr/bin/env node
 /**
- * Generates the Dropbox Sync QA vault into ~/Documents/sync-tester (or SYNC_TESTER_VAULT).
+ * Generates the Dropbox Sync QA vault.
  *
- * Idempotent for content it owns: rebuilds README, _runbooks/, _seeds/, and selected
- * .obsidian config. Never deletes plugins/dropbox-sync/ build artifacts or data.json
- * (auth and settings must survive reset).
+ * Default target is this directory (`qa-test-vault/`), matching obsidian_ink /
+ * obsidian_project-browser so `obsidian-launcher` can open it in-repo. Override
+ * with SYNC_TESTER_VAULT (e.g. ~/Documents/sync-tester for system Obsidian).
  *
- * Run: bun run qa:generate  |  node qa-test-vault/generate.mjs
+ * Default (qa:generate / qa:reset): rebuilds START_HERE.md / README.md, _runbooks/,
+ * _seeds/, and selected .obsidian config. Never deletes plugins/dropbox-sync/
+ * build artifacts or data.json (auth and settings must survive reset).
+ *
+ * Wipe (qa:restart / --wipe / QA_WIPE=1): erase vault contents (including auth
+ * and sync state), then recreate seeds. Does not touch Dropbox remote.
+ *
+ * Run: bun run qa:generate  |  node qa-test-vault/generate.mjs [--wipe]
  */
 import {
   copyFile,
@@ -18,16 +25,31 @@ import {
   access,
 } from "fs/promises";
 import { constants } from "fs";
-import { dirname, join } from "path";
+import { dirname, join, resolve } from "path";
 import { fileURLToPath } from "url";
 import { homedir } from "os";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const TEMPLATES = join(__dirname, "templates");
-const DEFAULT_VAULT = join(homedir(), "Documents", "sync-tester");
-const VAULT_ROOT = process.env.SYNC_TESTER_VAULT
-  ? process.env.SYNC_TESTER_VAULT
-  : DEFAULT_VAULT;
+/** In-repo vault root — also holds generate.mjs / templates (tracked). */
+const DEFAULT_VAULT = __dirname;
+const VAULT_ROOT = resolve(
+  process.env.SYNC_TESTER_VAULT ? process.env.SYNC_TESTER_VAULT : DEFAULT_VAULT,
+);
+/** When generating into the tooling folder, do not clobber the tracked README. */
+const IS_IN_REPO_VAULT = resolve(VAULT_ROOT) === resolve(__dirname);
+/** Full erase before regenerate — used by `bun run qa:restart`. */
+const WIPE_VAULT =
+  process.env.QA_WIPE === "1"
+  || process.argv.includes("--wipe");
+
+/** Tracked harness files that must survive an in-repo wipe. */
+const IN_REPO_KEEP = new Set([
+  "generate.mjs",
+  "README.md",
+  "SIMULATION_COVERAGE.md",
+  "templates",
+]);
 
 /** Minimal 1×1 PNG (68 bytes). */
 const TINY_PNG = Buffer.from(
@@ -93,6 +115,41 @@ async function wipeOwnedTree(relDir) {
   if (await pathExists(full)) {
     await rm(full, { recursive: true, force: true });
   }
+}
+
+/**
+ * Erase the vault so the next generate is a true first-run (new OAuth, empty
+ * sync state). In-repo: keep tracked harness files. External SYNC_TESTER_VAULT:
+ * delete everything inside the vault root.
+ */
+async function wipeVaultContents() {
+  const home = resolve(homedir());
+  const root = resolve(VAULT_ROOT);
+  if (
+    root === "/"
+    || root === home
+    || root === resolve(home, "Documents")
+    || root === resolve(home, "Desktop")
+  ) {
+    throw new Error(`Refusing to wipe dangerous path: ${root}`);
+  }
+  if (!(await pathExists(root))) {
+    console.log(`Wipe: ${root} does not exist yet — nothing to erase`);
+    return;
+  }
+
+  console.log(`Wiping QA vault → ${root}`);
+  const entries = await readdir(root);
+  for (const name of entries) {
+    if (IS_IN_REPO_VAULT && IN_REPO_KEEP.has(name)) continue;
+    await rm(join(root, name), { recursive: true, force: true });
+  }
+  console.log(
+    IS_IN_REPO_VAULT
+      ? "  erased vault content (kept generate.mjs, README, SIMULATION_COVERAGE, templates/)"
+      : "  erased all vault content",
+  );
+  console.log("  Dropbox remote was not touched — clear it manually if you need a clean peer");
 }
 
 async function copyRunbooks() {
@@ -205,51 +262,83 @@ async function writeObsidianConfig() {
     );
   }
 
-  // Ensure plugin folder exists so qa:deploy has a destination; never touch data.json.
-  await ensureDir(join(VAULT_ROOT, ".obsidian", "plugins", "dropbox-sync"));
+  // Ensure plugin folder exists so qa:deploy / launcher have a destination.
+  // Never overwrite existing data.json (auth). On a brand-new vault, seed
+  // excludes so in-repo harness files (templates/, generate.mjs) do not sync.
+  const pluginDir = join(VAULT_ROOT, ".obsidian", "plugins", "dropbox-sync");
+  await ensureDir(pluginDir);
+  const dataJson = join(pluginDir, "data.json");
+  if (IS_IN_REPO_VAULT && !(await pathExists(dataJson))) {
+    await writeFile(
+      dataJson,
+      JSON.stringify(
+        {
+          excludePatterns: [
+            "templates/",
+            "generate.mjs",
+            "SIMULATION_COVERAGE.md",
+            "README.md",
+          ],
+          onboardingDone: true,
+        },
+        null,
+        2,
+      ) + "\n",
+      "utf8",
+    );
+  }
 }
 
 async function main() {
+  if (WIPE_VAULT) {
+    await wipeVaultContents();
+  }
+
   console.log(`Generating sync QA vault → ${VAULT_ROOT}`);
   await ensureDir(VAULT_ROOT);
 
   await wipeOwnedTree("_runbooks");
   await wipeOwnedTree("_seeds");
 
+  // In-repo: keep qa-test-vault/README.md as tooling docs; vault intro is START_HERE.md.
+  // External (e.g. ~/Documents/sync-tester): write README.md as the vault landing note.
   await copyFile(
     join(TEMPLATES, "VAULT_README.md"),
-    join(VAULT_ROOT, "README.md"),
+    join(VAULT_ROOT, IS_IN_REPO_VAULT ? "START_HERE.md" : "README.md"),
   );
   await copyRunbooks();
   await writeSeeds();
   await writeObsidianConfig();
 
-  const dataJson = join(
-    VAULT_ROOT,
-    ".obsidian",
-    "plugins",
-    "dropbox-sync",
-    "data.json",
-  );
-  const hasAuth = await pathExists(dataJson);
-
   console.log("Done.");
   console.log("  _runbooks/  — scenario scripts (see INDEX.md)");
   console.log("  _seeds/     — baseline notes, case, folders, binaries, bulk, exclude-bait");
-  console.log(
-    hasAuth
-      ? "  plugin data.json preserved (auth intact)"
-      : "  no plugin data.json yet — open vault and OAuth once after qa:deploy",
-  );
+  if (WIPE_VAULT) {
+    console.log("  wiped — expect fresh OAuth / empty sync state on next open");
+  } else {
+    const dataJson = join(
+      VAULT_ROOT,
+      ".obsidian",
+      "plugins",
+      "dropbox-sync",
+      "data.json",
+    );
+    console.log(
+      (await pathExists(dataJson))
+        ? "  plugin data.json left in place (qa:reset does not erase auth)"
+        : "  no plugin data.json yet — OAuth once after bun run qa:open",
+    );
+  }
   console.log("");
   console.log("Next:");
-  console.log("  1. bun run qa:deploy");
-  console.log(`  2. Open ${VAULT_ROOT} in Obsidian`);
-  console.log("  3. Sync Now once, then open _runbooks/INDEX.md");
-  console.log("  4. For agent-assisted runs: /debug-ingest then enable Debug logging");
+  console.log("  bun run qa:open / qa:restart — generate (+ wipe) + sandboxed Obsidian");
+  console.log(`  Vault: ${VAULT_ROOT}`);
+  console.log("  Sync Now once, then open _runbooks/INDEX.md");
   console.log("");
   console.log(
-    "Warning: qa:reset reseeds local files only. Wipe the linked Dropbox folder after delete/conflict/casing scenarios.",
+    WIPE_VAULT
+      ? "Warning: local vault was erased; Dropbox remote was not. Wipe the linked folder if you need a clean peer."
+      : "Warning: qa:reset reseeds local files only. Use qa:restart to erase auth/state. Wipe Dropbox after dirty scenarios.",
   );
 }
 

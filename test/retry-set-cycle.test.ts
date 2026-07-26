@@ -7,8 +7,17 @@ import {
 import { SyncEngine } from "@/sync/engine";
 import { executePlan } from "@/sync/executor";
 import { FailingRemoteStorage } from "./support/failing-remote";
-import { parseRetrySet, RETRY_SET_META_KEY } from "@/sync/retry-set";
+import {
+  mergeRetryItemsIntoPlan,
+  parseRetrySet,
+  serializeRetrySet,
+  RETRY_SET_META_KEY,
+  type RetrySetEntry,
+} from "@/sync/retry-set";
+import { isPathInSections } from "@/sync/sync-scope";
 import { emptySyncPlanStats } from "@/types";
+
+const CONFIG_DIR = ".obsidian";
 
 describe("retry set after cursor checkpoint (G27)", () => {
   let fs: MemoryFileSystem;
@@ -57,5 +66,35 @@ describe("retry set after cursor checkpoint (G27)", () => {
     const retryResult = await executePlan(retryPlan, { fs, remote: failingRemote, store });
     expect(retryResult.failed).toHaveLength(0);
     expect(fs.has("b.md")).toBe(true);
+  });
+
+  test("notes retries are not merged into a settings-only cycle", async () => {
+    // Durable global retry set still holds note failures after a notes section cycle.
+    const notesRetry: RetrySetEntry[] = [
+      {
+        pathLower: "note.md",
+        localPath: "note.md",
+        action: { type: "upload", reason: "new_local" },
+        addedAt: Date.now(),
+      },
+    ];
+    await store.setMeta(RETRY_SET_META_KEY, serializeRetrySet(notesRetry));
+    await fs.write("note.md", new TextEncoder().encode("local"));
+
+    // Same gate the engine uses before mergeRetryItemsIntoPlan.
+    const settingsScoped = notesRetry.filter((entry) =>
+      isPathInSections(entry.localPath, ["settings"], CONFIG_DIR, []),
+    );
+    expect(mergeRetryItemsIntoPlan([], settingsScoped)).toHaveLength(0);
+
+    engine.setSyncSections(["settings"], CONFIG_DIR);
+    const settingsCycle = await engine.runCycle();
+    // Settings section must not re-execute the notes upload from the global retry set.
+    expect(
+      settingsCycle.plan.items.some((item) => item.pathLower === "note.md"),
+    ).toBe(false);
+    // Notes failure remains durable for a later notes cycle.
+    const stillQueued = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
+    expect(stillQueued.some((entry) => entry.pathLower === "note.md")).toBe(true);
   });
 });

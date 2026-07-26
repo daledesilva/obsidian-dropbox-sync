@@ -8,8 +8,11 @@ Executor concurrency can issue many Dropbox RPCs and content uploads in parallel
 
 - Every `DropboxAdapter` HTTP call goes through **`withRetry`** (RPC and content endpoints).
 - A **shared cooldown gate** on the adapter instance (`rateLimitedUntilMs`) pauses *all* concurrent callers after any 429 — not only the worker that received it.
-- Wait duration prefers the **`Retry-After` response header**, then the JSON body `retry_after`, then **1 second**. `too_many_write_operations` often sends `Retry-After: 0`; that value is honored (plus small jitter).
+- Wait duration prefers the **`Retry-After` response header**, then the JSON body `retry_after`, then **1 second**.
+- **`too_many_write_operations` + `Retry-After: 0` uses an exponential floor** (1s / 2s / 4s … capped at 8s, plus jitter). Honoring a literal 0 with only ≤250ms jitter stampeded all workers and burned `maxRetries` in about a second.
 - Uniform jitter (0–250ms) desynchronizes wake-ups so workers do not retry in lockstep.
+- **Remote folder creates run serially** (executor folder pass concurrency `1`) before the parallel upload/download batch. Parallel `create_folder_v2` under the same parent is a common write-lock storm on first sync.
+- **`create_folder` is idempotent:** `path/conflict` / `already_exists`, and rate-limit failures where `get_metadata` still shows a folder, count as success (uploads often materialize the parent first).
 - After the attempt budget is exhausted, both RPC and content paths throw **`DropboxRateLimitError`** with a classified `reason` for logging/UI.
 
 ## Flows
@@ -51,4 +54,5 @@ Max retries remain **4** (5 attempts total). Network failures still use the long
 - **Shared gate is required at concurrency > 1.** Per-call backoff alone lets sibling workers keep hitting 429 while one sleeps.
 - **Do not special-case content uploads to skip `DropboxRateLimitError`.** Exhausted 429s must throw the same typed error on content endpoints so the executor can surface a consistent failure.
 - **Jitter must be stubbed in tests.** Random waits make duration assertions flaky; production keeps jitter for desync.
-- **`Retry-After: 0` is intentional.** Write-ops rate limits often return zero; still extend the gate (at least by jitter) so workers serialize slightly rather than immediate full stampede.
+- **`Retry-After: 0` needs a floor on write locks.** Dropbox often returns zero for `too_many_write_operations`; treating that as “retry immediately” with only jitter recreates the stampede. Keep the shared gate, and apply the exponential floor for write endpoints when `retryAfterSec === 0`.
+- **Do not run `create_folder` at full upload concurrency.** First-sync plans can schedule many sibling mkdirs; even concurrency 2 under `_seeds/` has produced 429 exhaustion in QA.

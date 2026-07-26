@@ -1,35 +1,63 @@
 # Sync QA Test Vault
 
-Regenerable Dropbox sync playground for **manual integration** checks on branch `release_0.2`. Automated correctness stays in `bun test` (planner, guards, `test/simulation/`). This vault is for real Dropbox + Obsidian + debug-ingest log capture.
+Regenerable Dropbox sync playground for **manual integration** checks on branch `release_0.2`. Automated correctness stays in `bun test` (planner, guards, `test/simulation/`). This vault is for real Dropbox + sandboxed Obsidian + debug-ingest log capture.
 
 There is **no** automated Obsidian↔Dropbox e2e. OAuth stays a one-time human step.
 
 ## Quick start
 
 ```bash
-# From repo root (release_0.2)
-bun run qa:generate    # write seeds + runbooks into ~/Documents/sync-tester
-bun run qa:deploy      # build plugin and copy into the vault
+# From repo root — build, generate into qa-test-vault/, open sandboxed Obsidian
+bun run qa:open
+# alias: bun run open-qa
 ```
 
-1. Open `~/Documents/sync-tester` as an Obsidian vault (Open folder as vault).
-2. Enable **Dropbox Sync** (and **Hot Reload** if installed). OAuth once if needed.
-3. Sync Now once so `_seeds/` baselines onto Dropbox.
-4. Open `_runbooks/INDEX.md` and pick a scenario.
+Uses [`obsidian-launcher`](https://www.npmjs.com/package/obsidian-launcher) (same pattern as `obsidian_ink` / `obsidian_project-browser`): isolated Obsidian config, installs `./dist` as the plugin, and `watch` mode adds Hot Reload when `dist/` changes.
 
-Override the target path with `SYNC_TESTER_VAULT=/path/to/vault bun run qa:generate`.
-
-## Reset
+Also prepares **Cursor Debug ingest**: writes the discovery offer, starts the LAN relay + offer sidecar, and seeds `qa-debug-bootstrap.json` so Debug logging + verbose decision logging are on and localhost auto-connect runs on open. Requires an active Cursor Debug session:
 
 ```bash
-bun run qa:reset       # same as qa:generate — reseeds local content, keeps plugin auth
+CURSOR_DEBUG_SESSION=<slug> \
+CURSOR_DEBUG_INGEST_PATH=/ingest/<uuid> \
+CURSOR_DEBUG_PORT=<port> \
+bun run qa:open
 ```
 
-**Local reset ≠ remote wipe.** Scenarios that delete, conflict, or change casing leave Dropbox dirty. Before reseeding those runbooks, clear the linked Dropbox folder in Dropbox web (or the desktop client) so ghost remotes do not fight the new seeds. The generator **never** deletes `.obsidian/plugins/dropbox-sync/data.json` or built plugin files.
+Use `QA_SKIP_INGEST=1` to open the vault without offer/relay. **No `--copy` by default** — Dropbox OAuth and plugin `data.json` must persist. Disposable copy: `QA_COPY=1 bun run qa:open`.
+
+Or step by step:
+
+```bash
+bun run qa:generate    # write seeds + runbooks into qa-test-vault/
+bun run build          # plugin → dist/
+npx obsidian-launcher watch --plugin ./dist qa-test-vault
+```
+
+1. Enable **Dropbox Sync** if needed. OAuth once.
+2. Sync Now once so `_seeds/` baselines onto Dropbox.
+3. Open `_runbooks/INDEX.md` and pick a scenario.
+
+### System Obsidian / external vault
+
+```bash
+SYNC_TESTER_VAULT=~/Documents/sync-tester bun run qa:generate
+bun run qa:deploy      # copy dist into that vault’s dropbox-sync plugin folder
+# then open that folder in your normal Obsidian
+```
+
+## Reset vs restart
+
+```bash
+bun run qa:reset       # reseed _seeds/_runbooks only — keeps auth + sync state
+bun run qa:restart     # ERASE local vault (incl. auth), recreate, open (like qa:open)
+bun run qa:wipe        # erase + regenerate only (no Obsidian launch)
+```
+
+**Local wipe ≠ remote wipe.** `qa:restart` / `qa:wipe` clear the local vault only. Clear the linked Dropbox folder in Dropbox web if you need a clean remote peer.
 
 ## Live protocol (you + agent)
 
-1. You: `bun run qa:generate` (and `qa:deploy` if the plugin changed).
+1. You: `bun run qa:open` (or `qa:generate` if Obsidian is already open on this vault).
 2. Agent: start debug ingest (`/debug-ingest`).
 3. You: Settings → Troubleshooting → enable **Debug logging** → confirm Connected → **Send test log**.
 4. You: follow one runbook; Sync Now / live sync as instructed.
@@ -39,14 +67,16 @@ bun run qa:reset       # same as qa:generate — reseeds local content, keeps pl
 ## Layout (generated)
 
 ```
-~/Documents/sync-tester/
-  README.md
-  _runbooks/          # human scripts (01–13 + INDEX)
-  _seeds/             # baseline notes, case, folders, binaries, bulk, exclude-bait
+qa-test-vault/          # also the vault root (default)
+  START_HERE.md         # vault landing note (tooling README.md stays tracked)
+  _runbooks/            # human scripts (01–13 + INDEX)
+  _seeds/               # baseline notes, case, folders, binaries, bulk, exclude-bait
   .obsidian/
     app.json
     community-plugins.json
-    plugins/dropbox-sync/   # from qa:deploy — not overwritten by generate
+    plugins/dropbox-sync/   # from obsidian-launcher --plugin ./dist
+  generate.mjs          # tracked
+  templates/            # tracked
 ```
 
 ## Source of truth for scenarios

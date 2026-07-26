@@ -1,5 +1,9 @@
 import { describe, test, expect } from "bun:test";
-import { isDropboxFileDownload, mapRequestUrlResponse } from "@/http-client.plugin";
+import {
+  isDropboxFileDownload,
+  mapRequestUrlResponse,
+  tryParseJsonText,
+} from "@/http-client.plugin";
 
 describe("isDropboxFileDownload", () => {
   test("matches Dropbox content download endpoint", () => {
@@ -15,6 +19,21 @@ describe("isDropboxFileDownload", () => {
     expect(
       isDropboxFileDownload("https://api.dropboxapi.com/2/files/list_folder"),
     ).toBe(false);
+  });
+});
+
+describe("tryParseJsonText", () => {
+  test("parses object/array JSON", () => {
+    expect(tryParseJsonText('{"a":1}')).toEqual({ a: 1 });
+    expect(tryParseJsonText("[1,2]")).toEqual([1, 2]);
+  });
+
+  test("returns undefined for Dropbox plain-text API errors", () => {
+    expect(
+      tryParseJsonText(
+        'Error in call to API function "files/upload": client_modified: ...',
+      ),
+    ).toBeUndefined();
   });
 });
 
@@ -45,7 +64,8 @@ describe("mapRequestUrlResponse", () => {
     expect(resp.arrayBuffer.byteLength).toBeGreaterThan(0);
   });
 
-  test("RPC: passes through resp.json", () => {
+  test("RPC: parses JSON from text without touching resp.json", () => {
+    let jsonAccessed = false;
     const resp = mapRequestUrlResponse(
       {
         url: "https://api.dropboxapi.com/2/files/list_folder",
@@ -53,13 +73,44 @@ describe("mapRequestUrlResponse", () => {
       },
       {
         status: 200,
-        text: "{}",
+        text: '{"entries":[],"cursor":"c","has_more":false}',
         headers: {},
         arrayBuffer: new ArrayBuffer(0),
-        json: { entries: [], cursor: "c", has_more: false },
+        get json() {
+          jsonAccessed = true;
+          return { entries: [], cursor: "c", has_more: false };
+        },
       },
     );
 
+    expect(jsonAccessed).toBe(false);
     expect(resp.json).toEqual({ entries: [], cursor: "c", has_more: false });
+  });
+
+  test("plain-text API error: leaves json undefined, keeps text", () => {
+    let jsonAccessed = false;
+    const text =
+      'Error in call to API function "files/upload": request body: client_modified: ...';
+    const resp = mapRequestUrlResponse(
+      {
+        url: "https://content.dropboxapi.com/2/files/upload",
+        method: "POST",
+      },
+      {
+        status: 400,
+        text,
+        headers: {},
+        arrayBuffer: new ArrayBuffer(0),
+        get json() {
+          jsonAccessed = true;
+          throw new SyntaxError('Unexpected token \'E\', "Error in c"... is not valid JSON');
+        },
+      },
+    );
+
+    expect(jsonAccessed).toBe(false);
+    expect(resp.json).toBeUndefined();
+    expect(resp.text).toBe(text);
+    expect(resp.status).toBe(400);
   });
 });

@@ -4,8 +4,8 @@ import { summarizeActions } from "@/sync/sync-reporter";
 const make = (type: string) => ({ action: { type } });
 
 describe("summarizeActions", () => {
-  test("빈 배열 → '0 synced'", () => {
-    expect(summarizeActions([])).toBe("0 synced");
+  test("빈 배열 → 'up to date'", () => {
+    expect(summarizeActions([])).toBe("up to date");
   });
 
   test("upload만 → ↑N", () => {
@@ -35,7 +35,10 @@ describe("summarizeActions", () => {
     );
   });
 
-  test("noop만 → 'N synced'", () => {
-    expect(summarizeActions([make("noop"), make("noop")])).toBe("2 synced");
+  test("noop만 → 'up to date' (no transfer chips)", () => {
+    expect(summarizeActions([make("noop"), make("noop")])).toBe("up to date");
+  })
+  test("recordBase만 → 'up to date'", () => {
+    expect(summarizeActions([make("recordBase"), make("recordBase")])).toBe("up to date");
   });
 });

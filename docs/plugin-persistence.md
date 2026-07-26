@@ -10,7 +10,7 @@ The plugin keeps several kinds of data in different places on purpose: preferenc
 |---|---|---|
 | Preferences, `vaultInstanceId`, conflict UX, sync scope toggles | `.obsidian/plugins/dropbox-sync/data.json` via `loadData` / `saveData` | Yes, if that plugin folder is in sync scope |
 | `deviceId`, Dropbox OAuth tokens, custom app key, Cursor Debug host / port / session / path / server name / offer token, `verboseDecisionLogging` | `App.loadLocalStorage` / `App.saveLocalStorage` key `dropbox-sync-device-settings_v1` | No — vault-namespaced on this Obsidian profile |
-| Sync base (incl. `basePathDisplay`), Dropbox cursor, delete log, retry set, permanent skip set, scope fingerprint | IndexedDB `dropbox-sync-<vaultInstanceId>` (desktop/Android); vault `.sync-state/` on iOS | No (device-local). `.sync-state/` is exclude-listed |
+| Sync base (incl. `basePathDisplay`), Dropbox cursor, delete log, retry set, permanent skip set, resurrection deferred set, scope fingerprint | IndexedDB `dropbox-sync-<vaultInstanceId>` (desktop/Android); vault `.sync-state/` on iOS | No (device-local). `.sync-state/` is exclude-listed |
 | User-facing debug log | Vault root `sync-debug-<deviceId>.log` | Can sync like any vault file (intentional — users open/share it) |
 
 `vaultInstanceId` is a UUID minted once and stored in `data.json`. It names the IndexedDB database. It is **not** the Dropbox remote folder name (`syncName`) and **not** the short `deviceId` used in conflict copy names and log filenames.

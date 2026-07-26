@@ -277,9 +277,34 @@ export async function executePlan(
     }
   }
 
-  // Pass 1: parallel batch for non-deleteRemote work. Timeouts free slots so other files keep moving.
+  // Folder creates first at low concurrency — Dropbox write-locks the namespace; blasting
+  // create_folder_v2 at full pool concurrency (8) with Retry-After:0 stampedes into 429s.
+  const createRemoteFolders = nonDeleteRemoteExecutable.filter(
+    (item) => item.action.type === "createRemoteFolder",
+  );
+  const nonFolderExecutable = nonDeleteRemoteExecutable.filter(
+    (item) => item.action.type !== "createRemoteFolder",
+  );
+  // Serial mkdir — even 2 parallel create_folder_v2 calls still 429 under write locks.
+  const folderConcurrency = 1;
+
+  const folderPass = await runExecutableBatch(
+    createRemoteFolders,
+    ctx,
+    folderConcurrency,
+    itemTimeoutMs,
+    {
+      onSettled: (kind) => {
+        if (kind !== "timeout") bumpProgress();
+      },
+    },
+  );
+  succeeded.push(...folderPass.succeeded);
+  failed.push(...folderPass.failed);
+
+  // Pass 1: parallel batch for remaining non-deleteRemote work.
   const pass1 = await runExecutableBatch(
-    nonDeleteRemoteExecutable,
+    nonFolderExecutable,
     ctx,
     concurrency,
     itemTimeoutMs,
@@ -292,19 +317,13 @@ export async function executePlan(
   );
   succeeded.push(...pass1.succeeded);
   failed.push(...pass1.failed);
-  if (pass1.timedOut.length > 0) {
-    // #region agent log
-    ctx.log?.("executor pass1 timeouts", {
-      count: pass1.timedOut.length,
-      sample: pass1.timedOut.slice(0, 8).map((i) => `${i.action.type}:${i.localPath}`),
-      itemTimeoutMs,
-    }, { hypothesisId: SyncHypotheses.itemStall, location: "executor.executePlan" });
-    // #endregion
+  const timedOutForRetry = [...folderPass.timedOut, ...pass1.timedOut];
+  if (timedOutForRetry.length > 0) {
   }
 
   // Pass 2: push timed-out items to the back and retry once after faster work finishes.
-  if (pass1.timedOut.length > 0 && !ctx.signal?.aborted) {
-    const pass2 = await runExecutableBatch(pass1.timedOut, ctx, concurrency, itemTimeoutMs, {
+  if (timedOutForRetry.length > 0 && !ctx.signal?.aborted) {
+    const pass2 = await runExecutableBatch(timedOutForRetry, ctx, concurrency, itemTimeoutMs, {
       onSettled: () => bumpProgress(),
     });
     succeeded.push(...pass2.succeeded);
@@ -314,17 +333,10 @@ export async function executePlan(
         item,
         error: new ItemTimeoutError(`Timed out after ${itemTimeoutMs}ms (retry)`),
       });
-      // #region agent log
-      ctx.log?.("executor item timed out after retry", {
-        action: item.action.type,
-        path: item.localPath,
-        itemTimeoutMs,
-      }, { hypothesisId: SyncHypotheses.itemStall, location: "executor.executePlan" });
-      // #endregion
       bumpProgress();
     }
-  } else if (pass1.timedOut.length > 0) {
-    for (const item of pass1.timedOut) {
+  } else if (timedOutForRetry.length > 0) {
+    for (const item of timedOutForRetry) {
       failed.push({
         item,
         error: new ItemTimeoutError(`Timed out after ${itemTimeoutMs}ms`),
@@ -1098,14 +1110,6 @@ async function executeItem(
           nestedOtherFiles: hasNestedOtherFilesPath(localPath),
           error: err instanceof Error ? err.message : String(err),
         }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemote" });
-        // #region agent log
-        if (hasNestedOtherFilesPath(localPath)) {
-          deps.log?.("H-path: nested Other/Files path already absent on remote", {
-            path: localPath,
-            pathLower,
-          }, { hypothesisId: SyncHypotheses.pathShape, location: "executor.deleteRemote" });
-        }
-        // #endregion
       }
       await store.deleteEntry(pathLower);
       logOutcome(deps, "deleteRemote", { path: localPath, baseRemoved: true });
@@ -1236,6 +1240,11 @@ async function executeItem(
     }
 
     case "createLocalFolder": {
+      // Sync-root row ("", "/") is the vault itself — mkdir would be meaningless / harmful.
+      if (localPath.trim() === "" || localPath.trim() === "/") {
+        logTemp(deps.log, "P5", "createLocalFolder skipped — sync root", { path: localPath }, { location: "executor.createLocalFolder" });
+        break;
+      }
       logIntent(deps, "createLocalFolder", { path: localPath });
       await fs.createFolder(localPath);
       await updateFolderSyncState(store, pathLower, localPath);
@@ -1245,6 +1254,11 @@ async function executeItem(
     }
 
     case "createRemoteFolder": {
+      // Dropbox create_folder("/") under a sync prefix becomes "//" and is rejected.
+      if (localPath.trim() === "" || localPath.trim() === "/") {
+        logTemp(deps.log, "P5", "createRemoteFolder skipped — sync root", { path: localPath }, { location: "executor.createRemoteFolder" });
+        break;
+      }
       logIntent(deps, "createRemoteFolder", { path: localPath });
       const created = await remote.createFolder(localPath);
       await updateFolderSyncState(store, pathLower, localPath, created.pathDisplay);

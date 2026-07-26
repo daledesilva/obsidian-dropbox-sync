@@ -13,6 +13,7 @@ import { StatusBar } from "./ui/status-bar";
 import { ConflictModal } from "./ui/conflict-modal";
 import { ConflictCompareModal } from "./ui/conflict-compare-modal";
 import { ConfirmModal } from "./ui/confirm-modal";
+import { ResurrectionAskModal } from "./ui/resurrection-ask-modal";
 import { SyncCancelConfirmModal } from "./ui/sync-cancel-confirm-modal";
 import { DeleteConfirmModal } from "./ui/delete-confirm-modal";
 import { IncompatiblePathsModal } from "./ui/incompatible-paths-modal";
@@ -37,6 +38,7 @@ import { emptySyncPlanStats } from "./types";
 import { checkDeleteGuard } from "./sync/guards";
 import {
   groupSucceededPathsByAction,
+  isLiveProgressActionType,
   mergeActionSummaryParts,
   mergeActionSummaryPaths,
   summarizeActionParts,
@@ -73,6 +75,7 @@ import {
   stripSyncedCredentialFields,
 } from "./device-settings/device-settings";
 import { tryAutoConnect } from "./debug/cursor-debug-discover";
+import { applyQaDebugBootstrap } from "./debug/qa-debug-bootstrap";
 import { isConflictFile, type SyncEngine } from "./sync/engine";
 import { DeferralTracker } from "./sync/deferral-tracker";
 import type { PermanentSkipEntry } from "./sync/permanent-skip";
@@ -266,63 +269,36 @@ export default class DropboxSyncPlugin extends Plugin {
       () => `sync-debug-${getDeviceId()}.log`,
     );
 
+    // qa:open writes qa-debug-bootstrap.json so Debug + verbose decision logging
+    // are on before the first sync — then localhost auto-connect can find the offer.
+    const qaBootstrap = await applyQaDebugBootstrap(
+      this.app,
+      this.settings,
+      () => this.saveSettings(),
+    );
+    if (qaBootstrap.applied) {
+      void this.log("qa debug bootstrap applied", {
+        debugLoggingEnabled: qaBootstrap.debugLoggingEnabled,
+        verboseDecisionLogging: qaBootstrap.verboseDecisionLogging,
+        autoConnect: qaBootstrap.autoConnect,
+      });
+    }
+
     // Same-computer auto-join when Debug logging is already on at launch.
     // Localhost only — mobile still uses Connect (or a prior cache).
-    if (this.settings.debugLoggingEnabled) {
-      // #region agent log
-      {
-        const sessionId = getCursorDebugSessionId().trim();
-        const headers: Record<string, string> = {
-          "Content-Type": "application/json",
-        };
-        if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
-        fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-          method: "POST",
-          headers,
-          body: JSON.stringify({
-            ...(sessionId ? { sessionId } : {}),
-            hypothesisId: "H-onload",
-            location: "main.ts:onload",
-            message: "scheduling tryAutoConnect on load",
-            data: { debugLoggingEnabled: true },
-            timestamp: Date.now(),
-          }),
-        }).catch(() => {});
-      }
-      // #endregion
+    if (this.settings.debugLoggingEnabled && qaBootstrap.autoConnect !== false) {
       void tryAutoConnect().then((result) => {
-        // #region agent log
-        {
-          const sessionId =
-            (result.ok ? result.offer.sessionId : "")
-            || getCursorDebugSessionId().trim();
-          const headers: Record<string, string> = {
-            "Content-Type": "application/json",
-          };
-          if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
-          fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-            method: "POST",
-            headers,
-            body: JSON.stringify({
-              ...(sessionId ? { sessionId } : {}),
-              hypothesisId: "H-onload",
-              location: "main.ts:onload",
-              message: "tryAutoConnect settled after load",
-              data: {
-                ok: result.ok,
-                via: result.ok ? result.via : undefined,
-                reason: result.ok ? undefined : result.reason,
-              },
-              timestamp: Date.now(),
-            }),
-          }).catch(() => {});
-        }
-        // #endregion
         if (result.ok) {
           void this.log("cursor debug ingest auto-connected", {
             via: result.via,
             serverName: result.offer.serverName,
             host: result.offer.host,
+            port: result.offer.port,
+            sessionId: result.offer.sessionId,
+          });
+        } else {
+          void this.log("cursor debug ingest auto-connect skipped", {
+            reason: result.reason,
           });
         }
       });
@@ -715,57 +691,23 @@ export default class DropboxSyncPlugin extends Plugin {
       // Manual progress footer must mount before prune/scan work — a large delete
       // log (thousands of paths) made prune take so long the ribbon spun with no panel.
       if (manual && manualSections && manualSections.length > 0) {
-        // #region agent log
-        void this.log("manual sync sections ready", {
-          sections: manualSections,
-          count: manualSections.length,
-        }, { hypothesisId: SyncHypotheses.sync, location: "main.syncNow" });
-        // #endregion
         this.sectionProgress?.destroy();
         this.sectionProgress = new SyncSectionProgress(this.app, () => {
           this.cancelCurrentSync();
         });
         this.sectionProgress.show(manualSections);
         this.sectionProgress.markScanning(manualSections[0]);
-        // #region agent log
-        void this.log("syncNow: sectionProgress.show done (pre-prune)", {
-          explorerVisible: isFileExplorerVisible(this.app),
-          sections: manualSections,
-        }, { hypothesisId: "H-panel", location: "main.syncNow" });
-        // #endregion
       }
 
-      // #region agent log
-      void this.log("syncNow: before getOrCreateEngine", {
-        manual,
-      }, { hypothesisId: "H-panel", location: "main.syncNow" });
-      // #endregion
       const engine = this.getOrCreateEngine();
-      // #region agent log
-      void this.log("syncNow: after getOrCreateEngine", {
-        deleteLogSize: engine.getDeleteLog().length,
-      }, { hypothesisId: "H-panel", location: "main.syncNow" });
-      // #endregion
       // Refresh callbacks/settings each cycle so log + delete guard stay current.
       engine.applyOptions(this.createEngineOptions());
       engine.setLiveReport(liveReport);
       // Fresh coalesce snapshot per sync — sections union into it, never inherit a prior run.
       engine.resetCoalesceRemoteSnapshot();
       const configDir = this.app.vault.configDir;
-      // #region agent log
-      void this.log("syncNow: before pruneStaleDeleteLog", {
-        deleteLogSize: engine.getDeleteLog().length,
-      }, { hypothesisId: "H-panel", location: "main.syncNow" });
-      // #endregion
       const pruneStartedAt = Date.now();
       const prunedDeletes = await this.pruneStaleDeleteLog(engine);
-      // #region agent log
-      void this.log("syncNow: after pruneStaleDeleteLog", {
-        pruned: prunedDeletes,
-        elapsedMs: Date.now() - pruneStartedAt,
-        deleteLogSize: engine.getDeleteLog().length,
-      }, { hypothesisId: "H-panel", location: "main.syncNow" });
-      // #endregion
       void this.log("delete-log before cycle", {
         pending: engine.getDeleteLog().length,
         pruned: prunedDeletes,
@@ -869,6 +811,7 @@ export default class DropboxSyncPlugin extends Plugin {
             cycleResult.deletesSkipped,
             cycleResult.pathsSkipped,
             cycleResult.permanentSkips,
+            cycleResult.resurrectionDeferred,
           );
           sectionProgress.markResult(
             section,
@@ -1065,6 +1008,7 @@ export default class DropboxSyncPlugin extends Plugin {
             deletesSkipped,
             pathsSkipped,
             cycleResult.permanentSkips,
+            cycleResult.resurrectionDeferred,
           );
           this.sectionProgress.markResult(
             this.progressSection,
@@ -1450,12 +1394,6 @@ export default class DropboxSyncPlugin extends Plugin {
       // re-ran reliably (e.g. background sync off), so both choices looked like Skip.
       onDeleteGuardTriggered: async (guard: DeleteGuardResult): Promise<boolean> => {
         if (this.deleteConfirmModal) {
-          // #region agent log
-          void this.log("delete guard: modal already open — treating as skip", {
-            deleteCount: guard.deleteItems.length,
-            sample: samplePaths(guard.deleteItems.map((i) => i.localPath)),
-          }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.onDeleteGuardTriggered" });
-          // #endregion
           return false;
         }
         const modal = new DeleteConfirmModal(this.app, guard.deleteItems);
@@ -1463,15 +1401,6 @@ export default class DropboxSyncPlugin extends Plugin {
         try {
           const remote = guard.deleteItems.filter((i) => i.action.type === "deleteRemote").length;
           const local = guard.deleteItems.filter((i) => i.action.type === "deleteLocal").length;
-          // #region agent log
-          void this.log("delete guard: showing confirm modal", {
-            total: guard.deleteItems.length,
-            remote,
-            local,
-            threshold: this.settings.deleteThreshold,
-            sample: samplePaths(guard.deleteItems.map((i) => `${i.action.type}:${i.localPath}`)),
-          }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.onDeleteGuardTriggered" });
-          // #endregion
           const approved = await modal.waitForConfirmation();
           void this.log(
             approved
@@ -1496,17 +1425,8 @@ export default class DropboxSyncPlugin extends Plugin {
       confirmDeleteLocalWhileOpen: (path: string) => this.confirmDeleteLocalWhileOpen(path),
       reloadOpenFile: (path: string) => reloadOpenMarkdownFile(this.app, path),
       deferralTracker: this.deferralTracker ?? undefined,
-      resurrectionResolver: async (localPath: string) => {
-        const upload = await new ConfirmModal(
-          this.app,
-          "Upload local file?",
-          `"${localPath}" exists locally but not on Dropbox, and there is no deletion history for this path.`,
-          "Upload will add the file to Dropbox. Discard removes the local copy without uploading.",
-          "Upload",
-          "Discard local copy",
-        ).waitForConfirmation();
-        return upload ? "upload" : "discard";
-      },
+      resurrectionResolver: (localPaths: string[]) =>
+        new ResurrectionAskModal(this.app, localPaths).waitForChoice(),
       persistentScopeFingerprint: computePersistentScopeFingerprint({
         backgroundSections: getEnabledBackgroundSections(this.settings),
         excludePatterns: this.settings.excludePatterns,
@@ -1514,9 +1434,9 @@ export default class DropboxSyncPlugin extends Plugin {
       }),
       excludePatterns: this.settings.excludePatterns,
       includeHiddenFilesAndFolders: this.settings.includeHiddenFilesAndFolders,
-      // Higher parallelism for many-small-file sync (e.g. plugins); Dropbox write-lock
-      // contention may appear as 429s — back off or add finish_batch if that shows up.
-      concurrency: 8,
+      // Parallel uploads for many-small-file sync; create_folder runs first at ≤2
+      // (see executor) because Dropbox write-locks stampede at full concurrency.
+      concurrency: 6,
       onConflictCount: (count: number) => {
         this.conflictTotal = count;
         this.conflictIndex = 0;
@@ -1564,6 +1484,17 @@ export default class DropboxSyncPlugin extends Plugin {
             localPath,
             "This file is currently syncing with Dropbox",
           );
+          // Live chip modal log: first start = attempt, later starts = retrying.
+          if (
+            this.progressSection
+            && isLiveProgressActionType(actionType)
+          ) {
+            this.sectionProgress?.recordLiveActionStart(
+              this.progressSection,
+              actionType,
+              localPath,
+            );
+          }
           return;
         }
         // Grow live upload/download chips + open path modal as items succeed.
@@ -1574,12 +1505,24 @@ export default class DropboxSyncPlugin extends Plugin {
             localPath,
           );
         }
-        // Terminal outcomes are applied from SyncResult; only surface live errors early.
+        // Terminal outcomes are applied from SyncResult; surface live errors early
+        // and append failed lines so chips open a useful log before any success.
         if (event === "end" && ok === false) {
           this.fileSyncStatus.markError(
             localPath,
             error ? `Sync failed: ${error}` : "Sync failed for this file",
           );
+          if (
+            this.progressSection
+            && isLiveProgressActionType(actionType)
+          ) {
+            this.sectionProgress?.recordLiveActionFailure(
+              this.progressSection,
+              actionType,
+              localPath,
+              error,
+            );
+          }
         }
       },
       onScanProgress: (completed: number, total: number) => {

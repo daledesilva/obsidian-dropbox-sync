@@ -29,7 +29,11 @@ export function splitUploadChunks(
   return chunks;
 }
 
-/** ISO8601 UTC string for Dropbox client_modified (G11). */
+/**
+ * ISO8601 UTC string for Dropbox client_modified (G11).
+ * Dropbox Stone requires second precision (`%Y-%m-%dT%H:%M:%SZ`); milliseconds
+ * are rejected as plain-text "Error in call to API..." (not JSON).
+ */
 export function formatClientModifiedIso(mtimeMs: number): string {
-  return new Date(mtimeMs).toISOString();
+  return new Date(mtimeMs).toISOString().replace(/\.\d{3}Z$/, "Z");
 }

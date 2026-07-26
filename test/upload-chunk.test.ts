@@ -22,8 +22,9 @@ describe("upload chunk helpers (G16)", () => {
     expect(chunks[2]!.length).toBe(100);
   });
 
-  test("formatClientModifiedIso emits UTC ISO8601", () => {
-    const iso = formatClientModifiedIso(Date.UTC(2026, 6, 26, 8, 30, 0));
-    expect(iso).toBe("2026-07-26T08:30:00.000Z");
+  test("formatClientModifiedIso emits second-precision UTC ISO8601", () => {
+    // Dropbox rejects millisecond timestamps on client_modified.
+    const iso = formatClientModifiedIso(Date.UTC(2026, 6, 26, 8, 30, 0, 123));
+    expect(iso).toBe("2026-07-26T08:30:00Z");
   });
 });

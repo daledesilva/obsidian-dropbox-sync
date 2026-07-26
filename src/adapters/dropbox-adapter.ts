@@ -44,7 +44,8 @@ export type DropboxRateLimitReason =
 
 /**
  * Prefer HTTP Retry-After (Dropbox always sends it), then JSON body retry_after,
- * then 1s. too_many_write_operations often has Retry-After: 0 — keep that.
+ * then 1s. Callers may still apply an exponential floor when write-lock 429s
+ * return Retry-After: 0 (literal zero would stampede if only jitter is added).
  */
 function resolveRetryAfterSeconds(resp: {
   headers?: Record<string, string>;
@@ -109,6 +110,27 @@ function headerSafeJson(obj: object): string {
   );
 }
 
+/** Short path for logs — `/2/files/upload` from a full Dropbox URL. */
+function shortDropboxEndpoint(url: string): string {
+  const idx = url.indexOf("/2/");
+  return idx >= 0 ? url.slice(idx) : url;
+}
+
+/**
+ * Mutations that contend on Dropbox namespace write locks
+ * (`too_many_write_operations` is write-lock pressure, not generic QPS).
+ */
+function isDropboxWriteEndpoint(url: string): boolean {
+  return (
+    url.includes("/files/upload")
+    || url.includes("/files/upload_session/")
+    || url.includes("/files/create_folder")
+    || url.includes("/files/delete")
+    || url.includes("/files/move")
+    || url.includes("/files/copy")
+  );
+}
+
 export interface DropboxAdapterConfig {
   httpClient: HttpClient;
   appKey: string;
@@ -132,6 +154,14 @@ export class DropboxAdapter implements RemoteStorage {
    * One 429 extends the gate so other workers pause instead of stampeding.
    */
   private rateLimitedUntilMs = 0;
+  /** In-flight HTTP calls through withRetry (uploads + RPC, including retries). */
+  private inFlightHttp = 0;
+  private peakInFlightHttp = 0;
+  /** Subset of in-flight calls that mutate Dropbox (write-lock pressure). */
+  private inFlightWrites = 0;
+  private peakInFlightWrites = 0;
+  private inFlightCreateFolder = 0;
+  private rateLimit429Count = 0;
 
   constructor(private config: DropboxAdapterConfig) {}
 
@@ -271,38 +301,47 @@ export class DropboxAdapter implements RemoteStorage {
     clientModified?: number,
     rev?: string,
   ): Promise<RemoteEntry> {
+    const clientModifiedIso =
+      clientModified !== undefined
+        ? formatClientModifiedIso(clientModified)
+        : undefined;
     const apiArg = headerSafeJson({
       path: this.toRemotePath(path),
       mode,
       autorename: false,
       mute: false,
       strict_conflict: true,
-      ...(clientModified !== undefined
-        ? { client_modified: formatClientModifiedIso(clientModified) }
+      ...(clientModifiedIso !== undefined
+        ? { client_modified: clientModifiedIso }
         : {}),
     });
 
-    const resp = await this.withRetry({
-      url: `${CONTENT_BASE}/files/upload`,
-      method: "POST",
-      headers: {
-        "Dropbox-API-Arg": apiArg,
-        "Content-Type": "application/octet-stream",
-      },
-      body: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer,
-      on409: (errBody) => {
-        const summary = errBody.error_summary ?? "";
-        if (summary.includes("conflict") || summary.includes("path/conflict")) {
-          throw new RevConflictError(
-            `Rev conflict on upload: ${path}`,
-            rev ?? "",
-          );
-        }
-      },
-    });
+    try {
+      const resp = await this.withRetry({
+        url: `${CONTENT_BASE}/files/upload`,
+        method: "POST",
+        headers: {
+          "Dropbox-API-Arg": apiArg,
+          "Content-Type": "application/octet-stream",
+        },
+        body: data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer,
+        on409: (errBody) => {
+          const summary = errBody.error_summary ?? "";
+          if (summary.includes("conflict") || summary.includes("path/conflict")) {
+            throw new RevConflictError(
+              `Rev conflict on upload: ${path}`,
+              rev ?? "",
+            );
+          }
+        },
+      });
 
-    const metadata = resp.json as DropboxFileMetadata;
-    return this.fileMetadataToEntry(metadata);
+
+      const metadata = resp.json as DropboxFileMetadata;
+      return this.fileMetadataToEntry(metadata);
+    } catch (e) {
+      throw e;
+    }
   }
 
   /**
@@ -601,14 +640,64 @@ export class DropboxAdapter implements RemoteStorage {
 
   async createFolder(path: string): Promise<RemoteEntry> {
     this.log("dropbox create_folder", { path }, "dropbox-adapter.createFolder");
-    const result = await this.rpcCall<{ metadata: DropboxFolderMetadata }>(
-      "/files/create_folder_v2",
-      {
-        path: this.toRemotePath(path),
-        autorename: false,
-      },
-    );
-    return this.toRemoteEntry(result.metadata);
+    try {
+      const result = await this.rpcCall<{ metadata: DropboxFolderMetadata }>(
+        "/files/create_folder_v2",
+        {
+          path: this.toRemotePath(path),
+          autorename: false,
+        },
+      );
+      return this.toRemoteEntry(result.metadata);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : String(e);
+      // Concurrent uploads / sibling creates often materialize the folder first.
+      // Rate-limit exhaustion can also leave create_folder failing after uploads
+      // already created the path — probe metadata before surfacing a false failure.
+      const looksLikeExists =
+        message.includes("path/conflict")
+        || message.includes("already_exists")
+        || message.includes("conflict");
+      const isRateLimited =
+        e instanceof DropboxRateLimitError
+        || message.includes("Rate limited")
+        || message.includes("too_many_write_operations");
+      if (!looksLikeExists && !isRateLimited) {
+        throw e;
+      }
+
+      try {
+        const meta = await this.rpcCall<DropboxMetadata>("/files/get_metadata", {
+          path: this.toRemotePath(path),
+          include_deleted: false,
+        });
+        if (meta[".tag"] === "folder") {
+          this.log("dropbox create_folder already present — treating as success", {
+            path,
+            reason: looksLikeExists ? "conflict" : "rate_limit_exists",
+          }, "dropbox-adapter.createFolder");
+          return this.toRemoteEntry(meta);
+        }
+      } catch {
+        if (looksLikeExists) {
+          // Metadata race on conflict — still report a folder entry so sync can advance.
+          this.log("dropbox create_folder conflict without metadata — synthetic ok", {
+            path,
+          }, "dropbox-adapter.createFolder");
+          return {
+            pathLower: path.replace(/\\/g, "/").toLowerCase(),
+            pathDisplay: path,
+            hash: null,
+            rev: "",
+            serverModified: Date.now(),
+            size: 0,
+            deleted: false,
+            isFolder: true,
+          };
+        }
+      }
+      throw e;
+    }
   }
 
   private async moveOnce(from: string, to: string): Promise<RemoteEntry> {
@@ -623,18 +712,37 @@ export class DropboxAdapter implements RemoteStorage {
     return this.toRemoteEntry(result.metadata);
   }
 
-  /** Stub — durable delete evidence (R6) will call Dropbox list_revisions later. */
+  /**
+   * Durable delete evidence for R6/R10. Paths that never existed return [] (not an
+   * error) so first-sync seeds do not spam 409s before the batch upload ask.
+   */
   async listRevisions(path: string): Promise<
     Array<{ rev: string; serverModified: number; deleted: boolean; hash: string | null }>
   > {
-    const result = await this.rpcCall<import("./dropbox-types").DropboxListRevisionsResult>(
-      "/files/list_revisions",
-      {
-        path: this.toRemotePath(path),
-        mode: { ".tag": "path" },
-        limit: 100,
-      },
-    );
+    let result: import("./dropbox-types").DropboxListRevisionsResult;
+    try {
+      result = await this.rpcCall<import("./dropbox-types").DropboxListRevisionsResult>(
+        "/files/list_revisions",
+        {
+          path: this.toRemotePath(path),
+          mode: { ".tag": "path" },
+          limit: 100,
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      // Never-existed paths are normal on first seed — treat as no revision history.
+      if (message.includes("not_found") || message.includes("path/not_found")) {
+        this.log("list_revisions", {
+          path,
+          entryCount: 0,
+          isDeleted: false,
+          neverExisted: true,
+        }, "dropbox-adapter.listRevisions");
+        return [];
+      }
+      throw err;
+    }
 
     const revisions: Array<{
       rev: string;
@@ -728,92 +836,140 @@ export class DropboxAdapter implements RemoteStorage {
   }): Promise<{ status: number; json: unknown; text: string; headers: Record<string, string>; arrayBuffer: ArrayBuffer }> {
     const maxRetries = 4;
     const signal = this.abortSignal;
-    for (let attempt = 0; attempt <= maxRetries; attempt++) {
-      throwIfAborted(signal);
-      // Shared pause: a sibling worker's 429 may have extended the gate.
-      await this.awaitRateLimitGate();
-      let resp;
-      try {
-        await this.ensureValidToken();
-        resp = await runAbortable(
-          this.config.httpClient({
-            url: opts.url,
-            method: opts.method,
-            headers: {
-              Authorization: `Bearer ${this.config.getAccessToken()}`,
-              ...opts.headers,
-            },
-            body: opts.body,
-          }),
-          signal,
-        );
-      } catch (e) {
-        throwIfAborted(signal);
-        // 네트워크 연결 실패 (iOS -1005 등) — 긴 딜레이로 연결 풀 리셋 유도
-        if (attempt < maxRetries) {
-          const backoffMs = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
-          await this.sleep(backoffMs);
-          continue;
-        }
-        throw e;
-      }
-
-      if (resp.status === 429) {
-        const retryAfterSec = resolveRetryAfterSeconds(resp);
-        const waitMs = retryAfterSec * 1000 + this.retryJitterMs();
-        this.extendRateLimitGate(waitMs);
-        if (attempt < maxRetries) {
-          await this.awaitRateLimitGate();
-          continue;
-        }
-        const errBody = resp.json as DropboxErrorResponse | undefined;
-        const reason = parseRateLimitReason(errBody, resp.text);
-        throw new DropboxRateLimitError(
-          `Rate limited (${reason}): ${opts.url}`,
-          retryAfterSec,
-          reason,
-        );
-      }
-
-      if (resp.status >= 500 && resp.status < 600) {
-        if (attempt < maxRetries) {
-          await this.sleep(1000 * Math.pow(2, attempt));
-          continue;
-        }
-        throw this.parseError(resp.status, resp.text);
-      }
-
-      // 409 커스텀 핸들링
-      if (resp.status === 409 && opts.on409) {
-        opts.on409(resp.json as DropboxErrorResponse);
-        // on409가 throw하지 않았으면 일반 에러로
-        throw this.parseError(resp.status, resp.text);
-      }
-
-      if (resp.status !== 200) {
-        throw this.parseError(resp.status, resp.text);
-      }
-
-      return resp;
+    const endpoint = shortDropboxEndpoint(opts.url);
+    const isWrite = isDropboxWriteEndpoint(opts.url);
+    const isCreateFolder = endpoint.includes("create_folder");
+    // Count the whole withRetry lifetime as one in-flight op (retries included).
+    this.inFlightHttp++;
+    this.peakInFlightHttp = Math.max(this.peakInFlightHttp, this.inFlightHttp);
+    if (isWrite) {
+      this.inFlightWrites++;
+      this.peakInFlightWrites = Math.max(this.peakInFlightWrites, this.inFlightWrites);
     }
+    if (isCreateFolder) this.inFlightCreateFolder++;
+    let local429s = 0;
+    try {
+      for (let attempt = 0; attempt <= maxRetries; attempt++) {
+        throwIfAborted(signal);
+        // Shared pause: a sibling worker's 429 may have extended the gate.
+        await this.awaitRateLimitGate();
+        let resp;
+        try {
+          await this.ensureValidToken();
+          resp = await runAbortable(
+            this.config.httpClient({
+              url: opts.url,
+              method: opts.method,
+              headers: {
+                Authorization: `Bearer ${this.config.getAccessToken()}`,
+                ...opts.headers,
+              },
+              body: opts.body,
+            }),
+            signal,
+          );
+        } catch (e) {
+          throwIfAborted(signal);
+          // Plain-text Dropbox validation errors used to surface as SyntaxError from
+          // Obsidian resp.json — never treat parse/API shape errors as network retries.
+          if (e instanceof SyntaxError) {
+            throw e;
+          }
+          // 네트워크 연결 실패 (iOS -1005 등) — 긴 딜레이로 연결 풀 리셋 유도
+          if (attempt < maxRetries) {
+            const backoffMs = 2000 * Math.pow(2, attempt); // 2s, 4s, 8s, 16s
+            await this.sleep(backoffMs);
+            continue;
+          }
+          throw e;
+        }
 
-    throw new Error("request failed after retries");
+        if (resp.status === 429) {
+          local429s++;
+          this.rateLimit429Count++;
+          const retryAfterSec = resolveRetryAfterSeconds(resp);
+          const jitterMs = this.retryJitterMs();
+          const reason = parseRateLimitReason(
+            resp.json as DropboxErrorResponse | undefined,
+            resp.text,
+          );
+          // Write-lock 429s often send Retry-After: 0; ≤250ms jitter stampedes all
+          // workers and burns maxRetries in ~1s. Floor to exponential backoff.
+          let waitMs = retryAfterSec * 1000 + jitterMs;
+          if (
+            isWrite
+            && reason === "too_many_write_operations"
+            && retryAfterSec === 0
+          ) {
+            waitMs = Math.min(8_000, 1_000 * Math.pow(2, attempt)) + jitterMs;
+          }
+          this.extendRateLimitGate(waitMs);
+          this.log("dropbox 429", {
+            endpoint,
+            reason,
+            attempt,
+            retryAfterSec,
+            waitMs,
+            inFlightWrites: this.inFlightWrites,
+            inFlightCreateFolder: this.inFlightCreateFolder,
+            peakInFlightWrites: this.peakInFlightWrites,
+          }, "dropbox-adapter.withRetry", "warn");
+          if (attempt < maxRetries) {
+            await this.awaitRateLimitGate();
+            continue;
+          }
+          throw new DropboxRateLimitError(
+            `Rate limited (${reason}): ${opts.url}`,
+            retryAfterSec,
+            reason,
+          );
+        }
+
+        if (resp.status >= 500 && resp.status < 600) {
+          if (attempt < maxRetries) {
+            await this.sleep(1000 * Math.pow(2, attempt));
+            continue;
+          }
+          throw this.parseError(resp.status, resp.text);
+        }
+
+        // 409 커스텀 핸들링
+        if (resp.status === 409 && opts.on409) {
+          opts.on409(resp.json as DropboxErrorResponse);
+          // on409가 throw하지 않았으면 일반 에러로
+          throw this.parseError(resp.status, resp.text);
+        }
+
+        if (resp.status !== 200) {
+          throw this.parseError(resp.status, resp.text);
+        }
+
+        return resp;
+      }
+
+      throw new Error("request failed after retries");
+    } finally {
+      this.inFlightHttp = Math.max(0, this.inFlightHttp - 1);
+      if (isWrite) this.inFlightWrites = Math.max(0, this.inFlightWrites - 1);
+      if (isCreateFolder) {
+        this.inFlightCreateFolder = Math.max(0, this.inFlightCreateFolder - 1);
+      }
+    }
   }
 
   private refreshPromise: Promise<void> | null = null;
 
   private async ensureValidToken(): Promise<void> {
     const expiry = this.config.getTokenExpiry();
-    if (Date.now() > expiry - 5 * 60 * 1000) {
-      if (!this.refreshPromise) {
-        this.refreshPromise = this.doRefreshToken();
-      }
-      try {
-        await this.refreshPromise;
-      } finally {
+    if (Date.now() <= expiry - 5 * 60 * 1000) return;
+    // Coalesce concurrent refreshers onto one promise; clear only when it settles
+    // so waiters never race a null slot into a second parallel refresh.
+    if (!this.refreshPromise) {
+      this.refreshPromise = this.doRefreshToken().finally(() => {
         this.refreshPromise = null;
-      }
+      });
     }
+    await this.refreshPromise;
   }
 
   private async doRefreshToken(): Promise<void> {

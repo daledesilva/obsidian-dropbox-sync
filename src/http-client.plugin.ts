@@ -8,7 +8,7 @@ import { requestUrl } from "obsidian";
 import { normalizeHeaders, type HttpRequest, type HttpResponse } from "./http-client";
 import type { HttpClient } from "./http-client";
 
-/** Dropbox content download — body is file bytes; never read Obsidian resp.json. */
+/** Dropbox content download — body is file bytes; never parse as JSON. */
 export function isDropboxFileDownload(url: string): boolean {
   return url.includes("/files/download");
 }
@@ -18,14 +18,40 @@ type RequestUrlResult = {
   text: string;
   headers: Record<string, string>;
   arrayBuffer: ArrayBuffer;
+  /** Obsidian may throw SyntaxError when this getter runs on plain-text bodies. */
   json: unknown;
 };
 
-/** Map requestUrl result to HttpResponse. Download skips resp.json entirely. */
+/**
+ * Parse response text as JSON only when it looks like an object/array.
+ * Dropbox Stone validation errors return plain text ("Error in call to API...")
+ * — never touch Obsidian's resp.json getter for those (it throws SyntaxError).
+ */
+export function tryParseJsonText(text: string): unknown | undefined {
+  const trimmed = text.trim();
+  if (!trimmed) return undefined;
+  const first = trimmed[0];
+  if (first !== "{" && first !== "[") return undefined;
+  try {
+    return JSON.parse(trimmed) as unknown;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Map requestUrl result to HttpResponse.
+ * Never reads Obsidian resp.json — parse from text so plain-text API errors
+ * surface as text/status instead of SyntaxError.
+ */
 export function mapRequestUrlResponse(req: HttpRequest, resp: RequestUrlResult): HttpResponse {
+  // Downloads are binary/file bodies — never JSON-parse.
+  const json = isDropboxFileDownload(req.url)
+    ? undefined
+    : tryParseJsonText(resp.text);
   return {
     status: resp.status,
-    json: isDropboxFileDownload(req.url) ? undefined : resp.json,
+    json,
     text: resp.text,
     headers: normalizeHeaders(resp.headers),
     arrayBuffer: resp.arrayBuffer,

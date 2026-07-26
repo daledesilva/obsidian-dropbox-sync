@@ -4,10 +4,14 @@ import { emptySyncPlanStats } from "../types";
 import { logRule, SyncRules, type SyncMonitorLog } from "../debug/sync-monitor";
 import { logTemp } from "../debug/temp-log";
 
-/** User choice when list_revisions finds no deletion evidence (G3 / R6). */
-export type ResurrectionChoice = "upload" | "discard";
+/**
+ * User choice when list_revisions finds no deletion evidence (G3 / R6).
+ * `defer` = skip this cycle (Cancel); never treat dialog dismiss as discard.
+ */
+export type ResurrectionChoice = "upload" | "discard" | "defer";
 
-export type ResurrectionResolver = (localPath: string) => Promise<ResurrectionChoice>;
+/** One decision for every ambiguous new_local path in the cycle (batch ask). */
+export type ResurrectionResolver = (localPaths: string[]) => Promise<ResurrectionChoice>;
 
 const MAX_REVISION_CHECKS_PER_CYCLE = 20;
 
@@ -19,29 +23,39 @@ function hasDeletionEvidence(
 
 /**
  * Gate new_local uploads through list_revisions (R6) and optional user confirm.
- * Deletion evidence → preserveAsConflictCopy (R10); no evidence → ask; never silent upload.
+ * Deletion evidence → preserveAsConflictCopy (R10); no evidence → ask once for the
+ * whole batch; never silent upload and never treat Cancel as discard.
  *
- * Only for devices without a Dropbox cursor (fresh join / cleared state). A device that
- * already syncs has already consumed delete tombstones; its new_local creates are
- * intentional recreates and must upload with `add` (rows 32/37), not R10.
+ * Fresh join (no cursor): all new_local without deletion evidence are asked.
+ * Linked device (has cursor): normal new_local uploads freely, BUT paths the user
+ * previously deferred ("skip for now") stay gated until Upload/Discard.
  */
+export interface ResurrectionGuardResult {
+  plan: SyncPlan;
+  /** new_local paths held this cycle because the user deferred/cancelled the R6 ask. */
+  deferredNewLocalCount: number;
+  /** path_lower values to remember as deferred until the user decides. */
+  deferPathsToRemember: string[];
+  /** path_lower values resolved this cycle (upload or discard) — drop from durable set. */
+  deferPathsToClear: string[];
+}
+
 export async function applyResurrectionGuard(
   plan: SyncPlan,
   remote: RemoteStorage,
   options: {
     resolver?: ResurrectionResolver;
     log?: SyncMonitorLog;
-    /** When true, skip R6/R10 — caller already has a sync cursor. */
+    /** When true, skip R6/R10 for ordinary new_local — except previously deferred paths. */
     hasSyncCursor?: boolean;
+    /** path_lower set from prior Cancel / skip-for-now choices. */
+    previouslyDeferredPathLowers?: ReadonlySet<string>;
   },
-): Promise<SyncPlan> {
+): Promise<ResurrectionGuardResult> {
+  const previouslyDeferred = options.previouslyDeferredPathLowers ?? new Set<string>();
+
   if (options.hasSyncCursor) {
-    logTemp(options.log, "P3", "resurrection guard skipped — device has sync cursor", {
-      newLocalCount: plan.items.filter(
-        (i) => i.action.type === "upload" && i.action.reason === "new_local",
-      ).length,
-    }, { location: "resurrection-guard.apply" });
-    return plan;
+    return applyDeferredOnlyGuard(plan, options.resolver, previouslyDeferred, options.log);
   }
 
   if (!remote.listRevisions) {
@@ -53,40 +67,26 @@ export async function applyResurrectionGuard(
   }
 
   let checksRemaining = MAX_REVISION_CHECKS_PER_CYCLE;
-  const items: SyncPlanItem[] = [];
+  const kept: SyncPlanItem[] = [];
+  /** Paths that need a user decision (no deletion evidence / API gap). */
+  const askItems: SyncPlanItem[] = [];
 
   for (const item of plan.items) {
     const action = item.action;
     if (action.type !== "upload" || action.reason !== "new_local") {
-      items.push(item);
+      kept.push(item);
       continue;
     }
 
     if (!remote.listRevisions) {
-      if (!options.resolver) {
-        logTemp(options.log, "P3", "new_local held — no listRevisions and no resolver", {
-          path: item.localPath,
-        }, { location: "resurrection-guard.apply" });
-        continue;
-      }
-      const choice = await options.resolver(item.localPath);
-      if (choice === "upload") {
-        items.push(item);
-      } else {
-        items.push({
-          ...item,
-          action: { type: "deleteLocal", reason: "resurrection_discarded" },
-        });
-      }
+      askItems.push(item);
       continue;
     }
 
     if (checksRemaining <= 0) {
-      logTemp(options.log, "P3", "list_revisions batch limit reached — deferring path", {
-        path: item.localPath,
-        limit: MAX_REVISION_CHECKS_PER_CYCLE,
-      }, { location: "resurrection-guard.apply" });
-      items.push(item);
+      // Past the per-cycle API budget: still include in the single ask batch rather
+      // than silently uploading (R6) or prompting once per path.
+      askItems.push(item);
       continue;
     }
 
@@ -95,19 +95,11 @@ export async function applyResurrectionGuard(
     try {
       revisions = await remote.listRevisions(item.localPath);
     } catch (err) {
-      logTemp(options.log, "P3", "list_revisions failed — asking user", {
+      logTemp(options.log, "P3", "list_revisions failed — including path in ask batch", {
         path: item.localPath,
         error: err instanceof Error ? err.message : String(err),
       }, { level: "warn", location: "resurrection-guard.apply" });
-      if (!options.resolver) continue;
-      const choice = await options.resolver(item.localPath);
-      if (choice === "upload") items.push(item);
-      else {
-        items.push({
-          ...item,
-          action: { type: "deleteLocal", reason: "resurrection_discarded" },
-        });
-      }
+      askItems.push(item);
       continue;
     }
 
@@ -122,32 +114,135 @@ export async function applyResurrectionGuard(
         path: item.localPath,
         revisionCount: revisions.length,
       }, { location: "resurrection-guard.apply" });
-      items.push({
+      kept.push({
         ...item,
         action: { type: "preserveAsConflictCopy", reason: "r10_deletion_evidence" },
       });
       continue;
     }
 
-    if (!options.resolver) {
-      logTemp(options.log, "P3", "new_local held — no deletion evidence and no resolver", {
-        path: item.localPath,
-      }, { location: "resurrection-guard.apply" });
+    askItems.push(item);
+  }
+
+  return resolveAskBatch(kept, askItems, plan.stats, options.resolver, options.log);
+}
+
+/**
+ * Linked devices: only re-prompt paths the user already deferred. Other new_local
+ * uploads proceed (intentional creates after the device is linked).
+ */
+async function applyDeferredOnlyGuard(
+  plan: SyncPlan,
+  resolver: ResurrectionResolver | undefined,
+  previouslyDeferred: ReadonlySet<string>,
+  log?: SyncMonitorLog,
+): Promise<ResurrectionGuardResult> {
+  const kept: SyncPlanItem[] = [];
+  const askItems: SyncPlanItem[] = [];
+
+  for (const item of plan.items) {
+    const action = item.action;
+    if (
+      action.type === "upload"
+      && action.reason === "new_local"
+      && previouslyDeferred.has(item.pathLower)
+    ) {
+      askItems.push(item);
       continue;
     }
+    kept.push(item);
+  }
 
-    const choice = await options.resolver(item.localPath);
+  if (askItems.length === 0) {
+    logTemp(log, "P3", "resurrection guard skipped — device has sync cursor", {
+      newLocalCount: plan.items.filter(
+        (i) => i.action.type === "upload" && i.action.reason === "new_local",
+      ).length,
+      previouslyDeferredSize: previouslyDeferred.size,
+    }, { location: "resurrection-guard.apply" });
+    return {
+      plan,
+      deferredNewLocalCount: 0,
+      deferPathsToRemember: [],
+      deferPathsToClear: [],
+    };
+  }
+
+  logTemp(log, "P3", "re-asking previously deferred new_local paths despite sync cursor", {
+    count: askItems.length,
+    sample: askItems.slice(0, 5).map((i) => i.localPath),
+  }, { location: "resurrection-guard.apply" });
+
+  return resolveAskBatch(kept, askItems, plan.stats, resolver, log);
+}
+
+async function resolveAskBatch(
+  kept: SyncPlanItem[],
+  askItems: SyncPlanItem[],
+  priorStats: SyncPlan["stats"],
+  resolver: ResurrectionResolver | undefined,
+  log?: SyncMonitorLog,
+): Promise<ResurrectionGuardResult> {
+  if (askItems.length === 0) {
+    return {
+      plan: { items: kept, stats: replanStats(kept, priorStats) },
+      deferredNewLocalCount: 0,
+      deferPathsToRemember: [],
+      deferPathsToClear: [],
+    };
+  }
+
+  const askPathLowers = askItems.map((i) => i.pathLower);
+
+  if (!resolver) {
+    logTemp(log, "P3", "new_local held — no deletion evidence and no resolver", {
+      count: askItems.length,
+      sample: askItems.slice(0, 5).map((i) => i.localPath),
+    }, { location: "resurrection-guard.apply" });
+    return {
+      plan: { items: kept, stats: replanStats(kept, priorStats) },
+      deferredNewLocalCount: askItems.length,
+      deferPathsToRemember: askPathLowers,
+      deferPathsToClear: [],
+    };
+  }
+
+  const paths = askItems.map((i) => i.localPath);
+  logTemp(log, "P3", "R6 ask — batch confirm for paths with no deletion evidence", {
+    count: paths.length,
+    sample: paths.slice(0, 5),
+  }, { location: "resurrection-guard.apply" });
+
+  const choice = await resolver(paths);
+  if (choice === "defer") {
+    logTemp(log, "P3", "R6 ask deferred — holding new_local uploads this cycle", {
+      count: paths.length,
+    }, { location: "resurrection-guard.apply" });
+    return {
+      plan: { items: kept, stats: replanStats(kept, priorStats) },
+      deferredNewLocalCount: askItems.length,
+      deferPathsToRemember: askPathLowers,
+      deferPathsToClear: [],
+    };
+  }
+
+  for (const item of askItems) {
     if (choice === "upload") {
-      items.push(item);
+      kept.push(item);
     } else {
-      items.push({
+      kept.push({
         ...item,
         action: { type: "deleteLocal", reason: "resurrection_discarded" },
       });
     }
   }
 
-  return { items, stats: replanStats(items, plan.stats) };
+  return {
+    plan: { items: kept, stats: replanStats(kept, priorStats) },
+    deferredNewLocalCount: 0,
+    deferPathsToRemember: [],
+    deferPathsToClear: askPathLowers,
+  };
 }
 
 function replanStats(

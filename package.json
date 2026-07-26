@@ -15,7 +15,11 @@
     "test:watch": "bun test --watch",
     "qa:generate": "node qa-test-vault/generate.mjs",
     "qa:reset": "node qa-test-vault/generate.mjs",
-    "qa:deploy": "bun run build && mkdir -p \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync\" && cp dist/* \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync/\""
+    "qa:wipe": "QA_WIPE=1 node qa-test-vault/generate.mjs --wipe",
+    "qa:deploy": "bun run build && mkdir -p \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync\" && cp dist/* \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync/\"",
+    "qa:open": "bash scripts/qa-open.sh",
+    "open-qa": "bash scripts/qa-open.sh",
+    "qa:restart": "bash scripts/qa-restart.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -24,6 +28,7 @@
     "eslint": "^9.39.4",
     "eslint-plugin-obsidianmd": "^0.1.9",
     "obsidian": "^1.7.2",
+    "obsidian-launcher": "^3.1.1",
     "typescript": "^5.6.0",
     "typescript-eslint": "^8.57.0"
   },

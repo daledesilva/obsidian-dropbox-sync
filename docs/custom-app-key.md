@@ -1,6 +1,6 @@
 # Using Your Own Dropbox App Key
 
-By default, this plugin uses a built-in App Key to connect to Dropbox. This works out of the box for most users.
+By default, this plugin uses a built-in App Key (`SHIPPED_APP_KEY` / bake-in from `.env` `DROPBOX_APP_KEY`) to connect to Dropbox. That key is a **public client id** — safe to ship in the plugin and in git. The Dropbox **App secret** must never be embedded (this plugin uses OAuth PKCE and does not need it). The built-in key works out of the box for most users.
 
 However, you may want to use your own Dropbox App Key if:
 
