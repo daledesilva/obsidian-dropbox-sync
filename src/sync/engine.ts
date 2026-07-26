@@ -701,9 +701,12 @@ export class SyncEngine {
       items: mergedWithoutPermanent,
     };
 
+    // R6/R10 only on fresh join (no cursor). Cursor holders recreating after their own
+    // delete must not be forced into preserveAsConflictCopy.
     const resurrectionPlan = await applyResurrectionGuard(planWithRetry, remote, {
       resolver: this.options.resurrectionResolver,
       log: this.options.log,
+      hasSyncCursor: Boolean(cursorAtStart),
     });
 
     if (resurrectionPlan.items.length !== planWithRetry.items.length
@@ -1217,6 +1220,22 @@ export class SyncEngine {
 
     if (!usedFullListing) {
       for (const base of baseEntries) {
+        // Empty folders have no content hash/rev — still seed them so an
+        // incremental cursor does not make a tracked folder look remotely deleted
+        // (which previously planned deleteLocalFolder and wiped a just-downloaded child).
+        if (base.entryKind === "folder") {
+          fullRemoteMap.set(base.pathLower, {
+            pathLower: base.pathLower,
+            pathDisplay: base.basePathDisplay ?? base.localPath,
+            hash: null,
+            serverModified: base.lastSynced,
+            rev: base.rev ?? "",
+            size: 0,
+            deleted: false,
+            isFolder: true,
+          });
+          continue;
+        }
         if (base.baseRemoteHash && base.rev) {
           fullRemoteMap.set(base.pathLower, {
             pathLower: base.pathLower,

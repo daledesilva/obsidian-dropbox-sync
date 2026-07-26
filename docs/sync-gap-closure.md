@@ -47,9 +47,16 @@ flowchart TB
 
 ### Fresh join vs delete (G3 / R6 / R10)
 
-1. `new_local` uploads pass through `applyResurrectionGuard`.
+1. **Only when the device has no Dropbox cursor** (fresh join / cleared history) do `new_local` uploads pass through `applyResurrectionGuard`.
 2. `list_revisions` shows a deletion → preserve as conflict copy, do not resurrect the path.
 3. No evidence (or API unavailable) → ask upload vs discard; never silent resurrect.
+4. A device that already has a cursor and recreates a path after its own delete uploads with `add` — R10 must not turn that recreate into a conflict copy.
+
+### Empty folders (G8)
+
+1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone.
+2. Peer deletes a remote folder → local empty folder becomes `deleteLocalFolder` (do not re-upload the empty folder).
+3. Incremental sync still seeds folder rows from base (folders have no content hash/rev); otherwise the folder vanishes from the remote map and a child download can be wiped by a false `deleteLocalFolder`.
 
 ### Cursor progress with failures (G27 / G10 / G30)
 
@@ -74,7 +81,7 @@ flowchart TB
 | Moves / folders | `plan-enhancements.ts`, `remote-move.ts` (two-step case move) |
 | Transport | `upload-chunk.ts`, `vault-adapter` temp writes, `permanent-skip.ts`, `retry-set.ts` |
 | Deferrals / editors | `deferral-tracker.ts`, `open-editors.ts` |
-| Scenario harness | `test/simulation/scenario-matrix.test.ts`, `test/support/sync-simulator.ts`, `test/sync-log-taxonomy.test.ts` |
+| Scenario harness | See [Sync scenario testing](sync-scenario-testing.md) — matrix + `qa-test-vault/` |
 | Contract / historical gaps | `docs/sync-scenarios.md` (gap table wording is the pre-fix audit; behaviour lives here and in code) |
 
 ClickUp phase tickets (Os: 0.1): `86d3u7bfu` … `86d3u7bjk`. Implementation commit on `release_0.2`: `86a8714`.
@@ -87,3 +94,5 @@ ClickUp phase tickets (Os: 0.1): `86d3u7bfu` … `86d3u7bjk`. Implementation com
 - **Conflict detection ≠ scan exclusion.** `isConflictFile` associates siblings for UI/reuse; it must not strip paths from local or remote scans (G1).
 - **`verboseDecisionLogging` is device-local.** Trace-level per-path decisions would flood every machine if stored in synced settings.
 - **Gap table in sync-scenarios.md is historical.** Do not treat “Today …” prose in G* rows as current behaviour after release 0.2 — verify against this page and the modules above.
+- **Resurrection (R6/R10) only runs without a sync cursor.** Devices that already sync must recreate after their own delete via `add`, not `preserveAsConflictCopy`.
+- **Folder base rows must seed incremental remote maps.** Empty folders have no hash/rev; omitting them made peers plan `deleteLocalFolder` and drop children just downloaded into that folder.

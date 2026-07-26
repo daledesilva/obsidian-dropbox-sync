@@ -51,7 +51,7 @@ bun run qa:reset       # same as qa:generate — reseeds local content, keeps pl
 
 ## Source of truth for scenarios
 
-Runbooks cite sections of [`docs/sync-scenarios.md`](../docs/sync-scenarios.md). Simulation coverage for those rows is tracked in [`SIMULATION_COVERAGE.md`](./SIMULATION_COVERAGE.md).
+Runbooks cite sections of [`docs/sync-scenarios.md`](../docs/sync-scenarios.md). Simulation coverage for those rows is tracked in [`SIMULATION_COVERAGE.md`](./SIMULATION_COVERAGE.md). How the matrix, simulator, and this vault fit together: [`docs/sync-scenario-testing.md`](../docs/sync-scenario-testing.md).
 
 ## Future
 

@@ -433,11 +433,25 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
     }
 
     if (localExists && !remoteExists) {
-      items.push({
-        pathLower,
-        localPath,
-        action: { type: "createRemoteFolder", reason: base ? "folder_restored" : "new_local_folder" },
-      });
+      // G8: peer removed the remote folder — delete local empty folder.
+      // Brand-new local folders (!base) still createRemoteFolder; do not re-upload
+      // an empty folder we already had in base after a remote delete.
+      if (base && !deleteIntended) {
+        items.push({
+          pathLower,
+          localPath,
+          action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
+        });
+      } else {
+        items.push({
+          pathLower,
+          localPath,
+          action: {
+            type: "createRemoteFolder",
+            reason: base ? "folder_restored" : "new_local_folder",
+          },
+        });
+      }
       continue;
     }
 

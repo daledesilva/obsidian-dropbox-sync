@@ -180,8 +180,12 @@ export class MemoryRemoteStorage implements RemoteStorage {
   private files = new Map<string, RemoteFile>();
   private changeLog: ChangeLogEntry[] = [];
   private revisionHistory = new Map<string, RemoteRevision[]>();
-  /** path_lower folder keys (trailing slash) for empty-folder simulation. */
-  private folders = new Set<string>();
+  /**
+   * Empty-folder simulation: key = path_lower with trailing slash, value = display path.
+   * Display casing must be preserved — lowercasing pathDisplay caused false case-only
+   * moveRemoteFolder plans when the vault still held `Projects/`.
+   */
+  private folders = new Map<string, string>();
   private seq = 0;
   private revCounter = 0;
   private cursorInvalidated = false;
@@ -259,6 +263,27 @@ export class MemoryRemoteStorage implements RemoteStorage {
       return this.toRemoteEntry(existing);
     }
 
+    return this.writeRemoteFile(path, data, clientModified);
+  }
+
+  /**
+   * Dropbox-desktop-client style overwrite for P3 peer simulation.
+   * Plugin uploads must use {@link upload} (rev / add), never this.
+   */
+  async forceUpload(
+    path: string,
+    data: Uint8Array,
+    clientModified?: number,
+  ): Promise<RemoteEntry> {
+    return this.writeRemoteFile(path, data, clientModified);
+  }
+
+  private async writeRemoteFile(
+    path: string,
+    data: Uint8Array,
+    clientModified?: number,
+  ): Promise<RemoteEntry> {
+    const pathLower = path.toLowerCase();
     const newRev = this.nextRev();
     const hash = await dropboxContentHash(data);
     const now = Date.now();
@@ -286,20 +311,26 @@ export class MemoryRemoteStorage implements RemoteStorage {
   async delete(path: string): Promise<void> {
     const pathLower = path.toLowerCase();
     const file = this.files.get(pathLower);
-    if (!file) return;
-
-    file.deleted = true;
-    const deletedEntry = {
-      ...this.toRemoteEntry(file),
-      deleted: true,
-      hash: null,
-    };
-    this.addChangeLog(deletedEntry);
-    this.appendRevision(pathLower, {
-      ...file,
-      deleted: true,
-      hash: file.hash,
-    });
+    if (file) {
+      file.deleted = true;
+      const deletedEntry = {
+        ...this.toRemoteEntry(file),
+        deleted: true,
+        hash: null,
+      };
+      this.addChangeLog(deletedEntry);
+      this.appendRevision(pathLower, {
+        ...file,
+        deleted: true,
+        hash: file.hash,
+      });
+      return;
+    }
+    // Empty-folder delete (G8): remove tracked folder key + tombstone for peers.
+    const folderKey = normalizeFolderPathLower(path);
+    if (this.folders.has(folderKey)) {
+      this.deleteFolder(path);
+    }
   }
 
   /**
@@ -347,7 +378,7 @@ export class MemoryRemoteStorage implements RemoteStorage {
         listed.push({ pathLower: file.pathLower, contentHash: file.hash, isFolder: false });
       }
     }
-    for (const folderKey of this.folders) {
+    for (const folderKey of this.folders.keys()) {
       const normalized = folderKey.replace(/\/+$/, "").toLowerCase();
       if (normalized === folder || normalized.startsWith(prefix)) {
         listed.push({
@@ -366,8 +397,21 @@ export class MemoryRemoteStorage implements RemoteStorage {
     if (!file || file.deleted) {
       throw new Error(`File not found on remote: ${from}`);
     }
-    this.files.delete(fromLower);
     const toLower = to.toLowerCase();
+    // Emit a deleted tombstone for the old path_lower so peer cursors see the rename
+    // as delete+create (Dropbox move_v2 delta shape), not a silent key rewrite.
+    if (fromLower !== toLower) {
+      this.addChangeLog({
+        pathLower: fromLower,
+        pathDisplay: file.pathDisplay,
+        hash: null,
+        serverModified: Date.now(),
+        rev: file.rev,
+        size: 0,
+        deleted: true,
+      });
+    }
+    this.files.delete(fromLower);
     file.pathLower = toLower;
     file.pathDisplay = to;
     this.files.set(toLower, file);
@@ -379,7 +423,7 @@ export class MemoryRemoteStorage implements RemoteStorage {
 
   async createFolder(path: string): Promise<RemoteEntry> {
     this.seedEmptyFolder(path);
-    return this.folderToRemoteEntry(normalizeFolderPathLower(path));
+    return this.folderToRemoteEntry(normalizeFolderPathLower(path), path.replace(/\/+$/, ""));
   }
 
   // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
@@ -396,8 +440,9 @@ export class MemoryRemoteStorage implements RemoteStorage {
   /** Test helper: register an empty folder (path_lower, trailing slash). */
   seedEmptyFolder(path: string): void {
     const normalized = normalizeFolderPathLower(path);
-    this.folders.add(normalized);
-    this.addChangeLog(this.folderToRemoteEntry(normalized));
+    const display = path.replace(/\/+$/, "");
+    this.folders.set(normalized, display);
+    this.addChangeLog(this.folderToRemoteEntry(normalized, display));
   }
 
   /** @deprecated Test helper — prefer {@link seedEmptyFolder}. */
@@ -408,8 +453,8 @@ export class MemoryRemoteStorage implements RemoteStorage {
   /** Test helper: remove a tracked empty folder. */
   deleteFolder(path: string): void {
     const normalized = normalizeFolderPathLower(path);
+    const display = this.folders.get(normalized) ?? path.replace(/\/+$/, "");
     this.folders.delete(normalized);
-    const display = normalized.replace(/\/+$/, "");
     this.addChangeLog({
       pathLower: display.toLowerCase(),
       pathDisplay: display,
@@ -424,7 +469,7 @@ export class MemoryRemoteStorage implements RemoteStorage {
 
   /** Test helper: list tracked folder path_lower keys. */
   listFolders(): string[] {
-    return [...this.folders].sort();
+    return [...this.folders.keys()].sort();
   }
 
   hasFolder(path: string): boolean {
@@ -483,10 +528,13 @@ export class MemoryRemoteStorage implements RemoteStorage {
     };
   }
 
-  private folderToRemoteEntry(folderKey: string): RemoteEntry {
-    const display = folderKey.replace(/\/+$/, "");
+  private folderToRemoteEntry(folderKey: string, pathDisplay?: string): RemoteEntry {
+    const display =
+      pathDisplay
+      ?? this.folders.get(folderKey)
+      ?? folderKey.replace(/\/+$/, "");
     return {
-      pathLower: display.toLowerCase(),
+      pathLower: folderKey.replace(/\/+$/, "").toLowerCase(),
       pathDisplay: display,
       hash: null,
       serverModified: Date.now(),
@@ -500,7 +548,9 @@ export class MemoryRemoteStorage implements RemoteStorage {
   /** Include folder tags in delta listings (G8). */
   private buildFolderChangeEntries(fromSeq: number): RemoteEntry[] {
     if (fromSeq > 0) return [];
-    return this.listFolders().map((folderKey) => this.folderToRemoteEntry(folderKey));
+    return [...this.folders.entries()].map(([folderKey, display]) =>
+      this.folderToRemoteEntry(folderKey, display),
+    );
   }
 }
 

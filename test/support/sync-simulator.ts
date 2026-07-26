@@ -37,10 +37,14 @@ export class DropboxAppDevice {
     private readonly remote: MemoryRemoteStorage,
   ) {}
 
+  /**
+   * Dropbox desktop client overwrite — not plugin `add`/`update(rev)`.
+   * Uses MemoryRemoteStorage.forceUpload so P3 peer edits replace remote bytes.
+   */
   async upload(path: string, content: string | Uint8Array): Promise<void> {
     const data =
       typeof content === "string" ? new TextEncoder().encode(content) : content;
-    await this.remote.upload(path, data);
+    await this.remote.forceUpload(path, data);
   }
 
   async delete(path: string): Promise<void> {
@@ -172,9 +176,20 @@ export class Device {
 
   async rename(from: string, to: string): Promise<void> {
     await this.fs.rename(from, to);
+    // Case-only renames keep path_lower — do not trackDelete (C1 / G6).
     if (from.toLowerCase() !== to.toLowerCase()) {
       this.engine.trackDelete(from.toLowerCase());
     }
+  }
+
+  /** Empty folder for G8 folder-first-class scenarios. */
+  async createFolder(path: string): Promise<void> {
+    await this.fs.createFolder(path);
+  }
+
+  async deleteFolder(path: string): Promise<void> {
+    await this.fs.deleteFolder(path);
+    this.engine.trackDelete(path.toLowerCase());
   }
 
   goOffline(): void {

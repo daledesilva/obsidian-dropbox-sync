@@ -207,11 +207,15 @@ export function createPlan(
 
   const remoteMap = new Map<string, RemoteEntry>();
   for (const e of remoteEntries) {
+    // G8: folders are planned in plan-enhancements only. File classify coerces
+    // hash:null → "" which looked like remote_modified_local_deleted vs folder base.
+    if (e.isFolder) continue;
     remoteMap.set(e.pathLower, e);
   }
 
   const baseMap = new Map<string, SyncEntry>();
   for (const e of baseEntries) {
+    if (e.entryKind === "folder") continue;
     baseMap.set(e.pathLower, e);
   }
 

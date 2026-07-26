@@ -20,6 +20,10 @@ function hasDeletionEvidence(
 /**
  * Gate new_local uploads through list_revisions (R6) and optional user confirm.
  * Deletion evidence → preserveAsConflictCopy (R10); no evidence → ask; never silent upload.
+ *
+ * Only for devices without a Dropbox cursor (fresh join / cleared state). A device that
+ * already syncs has already consumed delete tombstones; its new_local creates are
+ * intentional recreates and must upload with `add` (rows 32/37), not R10.
  */
 export async function applyResurrectionGuard(
   plan: SyncPlan,
@@ -27,8 +31,19 @@ export async function applyResurrectionGuard(
   options: {
     resolver?: ResurrectionResolver;
     log?: SyncMonitorLog;
+    /** When true, skip R6/R10 — caller already has a sync cursor. */
+    hasSyncCursor?: boolean;
   },
 ): Promise<SyncPlan> {
+  if (options.hasSyncCursor) {
+    logTemp(options.log, "P3", "resurrection guard skipped — device has sync cursor", {
+      newLocalCount: plan.items.filter(
+        (i) => i.action.type === "upload" && i.action.reason === "new_local",
+      ).length,
+    }, { location: "resurrection-guard.apply" });
+    return plan;
+  }
+
   if (!remote.listRevisions) {
     logTemp(options.log, "P3", "listRevisions unavailable — deferring new_local uploads to resolver", {
       newLocalCount: plan.items.filter(
