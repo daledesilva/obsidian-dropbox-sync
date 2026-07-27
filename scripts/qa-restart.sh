@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # Hard-reset the QA vault (erase local vault including auth/sync state), then
-# regenerate and open like qa:open.
+# regenerate *with* `_seeds/` fixtures and open like qa:open.
+#
+# For an empty vault (no test fixtures) use `bun run qa:empty` instead.
 #
 # Does NOT wipe the linked Dropbox folder — clear that in Dropbox if you need a
 # clean remote peer.
@@ -15,5 +17,5 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 export QA_WIPE=1
-echo "==> qa:restart (wipe vault + recreate + open)"
+echo "==> qa:restart (wipe vault + reseed fixtures + open)"
 exec bash "${ROOT}/scripts/qa-open.sh"

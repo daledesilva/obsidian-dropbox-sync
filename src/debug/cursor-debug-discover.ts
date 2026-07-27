@@ -10,7 +10,6 @@
 import { Notice, requestUrl } from "obsidian";
 import {
   getCursorDebugOfferToken,
-  getCursorDebugSessionId,
   patchDeviceSettings,
   readDeviceSettings,
 } from "../device-settings/device-settings";
@@ -18,6 +17,7 @@ import {
   CURSOR_DEBUG_OFFER_PORT,
   DEFAULT_CURSOR_DEBUG_PORT,
 } from "../device-settings/device-settings-defaults";
+import { postCursorDebugIngest } from "./cursor-debug-ingest";
 
 /** Long enough to read as a “logging is on” reminder after connect / plugin reload. */
 const CONNECTED_NOTICE_MS = 5000;
@@ -106,44 +106,25 @@ function sleep(ms: number): Promise<void> {
 let lastFetchOfferDebug: Record<string, unknown> = {};
 
 /**
- * Prefer the connected device-settings session so discover logs land in the
- * active Cursor Debug file — never a hardcoded stale session slug.
+ * Discover-path debug lines — only via Cursor Debug ingest (requestUrl + device
+ * settings). Never hardcoded fetch/localhost ingest URLs (mobile + relay).
  */
-function discoverDebugSessionId(preferred?: string): string {
-  return preferred?.trim() || getCursorDebugSessionId().trim();
-}
-
 function postDiscoverDebug(
-  host: string,
+  _host: string,
   hypothesisId: string,
   message: string,
   data: Record<string, unknown>,
   opts?: { sessionId?: string; location?: string },
 ): void {
-  // Prefer LAN host (mobile); 127.0.0.1 only works on the Mac.
-  const ingestHost =
-    host === "localhost" || host === "127.0.0.1" ? "192.168.50.184" : host;
-  const sessionId = discoverDebugSessionId(opts?.sessionId);
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (sessionId) headers["X-Debug-Session-Id"] = sessionId;
-  // #region agent log
-  void requestUrl({
-    url: `http://${ingestHost}:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580`,
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      ...(sessionId ? { sessionId } : {}),
-      hypothesisId,
-      location: opts?.location ?? "cursor-debug-discover.ts:fetchOffer",
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-    throw: false,
-  }).catch(() => {});
-  // #endregion
+  postCursorDebugIngest({
+    hypothesisId,
+    location: opts?.location ?? "cursor-debug-discover.ts",
+    message,
+    data: {
+      ...data,
+      ...(opts?.sessionId ? { preferredSessionId: opts.sessionId } : {}),
+    },
+  });
 }
 
 /** Localhost ingest helper for discover lifecycle (auto-connect / Notice). */
@@ -152,27 +133,14 @@ function postLocalDiscoverDebug(
   location: string,
   message: string,
   data: Record<string, unknown>,
-  sessionId?: string,
+  _sessionId?: string,
 ): void {
-  const sid = discoverDebugSessionId(sessionId);
-  const headers: Record<string, string> = {
-    "Content-Type": "application/json",
-  };
-  if (sid) headers["X-Debug-Session-Id"] = sid;
-  // #region agent log
-  fetch("http://127.0.0.1:7557/ingest/76c1e874-694d-4f98-b787-5b60059ff580", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      ...(sid ? { sessionId: sid } : {}),
-      hypothesisId,
-      location,
-      message,
-      data,
-      timestamp: Date.now(),
-    }),
-  }).catch(() => {});
-  // #endregion
+  postCursorDebugIngest({
+    hypothesisId,
+    location,
+    message,
+    data,
+  });
 }
 
 /**

@@ -51,6 +51,8 @@ flowchart LR
 | `RecordingLog` | Captures `ruleId` / message for taxonomy checks |
 | `applyResurrectionGuard({ hasSyncCursor })` | R10 only on fresh join — see [Sync gap closure](sync-gap-closure.md) |
 | `qa:open` / `open-qa` / `qa:generate` / `qa:deploy` | `package.json` + `obsidian-launcher` |
+| `qa:restart` | Local wipe + regenerate **with** `_seeds/` fixtures + open |
+| `qa:empty` | Local wipe + regenerate **empty** vault (no fixtures) + open — runbook 10 |
 
 ## Technical Gotchas
 

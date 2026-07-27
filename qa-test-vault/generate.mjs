@@ -38,10 +38,19 @@ const VAULT_ROOT = resolve(
 );
 /** When generating into the tooling folder, do not clobber the tracked README. */
 const IS_IN_REPO_VAULT = resolve(VAULT_ROOT) === resolve(__dirname);
-/** Full erase before regenerate — used by `bun run qa:restart`. */
+/** Full erase before regenerate — used by `bun run qa:restart` / `qa:empty`. */
 const WIPE_VAULT =
   process.env.QA_WIPE === "1"
   || process.argv.includes("--wipe");
+
+/**
+ * Skip writing `_seeds/` content after wipe/generate.
+ * Default for `bun run qa:empty` (empty local vault). Override with
+ * `QA_WITH_SEEDS=1 bun run qa:empty` when you need fixtures for upload-ask.
+ */
+const EMPTY_SEEDS =
+  process.env.QA_EMPTY_SEEDS === "1"
+  || process.argv.includes("--empty-seeds");
 
 /** Tracked harness files that must survive an in-repo wipe. */
 const IN_REPO_KEEP = new Set([
@@ -307,12 +316,21 @@ async function main() {
     join(VAULT_ROOT, IS_IN_REPO_VAULT ? "START_HERE.md" : "README.md"),
   );
   await copyRunbooks();
-  await writeSeeds();
+  if (EMPTY_SEEDS) {
+    // Keep an empty _seeds/ tree so runbooks that cite the path still resolve;
+    // no baseline notes — intended for join-as-download against a populated remote.
+    await ensureDir(join(VAULT_ROOT, "_seeds"));
+    console.log("  _seeds/     — empty (QA_EMPTY_SEEDS=1)");
+  } else {
+    await writeSeeds();
+  }
   await writeObsidianConfig();
 
   console.log("Done.");
   console.log("  _runbooks/  — scenario scripts (see INDEX.md)");
-  console.log("  _seeds/     — baseline notes, case, folders, binaries, bulk, exclude-bait");
+  if (!EMPTY_SEEDS) {
+    console.log("  _seeds/     — baseline notes, case, folders, binaries, bulk, exclude-bait");
+  }
   if (WIPE_VAULT) {
     console.log("  wiped — expect fresh OAuth / empty sync state on next open");
   } else {
@@ -331,10 +349,13 @@ async function main() {
   }
   console.log("");
   console.log("Next:");
-  console.log("  bun run qa:open / qa:restart — generate (+ wipe) + sandboxed Obsidian");
+  console.log("  bun run qa:open / qa:restart / qa:empty — generate (+ wipe) + sandboxed Obsidian");
   console.log(`  Vault: ${VAULT_ROOT}`);
-  console.log("  Sync Now once, then open _runbooks/INDEX.md");
-  console.log("");
+  console.log(
+    EMPTY_SEEDS
+      ? "  OAuth, then Sync Now (download join) — open _runbooks/10-joining-or-rejoining.md"
+      : "  Sync Now once, then open _runbooks/INDEX.md",
+  );  console.log("");
   console.log(
     WIPE_VAULT
       ? "Warning: local vault was erased; Dropbox remote was not. Wipe the linked folder if you need a clean peer."

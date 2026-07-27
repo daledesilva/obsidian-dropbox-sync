@@ -7,14 +7,24 @@
 
 Destructive to local sync state. Prefer a throwaway Dropbox folder link for this runbook.
 
+From the plugin repo, open an **empty local vault** (wipe auth + sync state, no `_seeds/` fixtures, rebuild plugin, launch sandboxed Obsidian):
+
+```bash
+bun run qa:empty
+```
+
+This is **not** `qa:restart` — restart reseeds the test fixtures. Join wipes and leaves the vault empty of those files (runbooks + plugin only). **Does not wipe Dropbox** — clear the linked remote folder in Dropbox web when you need an empty peer.
+
+Optional: `QA_WITH_SEEDS=1 bun run qa:empty` regenerates `_seeds/` for upload-ask checks against an empty remote.
+
 ## Steps
 
 ### Fresh join
 
-1. Note current linked Dropbox folder.
-2. On a clean vault copy (or after clearing plugin sync state / IndexedDB for this vault — advanced), link the same Dropbox folder.
-3. Sync Now with empty or partial local `_seeds/`.
-4. Expect download of remote files; not a mass upload of emptiness as “deletes” without asking (R11 / join rules).
+1. Run `bun run qa:empty`.
+2. Complete OAuth on the empty vault; link the Dropbox folder under test.
+3. Sync Now.
+4. Expect download of remote files when the peer already has content — not a mass upload of emptiness as “deletes” without asking (R11 / join rules). For R6 upload-ask, either add local files yourself or use `QA_WITH_SEEDS=1` against a wiped remote.
 
 ### Re-link (R11)
 

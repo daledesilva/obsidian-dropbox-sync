@@ -19,7 +19,8 @@
     "qa:deploy": "bun run build && mkdir -p \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync\" && cp dist/* \"${SYNC_TESTER_VAULT:-$HOME/Documents/sync-tester}/.obsidian/plugins/dropbox-sync/\"",
     "qa:open": "bash scripts/qa-open.sh",
     "open-qa": "bash scripts/qa-open.sh",
-    "qa:restart": "bash scripts/qa-restart.sh"
+    "qa:restart": "bash scripts/qa-restart.sh",
+    "qa:empty": "bash scripts/qa-empty.sh"
   },
   "devDependencies": {
     "@types/bun": "latest",

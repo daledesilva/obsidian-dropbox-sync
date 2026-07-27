@@ -38,4 +38,15 @@ export class DeferralTracker {
     if (started === undefined) return undefined;
     return now - started;
   }
+
+  /** Soonest remaining time until any tracked path's bound expires (0 if already due). */
+  minRemainingMs(now = Date.now()): number | undefined {
+    if (this.firstDeferredAt.size === 0) return undefined;
+    let min = Number.POSITIVE_INFINITY;
+    for (const started of this.firstDeferredAt.values()) {
+      const remaining = Math.max(0, this.boundMs - (now - started));
+      if (remaining < min) min = remaining;
+    }
+    return min === Number.POSITIVE_INFINITY ? undefined : min;
+  }
 }

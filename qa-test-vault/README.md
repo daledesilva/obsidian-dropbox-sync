@@ -45,15 +45,18 @@ bun run qa:deploy      # copy dist into that vault’s dropbox-sync plugin folde
 # then open that folder in your normal Obsidian
 ```
 
-## Reset vs restart
+## Reset vs restart vs join
 
 ```bash
 bun run qa:reset       # reseed _seeds/_runbooks only — keeps auth + sync state
-bun run qa:restart     # ERASE local vault (incl. auth), recreate, open (like qa:open)
+bun run qa:restart     # ERASE local vault, recreate *with* _seeds/ fixtures, open
+bun run qa:empty        # ERASE local vault, recreate *empty* (no fixtures), open — runbook 10
 bun run qa:wipe        # erase + regenerate only (no Obsidian launch)
 ```
 
-**Local wipe ≠ remote wipe.** `qa:restart` / `qa:wipe` clear the local vault only. Clear the linked Dropbox folder in Dropbox web if you need a clean remote peer.
+**Local wipe ≠ remote wipe.** `qa:restart` / `qa:empty` / `qa:wipe` clear the local vault only. Clear the linked Dropbox folder in Dropbox web if you need a clean remote peer.
+
+For **runbook 10 (Joining or rejoining)**, use `bun run qa:empty` (empty vault). Use `qa:restart` when you need the seeded playground again.
 
 ## Live protocol (you + agent)
 

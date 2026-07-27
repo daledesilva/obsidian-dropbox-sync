@@ -131,7 +131,9 @@ export function postCursorDebugLogLine(
   data?: unknown,
   meta?: CursorDebugLogMeta,
 ): void {
-  if (!isCursorDebugIngestConfigured()) return;
+  // Require a deliverable URL (host/path/port from Connect / offer) — session id
+  // alone must not look like success while POSTs are silently skipped.
+  if (resolveCursorDebugIngestUrl() === null) return;
 
   let dataRecord: Record<string, unknown> | undefined;
   if (data instanceof Error) {

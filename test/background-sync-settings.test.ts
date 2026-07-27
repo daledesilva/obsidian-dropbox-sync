@@ -142,14 +142,14 @@ describe("migrateSettings", () => {
   test("handles null/undefined saved data (first enable)", () => {
     expect(migrateSettings(null)).toEqual({
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
-      vaultEventDebounceSec: 2,
+      vaultEventDebounceSec: 5,
       includeHiddenFilesAndFolders: false,
       debugLoggingEnabled: true,
       largeSyncInteractiveThreshold: 10,
     });
     expect(migrateSettings(undefined)).toEqual({
       backgroundSyncSections: DEFAULT_BACKGROUND_SYNC_SECTIONS,
-      vaultEventDebounceSec: 2,
+      vaultEventDebounceSec: 5,
       includeHiddenFilesAndFolders: false,
       debugLoggingEnabled: true,
       largeSyncInteractiveThreshold: 10,
@@ -159,6 +159,11 @@ describe("migrateSettings", () => {
   test("adds defaults for missing background fields", () => {
     const migrated = migrateSettings({});
     expect(migrated.backgroundSyncSections).toEqual(DEFAULT_BACKGROUND_SYNC_SECTIONS);
+    expect(migrated.vaultEventDebounceSec).toBe(5);
+  });
+
+  test("keeps explicit 2s debounce when stored", () => {
+    const migrated = migrateSettings({ vaultEventDebounceSec: 2 });
     expect(migrated.vaultEventDebounceSec).toBe(2);
   });
 

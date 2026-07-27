@@ -77,7 +77,8 @@ export const DEFAULT_SETTINGS: PluginSettings = {
   syncInterval: 60,
   backgroundSyncEnabled: false,
   backgroundSyncSections: { ...DEFAULT_BACKGROUND_SYNC_SECTIONS },
-  vaultEventDebounceSec: 2,
+  // Above typical Obsidian autosave (~2s) so continuous typing keeps resetting the quiet window.
+  vaultEventDebounceSec: 5,
   largeSyncInteractiveThreshold: 10,
   conflictStrategy: "keep_both",
   deleteProtection: true,
@@ -106,6 +107,8 @@ export function getBuiltInExcludePatterns(configDir: string): string[] {
     "sync-logs/",
     ".DS_Store",
     "Thumbs.db",
+    // Download/write staging siblings must never sync if a rename fails mid-flight.
+    "*.tmp-dropbox-sync",
     // Workspaces are gated by the Workspaces section toggle — not a built-in exclude.
     // OAuth tokens must not sync via Plugins section (G25).
     `${configDir}/plugins/dropbox-sync/data.json`,
@@ -223,7 +226,7 @@ export function migrateSettings(
     || !VAULT_EVENT_DEBOUNCE_OPTIONS.includes(migrated.vaultEventDebounceSec as VaultEventDebounceSec)
   ) {
     migrated.vaultEventDebounceSec = snapVaultEventDebounceSec(
-      typeof migrated.vaultEventDebounceSec === "number" ? migrated.vaultEventDebounceSec : 2,
+      typeof migrated.vaultEventDebounceSec === "number" ? migrated.vaultEventDebounceSec : 5,
     );
   }
   if (migrated.includeHiddenFilesAndFolders === undefined) {

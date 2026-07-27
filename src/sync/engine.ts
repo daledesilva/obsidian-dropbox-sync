@@ -675,10 +675,22 @@ export class SyncEngine {
         permanentSkipSize: permanentSkips.length,
       }, { location: "engine.runCycle" });
     }
-    if (mergedPlanItems.length !== plan.items.length) {
+    if (mergedPlanItems.length !== plan.items.length
+      || mergedPlanItems.some((item, i) => item.action.type !== plan.items[i]?.action.type)) {
+      const reinstatedDownloads = mergedPlanItems.filter((item) => {
+        const prior = plan.items.find((p) => p.pathLower === item.pathLower);
+        return (
+          (prior?.action.type === "noop" || prior?.action.type === "recordBase")
+          && item.action.type !== "noop"
+          && item.action.type !== "recordBase"
+        );
+      });
       logTemp(this.options.log, "P4", "merged retry-set items into plan", {
         added: mergedPlanItems.length - plan.items.length,
         retrySetSize: retryEntries.length,
+        reinstatedFromWeakPlan: reinstatedDownloads.length,
+        reinstatedSample: reinstatedDownloads.slice(0, 5).map((i) => i.localPath),
+        hypothesisId: "H-B",
       }, { location: "engine.runCycle" });
     }
     const planWithRetry: SyncPlan = {
@@ -887,8 +899,30 @@ export class SyncEngine {
       (f) => f.item.action.type === "deleteRemote" || f.item.action.type === "deleteLocal",
     );
 
-    // 9. 상태 갱신
-    await this.finalizeState(store, result, latestCursor, deletesSkipped);
+    // 9. 상태 갱신 — catch up past our own remote writes so longpoll does not
+    // immediately echo uploads as "changes" (which re-entered sync mid-keystroke).
+    let cursorToCommit = latestCursor;
+    const mutatedRemote = result.succeeded.some((item) =>
+      item.action.type === "upload"
+      || item.action.type === "deleteRemote"
+      || item.action.type === "moveRemote",
+    );
+    if (mutatedRemote) {
+      try {
+        cursorToCommit = await this.catchUpRemoteCursor(remote, latestCursor);
+        logTemp(this.options.log, "P4", "caught up cursor past own remote writes", {
+          beforePrefix: latestCursor.slice(0, 12),
+          afterPrefix: cursorToCommit.slice(0, 12),
+          hypothesisId: "H-cursor-echo",
+        }, { location: "engine.runCycle" });
+      } catch (err) {
+        this.log("cursor catch-up after writes failed — keeping cycle cursor", {
+          error: err instanceof Error ? err.message : String(err),
+          hypothesisId: "H-cursor-echo",
+        }, { location: "engine.runCycle" });
+      }
+    }
+    await this.finalizeState(store, result, cursorToCommit, deletesSkipped);
 
     const deferredCount = result.deferred.length > 0 ? result.deferred.length : undefined;
     const cursorUpdated = this.lastCursorUpdated;
@@ -1175,6 +1209,24 @@ export class SyncEngine {
   }
 
   /**
+   * Drain delta pages from `fromCursor` so the committed cursor includes uploads
+   * performed this cycle. Without this, longpoll sees our own writes as peer changes.
+   */
+  private async catchUpRemoteCursor(
+    remote: import("../adapters/interfaces").RemoteStorage,
+    fromCursor: string,
+  ): Promise<string> {
+    if (!fromCursor) return fromCursor;
+    let cursor = fromCursor;
+    for (let page = 0; page < 50; page++) {
+      const changes = await remote.listChanges(cursor);
+      cursor = changes.cursor;
+      if (!changes.hasMore) break;
+    }
+    return cursor;
+  }
+
+  /**
    * Merge delta into remote state. When usedFullListing (G28), replace from the
    * listing for covered paths — do not seed-merge from base.
    */
@@ -1415,10 +1467,11 @@ export class SyncEngine {
     }
 
     const pendingDeleteLog = this.countInScopePendingDeletes();
+    // G10/G27: open-file deferrals are durable in retrySet — do not stall the shared
+    // cursor (that stopped longpoll until syncInterval). Failed + deferred both retry.
     const canUpdateCursor =
       !this.options.deferCursorUpdate
       && deletesSkipped === 0
-      && result.deferred.length === 0
       && pendingDeleteLog === 0;
 
     // G27: checkpoint cursor even when some items failed; failures live in retrySet.

@@ -13,7 +13,7 @@ Walk one runbook at a time. Full matrices live in the repo: `docs/sync-scenarios
 | 07 | [Capitalisation](07-capitalisation.md) | §7 | **Yes** |
 | 08 | [Folders and empty folders](08-folders-and-empty-folders.md) | §8 | **Yes** |
 | 09 | [Folders containing files](09-folders-containing-files.md) | §9 | **Yes** |
-| 10 | [Joining or rejoining](10-joining-or-rejoining.md) | §10 | **Yes** |
+| 10 | [Joining or rejoining](10-joining-or-rejoining.md) | §10 | **Yes** — start with `bun run qa:empty` |
 | 11 | [Deletes a device never saw](11-deletes-device-never-saw.md) | §11 | **Yes** |
 | 12 | [File size and content type](12-file-size-and-content-type.md) | §12 | Usually no |
 | 13 | [Interruptions](13-interruptions.md) | §13 | Depends |

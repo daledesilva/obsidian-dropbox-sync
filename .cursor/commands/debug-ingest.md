@@ -4,6 +4,8 @@ Set up live NDJSON ingest from the Obsidian plugin (desktop or mobile) into Curs
 
 Any text after `/debug-ingest` is optional context (e.g. iPad, session id).
 
+For a full QA vault open with ingest already matched to this Debug session, prefer **`/debug-ready-vault`** (seeded `qa:restart`) or **`/debug-empty-vault`** (empty join `qa:empty`) instead of wiring ingest by hand then opening the vault separately.
+
 ## Preconditions
 
 - User should be in (or about to start) a **Cursor Debug** agent session — shell scripts **cannot** start the ingest listener.

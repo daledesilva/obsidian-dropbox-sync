@@ -51,8 +51,46 @@ export async function reloadOpenMarkdownFile(app: App, path: string): Promise<vo
 
   const scrollTop = readMarkdownScrollTop(view);
   const wasActive = app.workspace.activeLeaf === leaf;
-  await leaf.openFile(view.file, { active: wasActive });
-  restoreMarkdownScrollTop(view, scrollTop);
+  const file = view.file;
+  let diskText: string;
+  try {
+    diskText = await app.vault.read(file);
+  } catch {
+    return;
+  }
+
+  // Prefer in-place buffer replace — setViewState alone often keeps a stale CM buffer.
+  const editor = view.editor;
+  if (editor.getValue() !== diskText) {
+    const cursor = editor.getCursor();
+    editor.setValue(diskText);
+    try {
+      editor.setCursor(cursor);
+    } catch {
+      /* cursor restore is best-effort after length changes */
+    }
+  }
+
+  const previous = leaf.getViewState();
+  await leaf.setViewState(
+    {
+      ...previous,
+      type: "markdown",
+      state: {
+        ...(previous.state as Record<string, unknown> | undefined),
+        file: file.path,
+      },
+      active: wasActive,
+    },
+    { history: false },
+  );
+  if (wasActive) {
+    app.workspace.setActiveLeaf(leaf, { focus: false });
+  }
+  const reloaded = leaf.view;
+  if (reloaded instanceof MarkdownView) {
+    restoreMarkdownScrollTop(reloaded, scrollTop);
+  }
 }
 
 function readMarkdownScrollTop(view: MarkdownView): number | undefined {

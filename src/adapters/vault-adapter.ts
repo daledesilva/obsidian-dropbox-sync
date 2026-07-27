@@ -103,18 +103,24 @@ export class VaultAdapter implements FileSystem {
     const options = mtime ? { mtime } : undefined;
     const tempPath = `${path}${LOCAL_TEMP_SUFFIX}`;
 
-    // R7: write to a temp sibling then rename into place (G12).
+    // R7: new files write to a temp sibling then rename into place (G12).
+    // Indexed overwrites cannot use FileManager.renameFile — Obsidian throws
+    // "Destination file already exists!" and leaves the temp sibling behind.
+    const adapterBacked = this.isAdapterBackedPath(path);
+    const existing = adapterBacked ? null : this.vault.getAbstractFileByPath(path);
+    const overwriteExisting = !!(existing && this.isTFile(existing));
     logRule(this.log ?? undefined, SyncRules.R7, "writing local file", {
       path,
       bytes: data.length,
-      viaTempFile: true,
+      viaTempFile: !overwriteExisting,
+      overwriteExisting,
       tempPath,
-      adapterBacked: this.isAdapterBackedPath(path),
+      adapterBacked,
       chunkedWrite: data.length > LARGE_WRITE_CHUNK_BYTES,
     }, { level: "trace", location: "vault-adapter.write" });
 
     try {
-      if (this.isAdapterBackedPath(path)) {
+      if (adapterBacked) {
         await this.ensureParentDirViaAdapter(path);
         await this.writeAdapterBackedTemp(tempPath, data, options);
         await this.vault.adapter.rename(normalizePath(tempPath), normalizePath(path));
@@ -123,9 +129,26 @@ export class VaultAdapter implements FileSystem {
         return;
       }
 
-      const existing = this.vault.getAbstractFileByPath(path);
-      const tempExisting = this.vault.getAbstractFileByPath(tempPath);
       const arrayBuffer = toArrayBuffer(data);
+      // #region agent log
+      // H-A: overwrite must use modifyBinary; renameFile fails when dest exists.
+      this.log?.("write path branch", {
+        path,
+        overwriteExisting,
+        hypothesisId: "H-A",
+      }, { level: "debug", location: "vault-adapter.write", category: SyncLogCategories.transfer });
+      // #endregion
+      if (overwriteExisting && existing && this.isTFile(existing)) {
+        await this.vault.modifyBinary(existing, arrayBuffer, options);
+        // Prior failed downloads may have left a temp sibling; remove it so it
+        // is not scanned as a new local file and uploaded to Dropbox.
+        await this.removeLocalTempIfPresent(tempPath);
+        this.diskOnlyPaths.delete(path.toLowerCase());
+        this.hashCache.delete(path.toLowerCase());
+        return;
+      }
+
+      const tempExisting = this.vault.getAbstractFileByPath(tempPath);
       if (tempExisting && this.isTFile(tempExisting)) {
         await this.vault.modifyBinary(tempExisting, arrayBuffer, options);
       } else {
@@ -139,7 +162,9 @@ export class VaultAdapter implements FileSystem {
         await this.fileManager.renameFile(tempFile, path);
       }
       this.diskOnlyPaths.delete(path.toLowerCase());
+      this.hashCache.delete(path.toLowerCase());
     } catch (e) {
+      await this.removeLocalTempIfPresent(tempPath);
       throw wrapLocalWriteFailure(e, path, data.length);
     }
   }
@@ -502,6 +527,23 @@ export class VaultAdapter implements FileSystem {
       this.onLocalScanProgress?.(scanned, scanTotal);
     }
     return added;
+  }
+
+  /** Best-effort cleanup of a download/write temp sibling left after failure. */
+  private async removeLocalTempIfPresent(tempPath: string): Promise<void> {
+    try {
+      const tempFile = this.vault.getAbstractFileByPath(tempPath);
+      if (tempFile && this.isTFile(tempFile)) {
+        await this.fileManager.trashFile(tempFile);
+        return;
+      }
+      const norm = normalizePath(tempPath);
+      if (await this.vault.adapter.exists(norm)) {
+        await this.vault.adapter.remove(norm);
+      }
+    } catch {
+      // Cleanup must not mask the original write error.
+    }
   }
 
   /** Create parent folders for indexed (non-dot) paths via Vault API. */

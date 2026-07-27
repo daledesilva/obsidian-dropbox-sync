@@ -514,7 +514,11 @@ export class DropboxSyncSettingTab extends PluginSettingTab {
   }
 
   private debounceDesc(sec: number): string {
-    return `Background only — wait ${sec}s after a file edit, delete, or rename before starting a sync.`;
+    return (
+      `Background only — wait ${sec}s after the last saved file change `
+      + `(edit, create, delete, or rename) before starting a sync. `
+      + `Values at or below typical autosave (~2s) can sync on every save while typing.`
+    );
   }
 
   // 최초 설정: 이름 입력 + Set

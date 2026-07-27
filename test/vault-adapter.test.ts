@@ -122,16 +122,22 @@ describe("VaultAdapter write / ensureParentDir", () => {
     const files = new Map<string, ArrayBuffer>();
     const folders = new Set<string>();
     let writeBinaryCalls = 0;
+    let modifyBinaryCalls = 0;
 
     const fileManager = {
       renameFile: async (file: { path: string }, to: string) => {
+        if (files.has(to)) {
+          throw new Error("Destination file already exists!");
+        }
         const data = files.get(file.path);
         if (data) {
           files.delete(file.path);
           files.set(to, data);
         }
       },
-      trashFile: async () => {},
+      trashFile: async (file: { path: string }) => {
+        files.delete(file.path);
+      },
     };
 
     const vault = {
@@ -148,7 +154,10 @@ describe("VaultAdapter write / ensureParentDir", () => {
       createBinary: async (path: string, data: ArrayBuffer) => {
         files.set(path, data);
       },
-      modifyBinary: async () => {},
+      modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
+        modifyBinaryCalls++;
+        files.set(file.path, data);
+      },
       adapter: {
         exists: async () => false,
         mkdir: async () => {},
@@ -166,5 +175,10 @@ describe("VaultAdapter write / ensureParentDir", () => {
     await adapter.write("Notes/hello.md", new TextEncoder().encode("hi"));
     expect(files.has("Notes/hello.md")).toBe(true);
     expect(writeBinaryCalls).toBe(0);
+
+    // Overwrite must use modifyBinary — renameFile refuses an existing destination.
+    await adapter.write("Notes/hello.md", new TextEncoder().encode("hi2"));
+    expect(modifyBinaryCalls).toBe(1);
+    expect(new TextDecoder().decode(new Uint8Array(files.get("Notes/hello.md")!))).toBe("hi2");
   });
 });
