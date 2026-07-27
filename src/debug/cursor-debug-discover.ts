@@ -479,13 +479,6 @@ async function probeHostsForOffer(
  * LAN probe is Connect-only (never used by tryAutoConnect).
  */
 export async function connect(): Promise<DiscoverResult> {
-  // #region agent log
-  postDiscoverDebug("192.168.50.184", "H-connect", "connect() start", {
-    cachedHost: readDeviceSettings().cursorDebugHost.trim(),
-    hadCache: hasCachedIngestConnection(),
-  });
-  // #endregion
-
   for (const host of LOCAL_HOSTS) {
     const offer = await fetchOffer(host);
     if (offer) {
@@ -521,15 +514,6 @@ export async function connect(): Promise<DiscoverResult> {
       probeHosts.push(h);
     }
   }
-
-  // #region agent log
-  postDiscoverDebug("192.168.50.184", "H-connect", "connect() lan probe setup", {
-    localIps,
-    probeHostCount: probeHosts.length,
-    probeSample: probeHosts.slice(0, 5),
-    lastFetchOfferDebug,
-  });
-  // #endregion
 
   if (probeHosts.length > 0) {
     const offer = await probeHostsForOffer(probeHosts, CONNECT_PROBE_BUDGET_MS);

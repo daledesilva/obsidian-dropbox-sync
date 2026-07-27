@@ -130,15 +130,9 @@ export class VaultAdapter implements FileSystem {
       }
 
       const arrayBuffer = toArrayBuffer(data);
-      // #region agent log
-      // H-A: overwrite must use modifyBinary; renameFile fails when dest exists.
-      this.log?.("write path branch", {
-        path,
-        overwriteExisting,
-        hypothesisId: "H-A",
-      }, { level: "debug", location: "vault-adapter.write", category: SyncLogCategories.transfer });
-      // #endregion
       if (overwriteExisting && existing && this.isTFile(existing)) {
+        // Indexed overwrites must use modifyBinary: renameFile rejects an existing
+        // destination and would leave the temporary download sibling behind.
         await this.vault.modifyBinary(existing, arrayBuffer, options);
         // Prior failed downloads may have left a temp sibling; remove it so it
         // is not scanned as a new local file and uploaded to Dropbox.

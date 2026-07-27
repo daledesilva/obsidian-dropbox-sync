@@ -63,6 +63,8 @@ Sometimes the plugin briefly delays applying a download or a remote delete:
 
 Every deferral expires after about **60 seconds**. After the bound, the change applies (unsaved work conflicts by the normal rules) or the delete prompt is forced. Deferral changes *when* a path finishes, not *what* a later manual sync would conclude — and it must not hold the shared Dropbox cursor forever.
 
+When the user **leaves** a deferred note (active-leaf / file-open change), pending downloads flush with an **immediate** sync cycle — they do not wait for the vault-event debounce used for typing settle. See [Background sync triggers](background-sync-triggers.md).
+
 ## Stale delete-log cleanup
 
 Before each sync cycle, the plugin **prunes** delete-log paths that have neither a sync-base entry nor a local file. Those orphans cannot produce a meaningful delete and only inflate planning.
@@ -90,6 +92,7 @@ Delete intents are also **scoped** to paths the current sync sections can act on
 ## Technical Gotchas
 
 - **The modal must block the cycle.** Returning `false` immediately and deferring approval to a later debounced sync made both **Delete** and **Skip** look like Skip (especially when background sync was off). Always `await modal.waitForConfirmation()` and return that boolean.
+- **Leaf flush is not vault debounce.** Applying an already-deferred remote download on click-away must call `syncNow` immediately; sharing the typing quiet window made remote refresh feel broken.
 - **One modal at a time.** If a confirm modal is already open, a second guard trigger returns `false` (skips deletes) to avoid stacked dialogs.
 - **Threshold is independent of the interactive-progress threshold.** Delete protection uses `deleteThreshold`; large-background promotion uses `largeSyncInteractiveThreshold`.
 - **Do not advance the cursor while scoped pending deletes remain.** Clear succeeded deletes first; transient item failures live in `retrySet` so they do not block checkpoint forever (G27).

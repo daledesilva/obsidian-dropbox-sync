@@ -685,12 +685,11 @@ export class SyncEngine {
           && item.action.type !== "recordBase"
         );
       });
-      logTemp(this.options.log, "P4", "merged retry-set items into plan", {
+      this.log("merged retry-set items into plan", {
         added: mergedPlanItems.length - plan.items.length,
         retrySetSize: retryEntries.length,
         reinstatedFromWeakPlan: reinstatedDownloads.length,
         reinstatedSample: reinstatedDownloads.slice(0, 5).map((i) => i.localPath),
-        hypothesisId: "H-B",
       }, { location: "engine.runCycle" });
     }
     const planWithRetry: SyncPlan = {
@@ -910,15 +909,9 @@ export class SyncEngine {
     if (mutatedRemote) {
       try {
         cursorToCommit = await this.catchUpRemoteCursor(remote, latestCursor);
-        logTemp(this.options.log, "P4", "caught up cursor past own remote writes", {
-          beforePrefix: latestCursor.slice(0, 12),
-          afterPrefix: cursorToCommit.slice(0, 12),
-          hypothesisId: "H-cursor-echo",
-        }, { location: "engine.runCycle" });
       } catch (err) {
         this.log("cursor catch-up after writes failed — keeping cycle cursor", {
           error: err instanceof Error ? err.message : String(err),
-          hypothesisId: "H-cursor-echo",
         }, { location: "engine.runCycle" });
       }
     }

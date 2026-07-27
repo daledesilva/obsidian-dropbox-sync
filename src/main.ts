@@ -152,20 +152,6 @@ export default class DropboxSyncPlugin extends Plugin {
    * used to fire ~0.5s after sync end). Re-arm a full debounce in sync finally.
    */
   private pendingDebouncedSync = false;
-  /** Monotonic id for correlating debounce arm → cancel → fire in debug logs. */
-  private debounceArmId = 0;
-  private activeDebounceArmId: number | null = null;
-  /** Monotonic id for correlating syncNow start → finish. */
-  private syncCycleId = 0;
-  private activeSyncCycleId: number | null = null;
-  // #region agent log
-  /** H-editor: keystroke-level activity vs sparse vault "modify" (autosave). */
-  private editorChangeCount = 0;
-  private editorChangesSinceLastVaultModify = 0;
-  private lastEditorChangeAt = 0;
-  private lastEditorChangePath: string | null = null;
-  private lastEditorChangeLogAt = 0;
-  // #endregion
   /** One-shot retry after open/dirty apply deferral (G10) — not the vault-event debounce. */
   private deferredApplyTimerId: number | null = null;
   /** True after vault create/modify/delete/rename hooks are registered (once per load). */
@@ -658,15 +644,9 @@ export default class DropboxSyncPlugin extends Plugin {
       const sections = getEnabledBackgroundSections(this.settings);
       scopeLabel = formatBackgroundSectionsLabel(sections);
     }
-    // #region agent log
     if (this.syncing) {
-      this.debounceTrace("syncNow SKIP already syncing", {
-        trigger,
-        ...this.debounceSnapshot(),
-      });
       return;
     }
-    // #endregion
     if (!this.settings.syncName) {
       new Notice("Dropbox sync: set a vault ID in settings first.");
       return;
@@ -687,16 +667,6 @@ export default class DropboxSyncPlugin extends Plugin {
 
     const startedAt = Date.now();
     this.syncing = true;
-    this.syncCycleId += 1;
-    this.activeSyncCycleId = this.syncCycleId;
-    // #region agent log
-    this.debounceTrace("syncNow START", {
-      trigger,
-      syncCycleId: this.activeSyncCycleId,
-      scopeLabel,
-      ...this.debounceSnapshot(),
-    });
-    // #endregion
     // Manual always gets interactive UX; background may promote after plan is ready.
     this.interactiveUi = manual;
     this.backgroundPromoteSections = manual
@@ -1220,20 +1190,6 @@ export default class DropboxSyncPlugin extends Plugin {
       this.progressSection = null;
       this.syncDeletedByEngine.clear();
       this.abortController = null;
-      // #region agent log
-      this.debounceTrace("syncNow FINALLY before follow-ups", {
-        trigger,
-        syncCycleId: this.activeSyncCycleId,
-        outcome,
-        durationMs: endedAt - startedAt,
-        cursorUpdated,
-        needsResyncAfterRename,
-        deferredCount: deferredCount ?? 0,
-        pendingDeletes: this.engineMgr?.hasPendingDeletes() ?? false,
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
-      this.activeSyncCycleId = null;
       // Keep deferralTracker when paths were deferred so the open-file bound continues.
       if (!(deferredCount && deferredCount > 0)) {
         this.deferralTracker = null;
@@ -1262,16 +1218,8 @@ export default class DropboxSyncPlugin extends Plugin {
       // 미소비 삭제가 있으면 후속 싱크 스케줄 (싱크 중 사용자 삭제 처리)
       if (this.engineMgr?.hasPendingDeletes() && this.settings.backgroundSyncEnabled) {
         this.pendingDebouncedSync = false;
-        // #region agent log
-        this.debounceTrace("finally → scheduleDebounced (pending deletes)", {
-          pendingCount: this.getOrCreateEngine().getDeleteLog().length,
-        });
-        // #endregion
         this.scheduleDebouncedSync("finally:pending-deletes");
       } else if (needsResyncAfterRename) {
-        // #region agent log
-        this.debounceTrace("finally → syncNow in 200ms (rename resync)", {});
-        // #endregion
         window.setTimeout(
           () => void this.syncNow({
             manual: true,
@@ -1286,37 +1234,17 @@ export default class DropboxSyncPlugin extends Plugin {
         // quiet window here so we never sync ~0.5s after upload while typing.
         if (this.pendingDebouncedSync) {
           this.pendingDebouncedSync = false;
-          // #region agent log
-          this.debounceTrace("finally → scheduleDebounced (pending vault activity)", {
-            msSinceLastVaultEvent: Date.now() - this.lastVaultEventAt,
-            debounceSec: this.settings.vaultEventDebounceSec,
-          });
-          // #endregion
           this.scheduleDebouncedSync("finally:pending-vault-activity");
         }
         // Deferred open-file applies now checkpoint the cursor into retrySet — keep
         // longpoll alive, and also wake when the G10 bound can expire.
         if (deferredCount && deferredCount > 0) {
-          // #region agent log
-          this.debounceTrace("finally → scheduleDeferredApplyRetry", {
-            deferredCount,
-          });
-          // #endregion
           this.scheduleDeferredApplyRetry();
         }
         if (cursorUpdated) {
-          // #region agent log
-          this.debounceTrace("finally → longpoll.schedule", { cursorUpdated: true });
-          // #endregion
           this.longpoll?.schedule();
         }
       }
-      // #region agent log
-      this.debounceTrace("finally → rescheduleBackgroundSyncTimer", {
-        eligible: this.isBackgroundSyncTimerEligible(),
-        syncIntervalSec: this.settings.syncInterval,
-      });
-      // #endregion
       this.rescheduleBackgroundSyncTimerIfEnabled();
     }
   }
@@ -1423,25 +1351,11 @@ export default class DropboxSyncPlugin extends Plugin {
         isSyncing: () => this.syncing,
         isEnabled: () => this.settings.backgroundSyncEnabled && !!this.engineMgr?.store,
         onChanges: () => {
-          // #region agent log
-          this.debounceTrace("longpoll onChanges → scheduleDebouncedSync", {
-            ...this.debounceSnapshot(),
-          });
-          // #endregion
           // Debounce so a burst of remote events (and any residual echo) settles
           // with local typing rather than syncing every keystroke mid-upload loop.
           this.scheduleDebouncedSync("longpoll:onChanges");
         },
-        log: (msg, data) => {
-          // #region agent log
-          void this.log(`[debounce-trace] longpoll: ${msg}`, {
-            data,
-            hypothesisId: "H-debounce-trace",
-            ...this.debounceSnapshot(),
-          }, { location: "longpoll", hypothesisId: "H-debounce-trace" });
-          // #endregion
-          return this.log(msg, data);
-        },
+        log: (msg, data) => this.log(msg, data),
       });
     }
     return this.engineMgr;
@@ -1720,41 +1634,6 @@ export default class DropboxSyncPlugin extends Plugin {
     const engine = this.getOrCreateEngine();
     const excludes = this.settings.excludePatterns;
 
-    // #region agent log
-    void this.log("vault events registered", {
-      syncName: this.settings.syncName,
-      syncOnCreateDeleteRename: this.settings.syncOnCreateDeleteRename,
-      hypothesisId: "H-vault-events",
-    }, { location: "main.registerVaultEvents" });
-    // #endregion
-
-    // #region agent log
-    // H-editor: observe editor-change rate vs vault modify (no behavior change).
-    this.registerEvent(
-      this.app.workspace.on("editor-change", (_editor, info) => {
-        const path =
-          info && "file" in info && info.file
-            ? info.file.path
-            : this.app.workspace.getActiveFile()?.path ?? null;
-        this.editorChangeCount += 1;
-        this.editorChangesSinceLastVaultModify += 1;
-        this.lastEditorChangeAt = Date.now();
-        this.lastEditorChangePath = path;
-        // Throttle: at most one ingest line / 500ms while typing.
-        if (Date.now() - this.lastEditorChangeLogAt < 500) return;
-        this.lastEditorChangeLogAt = Date.now();
-        this.debounceTrace("editor-change (sample)", {
-          path,
-          editorChangeCount: this.editorChangeCount,
-          editorChangesSinceLastVaultModify: this.editorChangesSinceLastVaultModify,
-          msSinceLastEditorChange: 0,
-          hypothesisId: "H-editor",
-          ...this.debounceSnapshot(),
-        });
-      }),
-    );
-    // #endregion
-
     this.registerEvent(
       this.app.vault.on("modify", (file) => {
         if (!(file instanceof TFile)) return;
@@ -1767,23 +1646,6 @@ export default class DropboxSyncPlugin extends Plugin {
             "This file has local changes that have not synced to Dropbox yet",
           );
         }
-        // #region agent log
-        const active = this.app.workspace.getActiveFile();
-        const msSinceEditorChange = this.lastEditorChangeAt
-          ? Date.now() - this.lastEditorChangeAt
-          : null;
-        this.debounceTrace("vault modify", {
-          path: file.path,
-          isActiveFile: active?.path === file.path,
-          activePath: active?.path ?? null,
-          editorChangesSinceLastVaultModify: this.editorChangesSinceLastVaultModify,
-          msSinceEditorChange,
-          lastEditorChangePath: this.lastEditorChangePath,
-          hypothesisId: "H-autosave-gap",
-          ...this.debounceSnapshot(),
-        });
-        this.editorChangesSinceLastVaultModify = 0;
-        // #endregion
         this.noteVaultActivityAndScheduleDebounce("vault:modify");
       }),
     );
@@ -1846,12 +1708,6 @@ export default class DropboxSyncPlugin extends Plugin {
           );
         }
         if (!this.settings.syncOnCreateDeleteRename) return;
-        // #region agent log
-        this.debounceTrace("vault create", {
-          path: file.path,
-          ...this.debounceSnapshot(),
-        });
-        // #endregion
         this.noteVaultActivityAndScheduleDebounce("vault:create");
       }),
     );
@@ -1892,19 +1748,8 @@ export default class DropboxSyncPlugin extends Plugin {
     if (!this.isBackgroundSyncTimerEligible()) return;
     this.clearSyncTimer();
     const intervalMs = this.settings.syncInterval * 1000;
-    // #region agent log
-    this.debounceTrace("arm background syncInterval timer", {
-      intervalMs,
-      syncIntervalSec: this.settings.syncInterval,
-    });
-    // #endregion
     this.syncTimerId = window.setTimeout(() => {
       this.syncTimerId = null;
-      // #region agent log
-      this.debounceTrace("background syncInterval FIRE → syncNow", {
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
       void this.syncNow({ trigger: "timer:syncInterval" });
     }, intervalMs);
   }
@@ -1920,23 +1765,9 @@ export default class DropboxSyncPlugin extends Plugin {
    * finished and re-upload every autosave during continuous typing.
    */
   private noteVaultActivityAndScheduleDebounce(reason: string): void {
-    const prevLast = this.lastVaultEventAt;
     this.lastVaultEventAt = Date.now();
-    // #region agent log
-    this.debounceTrace("noteVaultActivity", {
-      reason,
-      msSincePrevVaultEvent: prevLast ? this.lastVaultEventAt - prevLast : null,
-      ...this.debounceSnapshot(),
-    });
-    // #endregion
     if (this.syncing) {
       this.pendingDebouncedSync = true;
-      // #region agent log
-      this.debounceTrace("noteVaultActivity → pending only (syncing)", {
-        reason,
-        pendingDebouncedSync: true,
-      });
-      // #endregion
       return;
     }
     this.scheduleDebouncedSync(reason);
@@ -1944,30 +1775,12 @@ export default class DropboxSyncPlugin extends Plugin {
 
   private scheduleDebouncedSync(reason = "unspecified"): void {
     if (!this.settings.backgroundSyncEnabled) {
-      // #region agent log
-      this.debounceTrace("scheduleDebouncedSync SKIP (background off)", { reason });
-      // #endregion
       return;
     }
-    const hadTimer = this.debounceTimerId !== null;
-    const cancelledArmId = this.activeDebounceArmId;
     this.clearDebounceTimer();
     const debounceMs = this.settings.vaultEventDebounceSec * 1000;
-    this.debounceArmId += 1;
-    const armId = this.debounceArmId;
-    this.activeDebounceArmId = armId;
     // R13: settle local bursts before uploading. This debounce covers vault-event
     // triggers and longpoll echoes — timer resets on each event (G18).
-    // #region agent log
-    this.debounceTrace("scheduleDebouncedSync ARM", {
-      reason,
-      armId,
-      debounceMs,
-      cancelledPreviousTimer: hadTimer,
-      cancelledArmId,
-      ...this.debounceSnapshot(),
-    });
-    // #endregion
     void this.log("scheduling debounced sync for settled burst", {
       debounceSec: this.settings.vaultEventDebounceSec,
       syncing: this.syncing,
@@ -1977,7 +1790,6 @@ export default class DropboxSyncPlugin extends Plugin {
       appliesTo: "vault_events_and_longpoll",
       oneConflictCopyPerPath: false,
       reason,
-      armId,
     }, {
       category: SyncLogCategories.cycle,
       ruleId: "R13",
@@ -1986,81 +1798,29 @@ export default class DropboxSyncPlugin extends Plugin {
     });
     this.debounceTimerId = window.setTimeout(() => {
       this.debounceTimerId = null;
-      // #region agent log
-      this.debounceTrace("debounce timer FIRE", {
-        armId,
-        reason,
-        stillActiveArm: this.activeDebounceArmId === armId,
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
-      if (this.activeDebounceArmId === armId) {
-        this.activeDebounceArmId = null;
-      }
-      this.fireDebouncedSync(reason, armId);
+      this.fireDebouncedSync(reason);
     }, debounceMs);
   }
 
   /** Start sync only after a full quiet window since lastVaultEventAt. */
-  private fireDebouncedSync(reason = "unspecified", armId: number | null = null): void {
+  private fireDebouncedSync(reason = "unspecified"): void {
     const debounceMs = this.settings.vaultEventDebounceSec * 1000;
     const quietMs = this.lastVaultEventAt
       ? Date.now() - this.lastVaultEventAt
       : debounceMs;
     if (this.syncing) {
       this.pendingDebouncedSync = true;
-      // #region agent log
-      this.debounceTrace("fireDebouncedSync → pending (syncing)", {
-        reason,
-        armId,
-        quietMs,
-        debounceMs,
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
       return;
     }
     if (quietMs < debounceMs) {
       const remainingMs = debounceMs - quietMs;
-      // #region agent log
-      this.debounceTrace("fireDebouncedSync → re-arm (not quiet)", {
-        reason,
-        armId,
-        quietMs,
-        remainingMs,
-        debounceMs,
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
       this.clearDebounceTimer();
-      this.debounceArmId += 1;
-      const reArmId = this.debounceArmId;
-      this.activeDebounceArmId = reArmId;
       this.debounceTimerId = window.setTimeout(() => {
         this.debounceTimerId = null;
-        // #region agent log
-        this.debounceTrace("debounce re-arm timer FIRE", {
-          reArmId,
-          reason,
-          ...this.debounceSnapshot(),
-        });
-        // #endregion
-        if (this.activeDebounceArmId === reArmId) {
-          this.activeDebounceArmId = null;
-        }
-        this.fireDebouncedSync(`${reason}:rearm`, reArmId);
+        this.fireDebouncedSync(`${reason}:rearm`);
       }, remainingMs);
       return;
     }
-    // #region agent log
-    this.debounceTrace("fireDebouncedSync → syncNow", {
-      reason,
-      armId,
-      quietMs,
-      debounceMs,
-      ...this.debounceSnapshot(),
-    });
-    // #endregion
     void this.syncNow({ trigger: `debounce:${reason}` });
   }
 
@@ -2068,56 +1828,31 @@ export default class DropboxSyncPlugin extends Plugin {
   private scheduleDeferredApplyRetry(): void {
     if (!this.settings.backgroundSyncEnabled) return;
     if (this.deferredApplyTimerId !== null) {
-      // #region agent log
-      this.debounceTrace("scheduleDeferredApplyRetry SKIP (already armed)", {});
-      // #endregion
       return;
     }
     const remainingMs = this.deferralTracker?.minRemainingMs() ?? ACTIVE_FILE_DEFERRAL_MS;
     // Floor at vault debounce so we do not spin tighter than local-edit settle.
     const delayMs = Math.max(remainingMs, this.settings.vaultEventDebounceSec * 1000);
-    // #region agent log
-    this.debounceTrace("scheduleDeferredApplyRetry ARM", {
-      delayMs,
-      remainingMs,
-      boundMs: ACTIVE_FILE_DEFERRAL_MS,
-    });
-    // #endregion
     void this.log("scheduling deferred open-file apply retry", {
       delayMs,
       remainingMs,
       boundMs: ACTIVE_FILE_DEFERRAL_MS,
-      hypothesisId: "H-defer",
     }, { hypothesisId: SyncHypotheses.cursorStall, location: "main.scheduleDeferredApplyRetry" });
     this.deferredApplyTimerId = window.setTimeout(() => {
       this.deferredApplyTimerId = null;
-      // #region agent log
-      this.debounceTrace("deferredApplyRetry FIRE → syncNow", {
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
       void this.syncNow({ trigger: "timer:deferredApplyRetry" });
     }, delayMs);
   }
 
   private clearDebounceTimer(): void {
     if (this.debounceTimerId !== null) {
-      // #region agent log
-      this.debounceTrace("clearDebounceTimer", {
-        clearedArmId: this.activeDebounceArmId,
-      });
-      // #endregion
       window.clearTimeout(this.debounceTimerId);
       this.debounceTimerId = null;
-      this.activeDebounceArmId = null;
     }
   }
 
   private clearDeferredApplyTimer(): void {
     if (this.deferredApplyTimerId !== null) {
-      // #region agent log
-      this.debounceTrace("clearDeferredApplyTimer", {});
-      // #endregion
       window.clearTimeout(this.deferredApplyTimerId);
       this.deferredApplyTimerId = null;
     }
@@ -2131,12 +1866,6 @@ export default class DropboxSyncPlugin extends Plugin {
    */
   private async flushDeferredAppliesAfterLeafChange(): Promise<void> {
     if (!this.settings.backgroundSyncEnabled || this.syncing) {
-      // #region agent log
-      this.debounceTrace("leaf flush SKIP", {
-        backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
-        ...this.debounceSnapshot(),
-      });
-      // #endregion
       return;
     }
     const store = this.engineMgr?.store;
@@ -2147,65 +1876,16 @@ export default class DropboxSyncPlugin extends Plugin {
       (entry) => !shouldDeferApplyForOpenEditors(this.app, entry.localPath),
     );
     if (unlocked.length === 0) return;
-    // #region agent log
-    this.debounceTrace("leaf flush → syncNow immediate", {
-      unlocked: unlocked.map((e) => e.localPath).slice(0, 5),
-      retrySetSize: retryEntries.length,
-      hypothesisId: "H-leaf-flush",
-      runId: "post-fix",
-    });
-    // #endregion
     this.clearDeferredApplyTimer();
     void this.syncNow({ trigger: "leaf:flush-deferred" });
   }
 
   private clearSyncTimer(): void {
     if (this.syncTimerId !== null) {
-      // #region agent log
-      this.debounceTrace("clearSyncTimer (syncInterval)", {});
-      // #endregion
       window.clearTimeout(this.syncTimerId);
       this.syncTimerId = null;
     }
   }
-
-  // #region agent log
-  /** Compact timer/vault state for debounce forensics (session H-debounce-trace). */
-  private debounceSnapshot(): Record<string, unknown> {
-    return {
-      syncing: this.syncing,
-      pendingDebouncedSync: this.pendingDebouncedSync,
-      debounceTimerArmed: this.debounceTimerId !== null,
-      activeDebounceArmId: this.activeDebounceArmId,
-      deferredApplyArmed: this.deferredApplyTimerId !== null,
-      syncIntervalArmed: this.syncTimerId !== null,
-      msSinceLastVaultEvent: this.lastVaultEventAt
-        ? Date.now() - this.lastVaultEventAt
-        : null,
-      debounceSec: this.settings.vaultEventDebounceSec,
-      syncIntervalSec: this.settings.syncInterval,
-      backgroundSyncEnabled: this.settings.backgroundSyncEnabled,
-      activeSyncCycleId: this.activeSyncCycleId,
-    };
-  }
-
-  /**
-   * Debounce forensics → vault log file + Cursor Debug ingest (requestUrl via
-   * postCursorDebugLogLine). Never use fetch/hardcoded ingest URLs here.
-   */
-  private debounceTrace(event: string, data: Record<string, unknown>): void {
-    void this.log(`[debounce-trace] ${event}`, {
-      ...data,
-      t: Date.now(),
-    }, {
-      location: "main.debounceTrace",
-      hypothesisId: "H-debounce-trace",
-      category: SyncLogCategories.cycle,
-      level: "debug",
-      temp: "P4",
-    });
-  }
-  // #endregion
 
   // ── Private: UI ──
 

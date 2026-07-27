@@ -571,12 +571,6 @@ async function executeDownloadItem(
   });
   emitPathNotice(deps, item, { remotePathDisplay: metadata.pathDisplay });
   if (deps.reloadOpenFile) {
-    // #region agent log
-    logTemp(deps.log, "P4", "reload open markdown after download", {
-      path: localPath,
-      hypothesisId: "H-reload",
-    }, { location: "executor.executeDownloadItem" });
-    // #endregion
     await deps.reloadOpenFile(localPath);
   }
 }

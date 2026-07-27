@@ -26,9 +26,6 @@ export class LongpollManager {
   schedule(): void {
     if (!this.config.isEnabled()) return;
     this.clearTimer();
-    void this.config.log("longpoll schedule (1s delay before run)", {
-      hypothesisId: "H-debounce-trace",
-    });
     this.timerId = window.setTimeout(() => {
       this.timerId = null;
       void this.run();
@@ -80,11 +77,6 @@ export class LongpollManager {
       }
 
       this.errorCount = 0;
-
-      await this.config.log("longpoll result", {
-        changes: result.changes,
-        hypothesisId: "H-debounce-trace",
-      });
 
       if (result.changes) {
         this.config.onChanges();
