@@ -401,6 +401,13 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
     return localFiles.some((f) => f.pathLower.startsWith(prefix));
   };
 
+  // Local folder gone while base still remembers it: treat as tree wipe unless
+  // orphan files remain under the path (then restore the folder shell only).
+  // Vault folder delete intents are often dropped as out-of-scope, so inference
+  // must cover the same case as deleteIntended for full-folder deletes.
+  const shouldInferRemoteFolderDelete = (folderPathLower: string): boolean =>
+    !hasLocalFilesUnder(folderPathLower);
+
   const allPathLowers = new Set<string>();
   for (const k of localMap.keys()) allPathLowers.add(k);
   for (const k of remoteMap.keys()) allPathLowers.add(k);
@@ -472,11 +479,22 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
     }
 
     if (!localExists && remoteExists) {
-      if (deleteIntended) {
+      if (deleteIntended || (base && shouldInferRemoteFolderDelete(pathLower))) {
+        const inferred = !deleteIntended && !!base;
+        logRule(log, SyncRules.R14, inferred
+          ? "inferred deleteRemoteFolder — local tree wipe without folder delete intent"
+          : "deleteRemoteFolder — folder delete intended", {
+          path: pathLower,
+          deleteIntended: !!deleteIntended,
+          inferred,
+        }, { location: "plan-enhancements.planFolderItems" });
         items.push({
           pathLower,
           localPath,
-          action: { type: "deleteRemoteFolder", reason: "deleted_on_local" },
+          action: {
+            type: "deleteRemoteFolder",
+            reason: deleteIntended ? "deleted_on_local" : "inferred_local_tree_wipe",
+          },
         });
       } else if (!isSyncRootFolderPath(pathLower) && !isSyncRootFolderPath(localPath)) {
         // Local vault root is already present — do not mkdir "".

@@ -10,18 +10,18 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 |---|---|---|
 | Unit / planner | Pure decisions, adapters in memory | `bun test` under `test/` |
 | Scenario matrix | One test slot per scenario row 1–101 | `test/simulation/scenario-matrix.test.ts` |
-| Coverage map | Which rows are real vs `todo` | `qa-test-vault/SIMULATION_COVERAGE.md` |
+| Coverage map | Which rows are real vs `todo` | `qa/SIMULATION_COVERAGE.md` |
 | Manual QA vault | Real Dropbox + sandboxed Obsidian | `bun run qa:open` → in-repo `qa-test-vault/` via `obsidian-launcher` |
 
 `test.todo` rows are intentional: open-editor deferral, large binaries, and re-link UI need harness work or a human Dropbox peer. Claiming a row means adding a `run` and updating the coverage map.
 
-After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa-test-vault/SIMULATION_COVERAGE.md`](../qa-test-vault/SIMULATION_COVERAGE.md).
+After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).
 
 ```mermaid
 flowchart LR
   Spec[docs/sync-scenarios.md rows] --> Matrix[scenario-matrix.test.ts]
   Matrix --> Sims[SyncSimulator + MemoryRemote]
-  Spec --> Runbooks[qa-test-vault runbooks]
+  Spec --> Runbooks[qa/templates runbooks]
   Runbooks --> Vault["qa-test-vault/ + obsidian-launcher"]
   Vault --> Ingest[Cursor Debug NDJSON]
 ```
@@ -37,8 +37,10 @@ flowchart LR
 
 ### Manual QA cycle
 
-1. `bun run qa:open` builds, reseeds `qa-test-vault/`, and launches sandboxed Obsidian (`obsidian-launcher watch --plugin ./dist`). OAuth/`data.json` persist (no `--copy` by default).
+1. `bun run qa:open` builds, reseeds `qa-test-vault/` from `qa/` templates, and launches sandboxed Obsidian (`obsidian-launcher watch --plugin ./dist`). OAuth/`data.json` persist (no `--copy` by default).
 2. Or `qa:generate` + `qa:deploy` into `SYNC_TESTER_VAULT` / `~/Documents/sync-tester` for system Obsidian.
+
+Harness sources (`qa/generate.mjs`, `qa/templates/`) live **outside** the vault so deleting folders in Obsidian cannot wipe tracked runbooks.
 3. Follow a runbook; capture decisions via debug ingest — see [Cursor Debug ingest](cursor-debug-ingest.md).
 
 ## Technical details

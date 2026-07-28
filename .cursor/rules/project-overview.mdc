@@ -17,7 +17,8 @@ src/sync/                              — Planner, executor, engine, guards, lo
 src/adapters/                          — FileSystem, RemoteStorage, SyncStateStore implementations
 src/ui/                                — Settings tab, modals, status bar
 test/                                  — bun:test unit + simulation tests
-qa-test-vault/                         — In-repo manual QA vault (generate + runbooks; open via obsidian-launcher)
+qa/                                    — QA harness (generate.mjs, templates, coverage map)
+qa-test-vault/                         — Generated manual QA vault only (gitignored; open via obsidian-launcher)
 docs/                                  — User-facing and agent tooling docs
 dist/                                  — Build output (main.js, etc.) copied into the test vault
 ```
@@ -37,7 +38,7 @@ UI Layer → SyncEngine (Planner → Executor) → Adapters (FileSystem, RemoteS
 3. **Preserve originals**: on conflict/failure, keep both sides’ originals
 4. **path_lower keys**: Dropbox is case-insensitive; use `path_lower` as the comparison key
 5. **Dev / QA open**: `bun run qa:open` (alias `open-qa`) — build → generate → prepare Cursor Debug ingest → sandboxed Obsidian. `bun run qa:restart` — same after **erasing** the local vault (auth/state included; Dropbox remote untouched). `bun run qa:empty` — wipe local vault with **no** `_seeds/` (join/rejoin). From a Debug Mode chat prefer **`/debug-ready-vault`** or **`/debug-empty-vault`** (agent passes `CURSOR_DEBUG_*` from this session). Bare terminal `qa:restart`/`qa:empty` without those env vars reuses a stale offer. System Obsidian: `bun run qa:deploy`
-6. **Test vault**: default is in-repo `qa-test-vault/` (generated content gitignored). Override with `SYNC_TESTER_VAULT`. Reseed with `bun run qa:generate` / `qa:reset` (see `qa-test-vault/README.md`); generator never clobbers plugin `data.json`
+6. **Test vault**: default is in-repo `qa-test-vault/` (entirely generated, gitignored). Harness sources live in `qa/`. Override vault path with `SYNC_TESTER_VAULT`. Reseed with `bun run qa:generate` / `qa:reset` (see `qa/README.md`); generator never clobbers plugin `data.json`
 
 ## Mobile / Cursor Debug ingest (live logs)
 

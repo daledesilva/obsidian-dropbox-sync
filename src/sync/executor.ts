@@ -434,16 +434,34 @@ async function verifyCoalescedFolderDeletes(
       continue;
     }
 
-    const livePaths = new Set(live.map((f) => f.pathLower));
+    // Planned deletes are files only. Live listings may include nested folders and
+    // the folder path itself — exclude those from set equality so a complete file
+    // match still authorises recursive folder delete (empty nested dirs go with it).
+    const folderLower = folder.toLowerCase().replace(/\/+$/, "");
+    const liveFiles = live.filter(
+      (entry) => !entry.isFolder && entry.pathLower !== folderLower,
+    );
+    const livePaths = new Set(liveFiles.map((f) => f.pathLower));
     const setsEqual =
       livePaths.size === planned.size
       && [...planned].every((pathLower) => livePaths.has(pathLower));
 
     if (!setsEqual) {
+      const liveOnly = [...livePaths].filter((pathLower) => !planned.has(pathLower)).slice(0, 8);
+      const plannedOnly = [...planned].filter((pathLower) => !livePaths.has(pathLower)).slice(0, 8);
+      const liveFolders = live.filter((f) => f.isFolder).map((f) => f.pathLower).slice(0, 8);
+      // Include liveOnly / liveFolders so logs show whether an extra file or nested
+      // folder blocked coalesce (self-folder entries are already filtered above).
       log?.("exec folder verify set mismatch — file deletes only", {
         folder,
         planned: planned.size,
         live: livePaths.size,
+        liveFileCount: liveFiles.length,
+        liveFolderCount: live.filter((f) => f.isFolder).length,
+        liveOnly,
+        plannedOnly,
+        liveFolders,
+        rawLiveCount: live.length,
       }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.verifyFolder" });
       remainingFileItems.push(...covered);
       continue;

@@ -45,7 +45,7 @@ For a full QA vault open with ingest already matched to this Debug session, pref
    - Local `dist/` copy includes working-tree code; CI/release builds do not.
    - Desktop QA: `bun run qa:open` (sandboxed Obsidian + in-repo `qa-test-vault/`)
    - System Obsidian / external vault: `bun run qa:deploy` (default `~/Documents/sync-tester`)
-   - Reseed vault content (keeps auth): `bun run qa:generate` — see `qa-test-vault/README.md`
+   - Reseed vault content (keeps auth): `bun run qa:generate` — see `qa/README.md`
    - iPad: copy built plugin into the vault’s `.obsidian/plugins/dropbox-sync/` (manual).
 
 7. **Reproduce**, then **read** `.cursor/debug-<sessionId>.log` and cite line evidence before fixing.

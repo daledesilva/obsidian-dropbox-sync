@@ -415,7 +415,8 @@ export class MemoryRemoteStorage implements RemoteStorage {
   }
 
   /**
-   * Test double for live folder verify: non-deleted files under folder/ prefix.
+   * Live children under folder for R14 verify. Includes nested files and empty
+   * subfolders; never the folder path itself (self-membership breaks set equality).
    */
   // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
   async listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]> {
@@ -431,7 +432,8 @@ export class MemoryRemoteStorage implements RemoteStorage {
     }
     for (const folderKey of this.folders.keys()) {
       const normalized = folderKey.replace(/\/+$/, "").toLowerCase();
-      if (normalized === folder || normalized.startsWith(prefix)) {
+      // Exclude the folder being listed — only nested empty dirs belong in the live set.
+      if (normalized !== folder && normalized.startsWith(prefix)) {
         listed.push({
           pathLower: normalized,
           contentHash: "",

@@ -27,3 +27,5 @@
 - Delete guard prompt and outcome.
 - Coalesced folder delete vs per-file deletes in the plan/executor logs.
 - Membership verification / blocker path if present.
+- `deleteRemoteFolder` or `inferred_local_tree_wipe` for the folder itself — not `createLocalFolder` / `folder_restored` for the same path in that cycle.
+- Exec verify: `folderPaths > 0` when membership matches (file-only compare); mismatch logs include `liveOnly` / `liveFolders`.

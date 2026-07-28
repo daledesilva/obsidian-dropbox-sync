@@ -81,8 +81,9 @@ export interface RemoteStorage {
    */
   deleteBatch(paths: string[]): Promise<RemoteDeleteBatchEntryResult[]>;
   /**
-   * Live-list non-deleted files under a vault-relative folder (recursive).
-   * Folder-delete coalesce requires this set to exactly match the planned deletes.
+   * Live-list non-deleted children under a vault-relative folder (recursive).
+   * Includes nested files and empty subfolders; never the folder path itself.
+   * Folder-delete coalesce requires the live **file** set to match planned deletes.
    */
   listFilePathLowersUnder(folderPath: string): Promise<RemoteListedFile[]>;
   move(from: string, to: string): Promise<RemoteEntry>;

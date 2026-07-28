@@ -1,6 +1,8 @@
 # Sync QA Test Vault
 
-Regenerable Dropbox sync playground for **manual integration** checks on branch `release_0.2`. Automated correctness stays in `bun test` (planner, guards, `test/simulation/`). This vault is for real Dropbox + sandboxed Obsidian + debug-ingest log capture.
+Regenerable Dropbox sync playground for **manual integration** checks on branch `release_0.2`. Automated correctness stays in `bun test` (planner, guards, `test/simulation/`). This harness generates a vault for real Dropbox + sandboxed Obsidian + debug-ingest log capture.
+
+**Tracked sources live here in `qa/`.** The vault itself (`qa-test-vault/`) is entirely generated and gitignored — deleting folders inside Obsidian cannot wipe templates or this README.
 
 There is **no** automated Obsidian↔Dropbox e2e. OAuth stays a one-time human step.
 
@@ -67,19 +69,25 @@ For **runbook 10 (Joining or rejoining)**, use `bun run qa:empty` (empty vault).
 5. Agent: read `.cursor/debug-<sessionId>.log` and compare to the runbook’s expected outcome / log signals.
 6. After a dirty scenario: wipe remote folder if needed, then `bun run qa:reset`.
 
-## Layout (generated)
+## Layout
 
 ```
-qa-test-vault/          # also the vault root (default)
-  START_HERE.md         # vault landing note (tooling README.md stays tracked)
-  _runbooks/            # human scripts (01–13 + INDEX)
-  _seeds/               # baseline notes, case, folders, binaries, bulk, exclude-bait
+qa/                       # tracked harness (this folder)
+  generate.mjs
+  README.md
+  SIMULATION_COVERAGE.md
+  templates/
+    VAULT_README.md       # copied into vault as START_HERE.md
+    _runbooks/            # copied into vault as _runbooks/
+
+qa-test-vault/            # generated vault root (gitignored)
+  START_HERE.md
+  _runbooks/
+  _seeds/
   .obsidian/
     app.json
     community-plugins.json
     plugins/dropbox-sync/   # from obsidian-launcher --plugin ./dist
-  generate.mjs          # tracked
-  templates/            # tracked
 ```
 
 ## Source of truth for scenarios

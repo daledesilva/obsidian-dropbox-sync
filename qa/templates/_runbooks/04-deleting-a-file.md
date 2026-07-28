@@ -27,3 +27,4 @@
 - deleteRemote (or coalesced folder delete) for the path.
 - Guard prompt / skip when bulk exceeds threshold.
 - Cursor finalize only when delete log allows it.
+- Deleting a whole folder: `deleteRemoteFolder` / `inferred_local_tree_wipe` (or coalesced folder path) — empty folders must not remain on Dropbox or sync back locally.

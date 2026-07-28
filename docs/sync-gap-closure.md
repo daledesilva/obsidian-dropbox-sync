@@ -56,7 +56,9 @@ flowchart TB
 
 1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone.
 2. Peer deletes a remote folder → local **empty** folder becomes `deleteLocalFolder` (do not re-upload it). If the local folder still holds unmanaged files that were never on Dropbox, skip the folder wipe and only remove tracked children via the file planner.
-3. Incremental sync still seeds folder rows from base (folders have no content hash/rev); otherwise the folder vanishes from the remote map and a child download can be wiped by a false `deleteLocalFolder`.
+3. Local deletes a folder (or its whole tree) → `deleteRemoteFolder` when the folder path is in the delete log **or** when base still knows the folder, local is gone, and no orphan local files remain under it (`inferred_local_tree_wipe`). Without that inference, missing folder delete intents restored empty shells via `createLocalFolder`.
+4. Incremental sync still seeds folder rows from base (folders have no content hash/rev); otherwise the folder vanishes from the remote map and a child download can be wiped by a false `deleteLocalFolder`.
+5. R14 coalesce live-verify compares **files only** (ignores nested/self folder entries) so complete file deletes still collapse to a recursive folder delete.
 
 ### Cursor progress with failures (G27 / G10 / G30)
 
@@ -81,7 +83,7 @@ flowchart TB
 | Moves / folders | `plan-enhancements.ts`, `remote-move.ts` (two-step case move) |
 | Transport | `upload-chunk.ts`, `vault-adapter` temp writes, `permanent-skip.ts`, `retry-set.ts` |
 | Deferrals / editors | `deferral-tracker.ts`, `open-editors.ts` |
-| Scenario harness | See [Sync scenario testing](sync-scenario-testing.md) — matrix + `qa-test-vault/` |
+| Scenario harness | See [Sync scenario testing](sync-scenario-testing.md) — matrix + `qa/` harness / `qa-test-vault/` |
 | Contract / historical gaps | `docs/sync-scenarios.md` (gap table wording is the pre-fix audit; behaviour lives here and in code) |
 
 ClickUp phase tickets (Os: 0.1): `86d3u7bfu` … `86d3u7bjk`. Implementation commit on `release_0.2`: `86a8714`.

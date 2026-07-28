@@ -499,8 +499,12 @@ export class DropboxAdapter implements RemoteStorage {
             });
           } else if (entry[".tag"] === "folder") {
             const stripped = this.stripRemotePrefix(entry.path_lower).replace(/\/+$/, "");
+            const pathLower = stripped.toLowerCase();
+            // list_folder children only — never treat the queried folder as its own member
+            // (that +1 entry made R14 exec verify fail and skipped coalesced folder deletes).
+            if (pathLower === folder.toLowerCase()) continue;
             listed.push({
-              pathLower: stripped.toLowerCase(),
+              pathLower,
               contentHash: "",
               isFolder: true,
             });
