@@ -55,11 +55,11 @@ flowchart TB
 
 ### File and folder renames / moves (G7 / G8)
 
-Content-preserving path changes become server-side moves via plan enhancements — see [Rename and move detection](rename-move-detection.md). Folder matches run before file matches; executor rewrites the whole sync-base prefix after a folder move.
+Content-preserving path changes **prefer** server-side moves via plan enhancements when detection is confident — unique-hash file moves (G7) and **populated** folders whose relative tree is unchanged (G8). See [Rename and move detection](rename-move-detection.md). Folder matches run before file matches; executor rewrites the whole sync-base prefix after a folder move. Ambiguous or compound cases (empty folder rename, folder + inner rename in one cycle, partial restructures) **fall back to create + delete** — that is accepted, not a gap regression.
 
-### Empty folders (G8)
+### Empty folders (G8 modelling)
 
-1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone.
+1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone. Empty **renames** are not detected as `move*Folder`.
 2. Peer deletes a remote folder → local **empty** folder becomes `deleteLocalFolder` (do not re-upload it). If the local folder still holds unmanaged files that were never on Dropbox, skip the folder wipe and only remove tracked children via the file planner.
 3. Same cycle as a remote tree wipe: when every local child under the folder is already planned `deleteLocal`, also plan `deleteLocalFolder` and execute it **after** the file deletes so the empty shell does not linger until the next sync.
 4. Local deletes a folder (or its whole tree) → `deleteRemoteFolder` when the folder path is in the delete log **or** when base still knows the folder, local is gone, and no orphan local files remain under it (`inferred_local_tree_wipe`). Without that inference, missing folder delete intents restored empty shells via `createLocalFolder`.

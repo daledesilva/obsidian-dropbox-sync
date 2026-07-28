@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { enhanceSyncPlan } from "@/sync/plan-enhancements";
+import { enhanceSyncPlan, isSyncRootFolderPath } from "@/sync/plan-enhancements";
 import type { FileInfo, FolderInfo, RemoteEntry, SyncEntry, SyncPlanItem } from "@/types";
 import { emptySyncPlanStats } from "@/types";
 
@@ -78,6 +78,35 @@ function emptyPlan(items: SyncPlanItem[] = []) {
 function actionsOf(plan: { items: SyncPlanItem[] }, type: string): SyncPlanItem[] {
   return plan.items.filter((i) => i.action.type === type);
 }
+
+function folderMovePaths(
+  plan: { items: SyncPlanItem[] },
+  type: "moveRemoteFolder" | "moveLocalFolder",
+): { fromPath: string; toPath: string }[] {
+  return actionsOf(plan, type).map((item) => {
+    const action = item.action as { fromPath: string; toPath: string };
+    return { fromPath: action.fromPath, toPath: action.toPath };
+  });
+}
+
+function isRootishPath(path: string): boolean {
+  const trimmed = path.trim();
+  return trimmed === "" || trimmed === "/";
+}
+
+describe("isSyncRootFolderPath", () => {
+  test("empty, slash, and whitespace-only are sync root", () => {
+    expect(isSyncRootFolderPath("")).toBe(true);
+    expect(isSyncRootFolderPath("/")).toBe(true);
+    expect(isSyncRootFolderPath("  ")).toBe(true);
+    expect(isSyncRootFolderPath(" / ")).toBe(true);
+  });
+
+  test("normal folder paths are not sync root", () => {
+    expect(isSyncRootFolderPath("notes")).toBe(false);
+    expect(isSyncRootFolderPath("seeds/notes")).toBe(false);
+  });
+});
 
 describe("enhanceSyncPlan G7 file content renames", () => {
   test("local rename (same parent) → moveRemote, not upload+deleteRemote", () => {
@@ -396,7 +425,7 @@ describe("enhanceSyncPlan G8 folder renames / moves", () => {
     expect(actionsOf(plan, "deleteLocalFolder")).toHaveLength(0);
   });
 
-  test("empty folder rename with unique destination → moveRemoteFolder", () => {
+  test("empty folder rename → create+delete fallback (no moveRemoteFolder)", () => {
     const plan = enhanceSyncPlan(emptyPlan(), {
       localFiles: [],
       localFolders: [mkFolder("a"), mkFolder("a/newname")],
@@ -410,14 +439,13 @@ describe("enhanceSyncPlan G8 folder renames / moves", () => {
       ],
     });
 
-    const folderMoves = actionsOf(plan, "moveRemoteFolder");
-    expect(folderMoves).toHaveLength(1);
-    expect(folderMoves[0]!.action).toMatchObject({
-      type: "moveRemoteFolder",
-      fromPath: "a/oldname",
-      toPath: "a/newname",
-      reason: "empty_folder_rename",
-    });
+    expect(actionsOf(plan, "moveRemoteFolder")).toHaveLength(0);
+    expect(actionsOf(plan, "createRemoteFolder").some(
+      (i) => i.pathLower === "a/newname",
+    )).toBe(true);
+    expect(actionsOf(plan, "deleteRemoteFolder").some(
+      (i) => i.pathLower === "a/oldname",
+    )).toBe(true);
   });
 
   test("ambiguous empty folders → no folder move", () => {
@@ -444,6 +472,283 @@ describe("enhanceSyncPlan G8 folder renames / moves", () => {
     )).toBe(true);
     expect(actionsOf(plan, "deleteRemoteFolder").some(
       (i) => i.pathLower === "a/old",
+    )).toBe(true);
+  });
+
+  test("sync-root is never a folder-rename endpoint", () => {
+    // Remnant empty shell gone locally; vault root appears as a local folder candidate.
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [],
+      localFolders: [mkFolder(""), mkFolder("/")],
+      remoteEntries: [
+        mkRemoteFolder("remnant"),
+      ],
+      baseEntries: [
+        mkFolderBase("remnant"),
+      ],
+    });
+
+    const moves = [
+      ...folderMovePaths(plan, "moveRemoteFolder"),
+      ...folderMovePaths(plan, "moveLocalFolder"),
+    ];
+    expect(moves.some(
+      (m) => isRootishPath(m.fromPath) || isRootishPath(m.toPath),
+    )).toBe(false);
+    expect(actionsOf(plan, "moveRemoteFolder")).toHaveLength(0);
+  });
+
+  test("empty folder does not claim a non-empty renamed parent", () => {
+    // Thread false-pair: empty-keep → seeds (renamed) while notes live under the parent.
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [mkFile("seeds (renamed)/notes/a.md", "a1")],
+      localFolders: [
+        mkFolder("seeds (renamed)"),
+        mkFolder("seeds (renamed)/notes"),
+      ],
+      remoteEntries: [
+        mkRemoteFolder("seeds"),
+        mkRemoteFolder("seeds/notes"),
+        mkRemoteFolder("seeds/empty-keep"),
+        mkRemoteFile("seeds/notes/a.md", "a1"),
+      ],
+      baseEntries: [
+        mkFolderBase("seeds"),
+        mkFolderBase("seeds/notes"),
+        mkFolderBase("seeds/empty-keep"),
+        mkFileBase("seeds/notes/a.md", "a1"),
+      ],
+    });
+
+    expect(folderMovePaths(plan, "moveRemoteFolder").some(
+      (m) => m.fromPath === "seeds/empty-keep" && m.toPath === "seeds (renamed)",
+    )).toBe(false);
+  });
+
+  test("sibling folder renames in one cycle → two moveRemoteFolders, no cross-claim", () => {
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [
+        mkFile("seeds/notes-renamed/a.md", "a1"),
+        mkFile("seeds/bulk-renamed/b.md", "b1"),
+      ],
+      localFolders: [
+        mkFolder("seeds"),
+        mkFolder("seeds/notes-renamed"),
+        mkFolder("seeds/bulk-renamed"),
+      ],
+      remoteEntries: [
+        mkRemoteFolder("seeds"),
+        mkRemoteFolder("seeds/notes"),
+        mkRemoteFolder("seeds/bulk"),
+        mkRemoteFile("seeds/notes/a.md", "a1"),
+        mkRemoteFile("seeds/bulk/b.md", "b1"),
+      ],
+      baseEntries: [
+        mkFolderBase("seeds"),
+        mkFolderBase("seeds/notes"),
+        mkFolderBase("seeds/bulk"),
+        mkFileBase("seeds/notes/a.md", "a1"),
+        mkFileBase("seeds/bulk/b.md", "b1"),
+      ],
+    });
+
+    const moves = folderMovePaths(plan, "moveRemoteFolder");
+    expect(moves).toHaveLength(2);
+    expect(moves).toContainEqual({
+      fromPath: "seeds/notes",
+      toPath: "seeds/notes-renamed",
+    });
+    expect(moves).toContainEqual({
+      fromPath: "seeds/bulk",
+      toPath: "seeds/bulk-renamed",
+    });
+    expect(moves.some(
+      (m) => m.fromPath === "seeds/notes" && m.toPath === "seeds/bulk-renamed",
+    )).toBe(false);
+    expect(actionsOf(plan, "deleteRemoteFolder").some(
+      (i) => i.pathLower === "seeds/notes" || i.pathLower === "seeds/bulk",
+    )).toBe(false);
+  });
+
+  test("inner content change at same relative path blocks G8", () => {
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [mkFile("notes-renamed/baseline.md", "edited")],
+      localFolders: [mkFolder("notes-renamed")],
+      remoteEntries: [
+        mkRemoteFolder("notes"),
+        mkRemoteFile("notes/baseline.md", "original"),
+      ],
+      baseEntries: [
+        mkFolderBase("notes"),
+        mkFileBase("notes/baseline.md", "original"),
+      ],
+    });
+
+    expect(actionsOf(plan, "moveRemoteFolder")).toHaveLength(0);
+  });
+
+  test("child moved out of renamed parent → no false child→parent folder move", () => {
+    // notes relocated to vault root; bulk stayed under renamed seeds parent.
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [
+        mkFile("notes (renamed)/a.md", "a1"),
+        mkFile("seeds (renamed)/bulk/b.md", "b1"),
+      ],
+      localFolders: [
+        mkFolder("notes (renamed)"),
+        mkFolder("seeds (renamed)"),
+        mkFolder("seeds (renamed)/bulk"),
+      ],
+      remoteEntries: [
+        mkRemoteFolder("seeds"),
+        mkRemoteFolder("seeds/notes"),
+        mkRemoteFolder("seeds/bulk"),
+        mkRemoteFile("seeds/notes/a.md", "a1"),
+        mkRemoteFile("seeds/bulk/b.md", "b1"),
+      ],
+      baseEntries: [
+        mkFolderBase("seeds"),
+        mkFolderBase("seeds/notes"),
+        mkFolderBase("seeds/bulk"),
+        mkFileBase("seeds/notes/a.md", "a1"),
+        mkFileBase("seeds/bulk/b.md", "b1"),
+      ],
+    });
+
+    const moves = folderMovePaths(plan, "moveRemoteFolder");
+    expect(moves.some(
+      (m) => m.fromPath === "seeds/notes" && m.toPath === "seeds (renamed)",
+    )).toBe(false);
+    // Child may move to its own dest; parent may fail (child left the tree) — either is fine.
+    expect(moves.some(
+      (m) => m.fromPath === "seeds/notes" && m.toPath === "notes (renamed)",
+    )).toBe(true);
+  });
+
+  test("folder rename + inner file rename → no folder move; G7 file move fallback", () => {
+    // Same-relative-path score fails when an inner file also renamed.
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [mkFile("notes-renamed/baseline-renamed.md", "h1")],
+      localFolders: [mkFolder("notes-renamed")],
+      remoteEntries: [
+        mkRemoteFolder("notes"),
+        mkRemoteFile("notes/baseline.md", "h1"),
+      ],
+      baseEntries: [
+        mkFolderBase("notes"),
+        mkFileBase("notes/baseline.md", "h1"),
+      ],
+    });
+
+    expect(actionsOf(plan, "moveRemoteFolder")).toHaveLength(0);
+    const fileMoves = actionsOf(plan, "moveRemote");
+    expect(fileMoves).toHaveLength(1);
+    expect(fileMoves[0]!.action).toMatchObject({
+      type: "moveRemote",
+      fromPath: "notes/baseline.md",
+      toPath: "notes-renamed/baseline-renamed.md",
+    });
+    expect(fileMoves[0]!.action.reason).not.toBe("empty_folder_rename");
+  });
+
+  test("small populated folder does not claim larger renamed parent (bijection)", () => {
+    // notes files live under seeds-renamed/notes — notes must not match seeds-renamed.
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [
+        mkFile("seeds-renamed/notes/a.md", "a1"),
+        mkFile("seeds-renamed/bulk/b.md", "b1"),
+      ],
+      localFolders: [
+        mkFolder("seeds-renamed"),
+        mkFolder("seeds-renamed/notes"),
+        mkFolder("seeds-renamed/bulk"),
+      ],
+      remoteEntries: [
+        mkRemoteFolder("seeds"),
+        mkRemoteFolder("seeds/notes"),
+        mkRemoteFolder("seeds/bulk"),
+        mkRemoteFile("seeds/notes/a.md", "a1"),
+        mkRemoteFile("seeds/bulk/b.md", "b1"),
+      ],
+      baseEntries: [
+        mkFolderBase("seeds"),
+        mkFolderBase("seeds/notes"),
+        mkFolderBase("seeds/bulk"),
+        mkFileBase("seeds/notes/a.md", "a1"),
+        mkFileBase("seeds/bulk/b.md", "b1"),
+      ],
+    });
+
+    const folderMoves = actionsOf(plan, "moveRemoteFolder");
+    expect(folderMoves.some(
+      (i) => i.action.type === "moveRemoteFolder"
+        && (i.action as { fromPath: string }).fromPath === "seeds/notes"
+        && (i.action as { toPath: string }).toPath === "seeds-renamed",
+    )).toBe(false);
+    // Intact parent tree should still move as one folder.
+    expect(folderMoves.some(
+      (i) => i.action.type === "moveRemoteFolder"
+        && (i.action as { fromPath: string }).fromPath === "seeds"
+        && (i.action as { toPath: string }).toPath === "seeds-renamed",
+    )).toBe(true);
+  });
+
+  test("peer empty folder rename → no moveLocalFolder (create+delete fallback)", () => {
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [],
+      localFolders: [mkFolder("a"), mkFolder("a/oldname")],
+      remoteEntries: [
+        mkRemoteFolder("a"),
+        mkRemoteFolder("a/newname"),
+      ],
+      baseEntries: [
+        mkFolderBase("a"),
+        mkFolderBase("a/oldname"),
+      ],
+    });
+
+    expect(actionsOf(plan, "moveLocalFolder")).toHaveLength(0);
+    expect(actionsOf(plan, "createLocalFolder").some(
+      (i) => i.pathLower === "a/newname",
+    )).toBe(true);
+    expect(actionsOf(plan, "deleteLocalFolder").some(
+      (i) => i.pathLower === "a/oldname",
+    )).toBe(true);
+  });
+
+  test("peer small folder does not claim larger renamed parent (bijection)", () => {
+    const plan = enhanceSyncPlan(emptyPlan(), {
+      localFiles: [
+        mkFile("seeds/notes/a.md", "a1"),
+        mkFile("seeds/bulk/b.md", "b1"),
+      ],
+      localFolders: [
+        mkFolder("seeds"),
+        mkFolder("seeds/notes"),
+        mkFolder("seeds/bulk"),
+      ],
+      remoteEntries: [
+        mkRemoteFolder("seeds-renamed"),
+        mkRemoteFolder("seeds-renamed/notes"),
+        mkRemoteFolder("seeds-renamed/bulk"),
+        mkRemoteFile("seeds-renamed/notes/a.md", "a1"),
+        mkRemoteFile("seeds-renamed/bulk/b.md", "b1"),
+      ],
+      baseEntries: [
+        mkFolderBase("seeds"),
+        mkFolderBase("seeds/notes"),
+        mkFolderBase("seeds/bulk"),
+        mkFileBase("seeds/notes/a.md", "a1"),
+        mkFileBase("seeds/bulk/b.md", "b1"),
+      ],
+    });
+
+    const moves = folderMovePaths(plan, "moveLocalFolder");
+    expect(moves.some(
+      (m) => m.fromPath === "seeds/notes" && m.toPath === "seeds-renamed",
+    )).toBe(false);
+    expect(moves.some(
+      (m) => m.fromPath === "seeds" && m.toPath === "seeds-renamed",
     )).toBe(true);
   });
 });

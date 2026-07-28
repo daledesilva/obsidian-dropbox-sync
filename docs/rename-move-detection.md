@@ -2,16 +2,19 @@
 
 ## Why it exists
 
-A path change that preserves content must be a **server-side move**, not delete-plus-upload. Re-uploading drops Dropbox revision history; at folder scale it also races with peers who added files under the old path. Gaps **G7** (file renames/moves) and **G8** (folder renames/moves, including empty folders) close that hole for both local edits and peer/Dropbox-side changes.
+A path change that preserves content is **preferably** a **server-side move**, not delete-plus-upload. Re-uploading drops Dropbox revision history; at folder scale it also races with peers who added files under the old path. Gaps **G7** (file renames/moves) and **G8** (populated folder renames/moves) close that hole when detection is confident.
+
+Rename/move detection is a **best-effort optimization**, not a correctness requirement. Correctness stays content-hash sync and delete protection. When the tree is ambiguous or compound, **create + delete is an accepted fallback** (upload/create folder + deleteRemote / deleteRemoteFolder), not a bug.
 
 ## Conceptual understanding
 
 | Signal | Meaning |
 |---|---|
 | Same content hash, path gone on one side | Likely file rename/move (G7) |
-| Same relative tree under a new folder path | Likely folder rename/move (G8) |
+| Same relative tree under a new folder path (populated) | Likely folder rename/move (G8) |
 | Same parent directory, basename changed | UI **rename** chip (`Aa`) |
 | Different parent directory | UI **move** chip (corner arrow) |
+| Empty folder rename, folder+inner rename, or partial restructure | Create + delete fallback (no invented move) |
 
 Cold sync uses the same three-way compare as live sync (P5): Obsidian rename events may only accelerate a plan a full scan would reach.
 
@@ -43,13 +46,21 @@ flowchart TD
 ### Local folder rename / move (G8 → `moveRemoteFolder`)
 
 1. Old folder gone locally, still on remote; new local folder exists.
-2. Score requires every base file/folder under the old root to appear under the new root at the **same relative path** with matching hash (empty trees use basename / uniqueness rules).
+2. Score requires a **populated** tree: every base file under the old root appears under the new root at the **same relative path** with matching hash; destination must not hold unmatched extra files (bijection); nested base folders must exist under the new root.
 3. One `moveRemoteFolder` suppresses create/delete folder actions and per-file moves under that tree.
 
 ### Peer folder rename / move (G8 → `moveLocalFolder`)
 
 1. Same scoring against the remote tree.
-2. Emits `moveLocalFolder` and consumes paths so G7 does not emit N× `moveLocal` plus empty-folder deletes for leftovers.
+2. Emits `moveLocalFolder` and consumes paths so G7 does not emit N× `moveLocal` plus leftover folder deletes for covered paths.
+
+### Accepted fallbacks (not required to be moves)
+
+| Case | Behaviour |
+|---|---|
+| Empty folder rename | `create*Folder` + `delete*Folder` |
+| Folder rename **and** inner file rename in the same cycle | No compound `move*Folder` + residuals — create+delete and/or G7 file moves |
+| Parent rename with children moved out / restructured | Unmatched shells may delete; content rematched elsewhere follows G7 / uploads |
 
 ### After execute
 
@@ -57,7 +68,7 @@ flowchart TD
 
 ### Sync panel chips
 
-`toActionSummaryType` / `isSameParentRename` map `move*` / `move*Folder` onto rename vs move. Modal titles are file/folder-agnostic (`Renamed`, `Moved`, … — no trailing “Files”).
+`toActionSummaryType` / `isSameParentRename` map `move*` / `move*Folder` onto rename vs move. Modal titles are file/folder-agnostic (`Renamed`, `Moved`, … — no trailing “Files”). Fallback create+delete cycles show upload/delete chips instead — expected when detection refuses.
 
 ## Technical details
 
@@ -72,7 +83,11 @@ flowchart TD
 ## Technical Gotchas
 
 - **G8 runs before G7 and consumes the tree.** A successful folder match must suppress child file moves; otherwise the plan double-applies.
-- **Folder score today requires identical relative paths.** Renaming a folder **and** renaming a file inside it in the same offline window fails the folder match (`scoreLocalFolderRename` / `scoreRemoteFolderRename` look up `newFolder + oldRelative`). The cycle can fall back to create/delete + file transfers and surface a delete chip. Concurrent folder + inner path change needs residual same-tree file moves after the folder move (both directions).
+- **One-pass greedy matching.** Candidates are scored once and claimed parent-first among valid populated scores. There is no iterative rescore for “child moved out of tree” — that case falls back deliberately.
+- **Folder score requires identical relative paths.** Renaming a folder **and** renaming a file inside it in the same window fails the folder match on purpose. Create+delete / G7 is the accepted fallback — residuals are not required.
+- **Destination bijection.** A small folder cannot claim a larger destination that still has unmatched files (guards false pairs like `notes` → `_seeds (renamed)`).
+- **Empty folders never use G8.** No content signal — always create+delete (guards false pairs like `empty-keep` → renamed parent).
+- **Sync root (`""` / `"/"`) is never a folder-rename endpoint.** Empty remnants must not pair with the vault root (Dropbox rejects `move_v2` to `/`).
 - **Base rewrite is prefix-wide.** Updating only the folder row leaves children keyed under the old path_lower.
-- **Empty-folder pairing is conservative.** Ambiguous empties without a unique basename match do not move.
+- **Manual QA:** runbook `06-renaming-and-moving` categories A–H mirror these contracts (confident moves vs accepted fallbacks).
 - **Memory FS `rename` must handle folders** the same way as `VaultAdapter` so executor tests exercise `moveLocalFolder`.
