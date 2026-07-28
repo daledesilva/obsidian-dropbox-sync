@@ -30,14 +30,20 @@ export class DeleteConfirmModal extends Modal {
       : "Delete protection";
     this.setTitle(title);
     contentEl.createEl("p", {
-      text: `${this.deleteItems.length} files will be deleted. Continue?`,
+      text: `${this.deleteItems.length} item(s) will be deleted. Continue?`,
     });
 
     const list = contentEl.createEl("ul");
     const maxShow = 20;
     for (const item of this.deleteItems.slice(0, maxShow)) {
-      const direction = item.action.type === "deleteRemote" ? "remote" : "local";
-      list.createEl("li", { text: `${item.localPath} (${direction})` });
+      const actionType = item.action.type;
+      const isRemote =
+        actionType === "deleteRemote" || actionType === "deleteRemoteFolder";
+      const isFolder =
+        actionType === "deleteRemoteFolder" || actionType === "deleteLocalFolder";
+      const direction = isRemote ? "remote" : "local";
+      const kind = isFolder ? "folder" : "file";
+      list.createEl("li", { text: `${item.localPath} (${direction} ${kind})` });
     }
     if (this.deleteItems.length > maxShow) {
       list.createEl("li", {

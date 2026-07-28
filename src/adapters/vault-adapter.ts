@@ -3,7 +3,7 @@ import type { FileListOptions, FileSystem } from "./interfaces";
 import type { FileInfo, FolderInfo } from "../types";
 import { dropboxContentHashBrowser } from "../hash.browser";
 import { isExcluded } from "../exclude";
-import { listFilesRecursive } from "./vault-disk-list";
+import { listFilesRecursive, listFoldersRecursive } from "./vault-disk-list";
 import {
   logRule,
   SyncLogCategories,
@@ -212,20 +212,43 @@ export class VaultAdapter implements FileSystem {
     this.hashCache.delete(toLower);
   }
 
-  async listFolders(_options?: FileListOptions): Promise<FolderInfo[]> {
+  async listFolders(options?: FileListOptions): Promise<FolderInfo[]> {
     const folders = new Map<string, FolderInfo>();
-    const walk = (folder: TFolder): void => {
-      if (folder.path) {
-        folders.set(folder.path.toLowerCase(), {
-          path: folder.path,
-          pathLower: folder.path.toLowerCase(),
-        });
+    const add = (path: string): void => {
+      if (!path) return;
+      const pathLower = path.toLowerCase();
+      if (!folders.has(pathLower)) {
+        folders.set(pathLower, { path, pathLower });
       }
+    };
+    const walk = (folder: TFolder): void => {
+      if (folder.path) add(folder.path);
       for (const child of folder.children) {
         if (child instanceof TFolder) walk(child);
       }
     };
     walk(this.vault.getRoot());
+
+    // Vault/TFolder does not index `.obsidian`. Without a disk folder scan,
+    // planFolderItems sees remote `.obsidian/plugins` + empty localFolders and
+    // falsely infers deleteRemoteFolder during the settings section.
+    const skipDirPrefixes = this.excludePatterns
+      .filter((p) => p.endsWith("/"))
+      .map((p) => p.replace(/\/+$/, ""));
+    const mergeDiskFolders = async (root: string): Promise<void> => {
+      const disk = await listFoldersRecursive(this.vault.adapter, root, {
+        signal: this.abortSignal,
+        skipDirPrefixes,
+      });
+      for (const path of disk.folders) add(path);
+    };
+    if (options?.configDiskScan && options.configDir) {
+      await mergeDiskFolders(options.configDir);
+    }
+    if (options?.includeHiddenFilesAndFolders) {
+      await mergeDiskFolders("");
+    }
+
     return [...folders.values()].sort((a, b) => a.path.localeCompare(b.path));
   }
 

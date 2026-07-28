@@ -784,6 +784,10 @@ export class SyncEngine {
           deleteCount: pendingDeletes.length,
           deleteRemote: pendingDeletes.filter((i) => i.action.type === "deleteRemote").length,
           deleteLocal: pendingDeletes.filter((i) => i.action.type === "deleteLocal").length,
+          // Folder deletes must defer with files — otherwise deleteRemoteFolder runs
+          // before the R9 modal and Skip cannot undo Dropbox wipes.
+          deleteRemoteFolder: pendingDeletes.filter((i) => i.action.type === "deleteRemoteFolder").length,
+          deleteLocalFolder: pendingDeletes.filter((i) => i.action.type === "deleteLocalFolder").length,
           sample: samplePaths(pendingDeletes.map((i) => `${i.action.type}:${i.localPath}`)),
         }, { hypothesisId: SyncHypotheses.guardSkip, location: "engine.deferDeletes" });
       }
@@ -904,6 +908,7 @@ export class SyncEngine {
     const mutatedRemote = result.succeeded.some((item) =>
       item.action.type === "upload"
       || item.action.type === "deleteRemote"
+      || item.action.type === "deleteRemoteFolder"
       || item.action.type === "moveRemote",
     );
     if (mutatedRemote) {
@@ -975,14 +980,17 @@ export class SyncEngine {
    * Persist lastFetchedCursor after a deferred-deletes manual run.
    * Caller must clear deferCursorUpdate first; finalizeState still refuses
    * when the delete log / failures would leave sync incomplete.
+   * Pass deletesSkipped > 0 when the user skipped the protection modal so the
+   * cursor is held — otherwise remote delete deltas are consumed and the next
+   * sync base-seeds those paths as still present (up_to_date, no re-prompt).
    */
-  async commitDeferredCursor(): Promise<void> {
+  async commitDeferredCursor(deletesSkipped = 0): Promise<void> {
     if (!this.lastFetchedCursor) return;
     await this.finalizeState(
       this.deps.store,
       { succeeded: [], failed: [], deferred: [] },
       this.lastFetchedCursor,
-      0,
+      deletesSkipped,
     );
   }
 
@@ -1009,6 +1017,8 @@ export class SyncEngine {
           ...emptySyncPlanStats(),
           deleteLocal: deleteItems.filter((i) => i.action.type === "deleteLocal").length,
           deleteRemote: deleteItems.filter((i) => i.action.type === "deleteRemote").length,
+          deleteLocalFolder: deleteItems.filter((i) => i.action.type === "deleteLocalFolder").length,
+          deleteRemoteFolder: deleteItems.filter((i) => i.action.type === "deleteRemoteFolder").length,
         },
       };
 

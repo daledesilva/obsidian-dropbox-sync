@@ -7,7 +7,7 @@ Walk one runbook at a time. Full matrices live in the repo: `docs/sync-scenarios
 | 01 | [Creating a file](01-creating-a-file.md) | §1 | Usually no |
 | 02 | [Modifying a file](02-modifying-a-file.md) | §2 | Usually no |
 | 03 | [Simultaneous editing](03-simultaneous-editing.md) | §3 | **Yes** (conflict copies) |
-| 04 | [Deleting a file](04-deleting-a-file.md) | §4 | **Yes** |
+| 04 | [Deleting](04-deleting.md) | §4 | **Yes** |
 | 05 | [Delete crossed with edit](05-delete-crossed-with-edit.md) | §5 | **Yes** |
 | 06 | [Renaming and moving](06-renaming-and-moving.md) | §6 | **Yes** |
 | 07 | [Capitalisation](07-capitalisation.md) | §7 | **Yes** |

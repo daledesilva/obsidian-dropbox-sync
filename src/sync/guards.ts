@@ -1,9 +1,38 @@
 import type { DeleteGuardResult, SyncPlan, SyncPlanItem } from "../types";
 import { logRule, SyncRules, type SyncMonitorLog } from "../debug/sync-monitor";
 
-/** True for deleteLocal / deleteRemote plan actions. */
+/**
+ * True for any destructive delete plan action.
+ * Folder deletes must be included: deferDeletes / R9 previously only peeled file
+ * deletes, so deleteRemoteFolder ran before the confirmation modal and wiped Dropbox.
+ */
 export function isDeletePlanAction(type: string): boolean {
-  return type === "deleteRemote" || type === "deleteLocal";
+  return (
+    type === "deleteRemote"
+    || type === "deleteLocal"
+    || type === "deleteRemoteFolder"
+    || type === "deleteLocalFolder"
+  );
+}
+
+/**
+ * R9 threshold weight: a folder wipe removes an unbounded tree, so one folder
+ * delete alone must never auto-approve under a file-count threshold.
+ */
+export function deleteGuardEffectiveCount(
+  deleteItems: SyncPlanItem[],
+  threshold: number,
+): number {
+  let count = 0;
+  for (const item of deleteItems) {
+    const actionType = item.action.type;
+    if (actionType === "deleteRemoteFolder" || actionType === "deleteLocalFolder") {
+      count += threshold + 1;
+    } else {
+      count += 1;
+    }
+  }
+  return count;
 }
 
 /**
@@ -24,7 +53,13 @@ export function splitPlanDeletes(plan: SyncPlan): {
     deleteItems,
     nonDeletePlan: {
       items: nonDeleteItems,
-      stats: { ...plan.stats, deleteLocal: 0, deleteRemote: 0 },
+      stats: {
+        ...plan.stats,
+        deleteLocal: 0,
+        deleteRemote: 0,
+        deleteLocalFolder: 0,
+        deleteRemoteFolder: 0,
+      },
     },
   };
 }
@@ -51,10 +86,12 @@ export function checkDeleteGuard(
   }
 
   const { deleteItems, nonDeletePlan } = splitPlanDeletes(plan);
+  const effectiveCount = deleteGuardEffectiveCount(deleteItems, threshold);
 
-  if (deleteItems.length <= threshold) {
+  if (effectiveCount <= threshold) {
     logRule(log, SyncRules.R9, "delete guard passed — under threshold", {
       deleteCount: deleteItems.length,
+      effectiveCount,
       threshold,
     }, { location: "guards.checkDeleteGuard" });
     return { passed: true, deleteItems: [], filteredPlan: plan };
@@ -62,6 +99,7 @@ export function checkDeleteGuard(
 
   logRule(log, SyncRules.R9, "delete guard triggered — asking before removing", {
     deleteCount: deleteItems.length,
+    effectiveCount,
     threshold,
   }, { level: "info", location: "guards.checkDeleteGuard" });
   return {

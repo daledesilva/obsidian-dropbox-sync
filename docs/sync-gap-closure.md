@@ -56,9 +56,11 @@ flowchart TB
 
 1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone.
 2. Peer deletes a remote folder → local **empty** folder becomes `deleteLocalFolder` (do not re-upload it). If the local folder still holds unmanaged files that were never on Dropbox, skip the folder wipe and only remove tracked children via the file planner.
-3. Local deletes a folder (or its whole tree) → `deleteRemoteFolder` when the folder path is in the delete log **or** when base still knows the folder, local is gone, and no orphan local files remain under it (`inferred_local_tree_wipe`). Without that inference, missing folder delete intents restored empty shells via `createLocalFolder`.
-4. Incremental sync still seeds folder rows from base (folders have no content hash/rev); otherwise the folder vanishes from the remote map and a child download can be wiped by a false `deleteLocalFolder`.
-5. R14 coalesce live-verify compares **files only** (ignores nested/self folder entries) so complete file deletes still collapse to a recursive folder delete.
+3. Same cycle as a remote tree wipe: when every local child under the folder is already planned `deleteLocal`, also plan `deleteLocalFolder` and execute it **after** the file deletes so the empty shell does not linger until the next sync.
+4. Local deletes a folder (or its whole tree) → `deleteRemoteFolder` when the folder path is in the delete log **or** when base still knows the folder, local is gone, and no orphan local files remain under it (`inferred_local_tree_wipe`). Without that inference, missing folder delete intents restored empty shells via `createLocalFolder`.
+5. Incremental sync still seeds folder rows from base (folders have no content hash/rev); otherwise the folder vanishes from the remote map and a child download can be wiped by a false `deleteLocalFolder`.
+6. R14 coalesce live-verify compares **files only** (ignores nested/self folder entries) so complete file deletes still collapse to a recursive folder delete.
+7. Config folders under `.obsidian` come from a disk folder scan (`listFolders` + `configDiskScan`); Vault `TFolder` alone omits them and previously made settings infer a false plugins wipe.
 
 ### Cursor progress with failures (G27 / G10 / G30)
 
@@ -99,3 +101,4 @@ ClickUp phase tickets (Os: 0.1): `86d3u7bfu` … `86d3u7bjk`. Implementation com
 - **Resurrection (R6/R10) only runs without a sync cursor.** Devices that already sync must recreate after their own delete via `add`, not `preserveAsConflictCopy`.
 - **Folder base rows must seed incremental remote maps.** Empty folders have no hash/rev; omitting them made peers plan `deleteLocalFolder` and drop children just downloaded into that folder.
 - **Do not `deleteLocalFolder` when unmanaged local children remain.** Peer folder deletes must leave unsynced extras (row 65); file-level deletes remove only tracked children.
+- **Do plan `deleteLocalFolder` when all children are planned `deleteLocal`.** Otherwise a remote folder wipe deletes files in the trailing Deletions segment and leaves an empty local folder behind.

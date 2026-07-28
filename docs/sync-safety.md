@@ -30,15 +30,19 @@ This catches situations like:
 
 You can click **Delete** to proceed with those deletions in the **current** sync, or **Skip deletions** to sync everything else and leave those files alone.
 
-The threshold (default: 5 files) can be changed in **Settings > Delete threshold**.
+The threshold (default: 5 files) can be changed in **Settings > Delete threshold**. Folder deletes count as bulk too: a single `deleteRemoteFolder` / `deleteLocalFolder` is weighted above the threshold so a recursive folder wipe never auto-approves under a file-count gate.
 
 ```mermaid
-flowchart LR
-  Plan[Sync builds plan with deletes] --> Guard{Delete count over threshold?}
-  Guard -->|no| Execute[Execute full plan]
-  Guard -->|yes| Modal[Show DeleteConfirmModal and await]
-  Modal -->|Delete| ExecuteDeletes[Execute plan including deletions]
-  Modal -->|Skip deletions| Filtered[Execute plan with deletes stripped]
+flowchart TD
+  Sections[Manual: notes then settings then plugins] --> Defer["deferDeletes peels file + folder deletes"]
+  Defer --> Content[Execute non-delete work per section]
+  Content --> Trailing[Trailing Deletions segment]
+  Trailing --> Guard{Over threshold?}
+  Guard -->|no| RunDeletes[executeDeletePlan]
+  Guard -->|yes| Modal[DeleteConfirmModal]
+  Modal -->|Delete| RunDeletes
+  Modal -->|Skip| HoldCursor["Hold Dropbox cursor — do not commit"]
+  RunDeletes --> CommitCursor[commitDeferredCursor]
 ```
 
 ## Layer 3: Live checks and Dropbox trash
@@ -77,10 +81,13 @@ Delete intents are also **scoped** to paths the current sync sections can act on
 
 | Piece | Role |
 |---|---|
-| `checkDeleteGuard` (`src/sync/guards.ts`) | Counts delete actions; returns a filtered plan when over threshold |
+| `isDeletePlanAction` / `splitPlanDeletes` (`src/sync/guards.ts`) | Peels **file and folder** deletes (`deleteRemote`, `deleteLocal`, `deleteRemoteFolder`, `deleteLocalFolder`) |
+| `deleteGuardEffectiveCount` | Folder deletes weigh `threshold + 1` so one folder wipe always prompts when protection is on |
+| `checkDeleteGuard` | Uses effective count; returns a filtered plan when over threshold |
 | `SyncEngine.applyDeleteGuard` | Awaits `onDeleteGuardTriggered`; `true` keeps deletes, `false` uses `filteredPlan` |
-| `DeleteConfirmModal` | Lists pending deletes; resolves `true`/`false` when the user closes it |
-| Plugin `onDeleteGuardTriggered` (`src/main.ts`) | Opens the modal and **awaits** the result for this cycle |
+| Manual `deferDeletes` + `commitDeferredCursor(skips)` | Trailing Deletions; skip passes `deletesSkipped` so the cursor is held |
+| `DeleteConfirmModal` | Lists pending deletes (file/folder); resolves `true`/`false` when the user closes it |
+| Plugin `onDeleteGuardTriggered` / `confirmDeferredSectionDeletes` | Opens the modal and **awaits** the result for this cycle |
 | `pruneStaleDeleteLog` (`src/main.ts`) | Drops orphan delete intents with one base + one local path set |
 | `deleteRemote` (`src/sync/executor.ts`) | Live rev/hash check; Dropbox `path_lookup/not_found` treated as success |
 | `deleteBatch` / `coalesceDeleteRemote` | Execution-only mass remote delete; see [Remote mass deletes](remote-mass-deletes.md) |
@@ -92,12 +99,16 @@ Delete intents are also **scoped** to paths the current sync sections can act on
 ## Technical Gotchas
 
 - **The modal must block the cycle.** Returning `false` immediately and deferring approval to a later debounced sync made both **Delete** and **Skip** look like Skip (especially when background sync was off). Always `await modal.waitForConfirmation()` and return that boolean.
+- **Folder deletes must defer with files.** `isDeletePlanAction` must include `deleteRemoteFolder` / `deleteLocalFolder`. Omitting them let inferred folder wipes run in the content phase **before** the Deletions modal — Skip could not undo Dropbox.
+- **Skip must hold the Dropbox cursor.** `commitDeferredCursor(aggregatedDeletesSkipped)` must pass the skip count. Committing with `0` after Skip consumed remote-delete deltas; the next sync base-seeded those paths and looked “up to date” with no re-prompt.
+- **`.obsidian/plugins` is the plugins section.** Exact `.obsidian/plugins` (not only `plugins/…` children) must classify as plugins. Combined with disk folder listing under `.obsidian` (Vault `TFolder` omits config), this stops settings cycles from inferring a false `deleteRemoteFolder` on plugins.
+- **Same-cycle local folder wipe.** When remote deleted a folder tree, plan `deleteLocalFolder` even while children still exist **if** every local child is already planned `deleteLocal`; execute folder deletes **after** file deletes so the empty shell is removed in one approve.
 - **Leaf flush is not vault debounce.** Applying an already-deferred remote download on click-away must call `syncNow` immediately; sharing the typing quiet window made remote refresh feel broken.
 - **One modal at a time.** If a confirm modal is already open, a second guard trigger returns `false` (skips deletes) to avoid stacked dialogs.
 - **Threshold is independent of the interactive-progress threshold.** Delete protection uses `deleteThreshold`; large-background promotion uses `largeSyncInteractiveThreshold`.
 - **Do not advance the cursor while scoped pending deletes remain.** Clear succeeded deletes first; transient item failures live in `retrySet` so they do not block checkpoint forever (G27).
 - **Incomplete-scan skip needs a positive vouch.** Ratio brakes alone were notes/plugins-only and still unsafe; prefer an explicit completeness signal per section.
-- **`deleteRemote` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry / delete intent instead of failing the item.
+- **`deleteRemote` / `deleteRemoteFolder` not_found is success.** A 409 `path_lookup/not_found` means the remote path is already absent — clear the sync entry instead of failing the item (avoids a red Deletions bar for already-gone folders).
 - **Folder coalesce is gated.** Empty remote snapshots refuse folder deletes; multi-section sync unions the snapshot; live Dropbox listing + hash check must pass before recursive folder `delete_batch`. Details: [Remote mass deletes](remote-mass-deletes.md).
 - **Prune must stay O(n).** Never call `getEntry` / `vault.getFiles()` inside the per-path loop.
 - **Re-link clears base/cursor/delete log.** Changing the linked Dropbox folder is not a mass delete of the new folder’s contents (R11 / G15).

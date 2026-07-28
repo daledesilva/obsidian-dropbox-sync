@@ -913,6 +913,8 @@ export default class DropboxSyncPlugin extends Plugin {
                 if (
                   item.action.type === "deleteLocal"
                   || item.action.type === "deleteRemote"
+                  || item.action.type === "deleteLocalFolder"
+                  || item.action.type === "deleteRemoteFolder"
                 ) {
                   return false;
                 }
@@ -923,6 +925,8 @@ export default class DropboxSyncPlugin extends Plugin {
                 if (
                   f.item.action.type === "deleteLocal"
                   || f.item.action.type === "deleteRemote"
+                  || f.item.action.type === "deleteLocalFolder"
+                  || f.item.action.type === "deleteRemoteFolder"
                 ) {
                   return false;
                 }
@@ -959,11 +963,17 @@ export default class DropboxSyncPlugin extends Plugin {
           const deletionChipSource = {
             succeeded: aggregatedSucceeded.filter(
               (item) =>
-                item.action.type === "deleteLocal" || item.action.type === "deleteRemote",
+                item.action.type === "deleteLocal"
+                || item.action.type === "deleteRemote"
+                || item.action.type === "deleteLocalFolder"
+                || item.action.type === "deleteRemoteFolder",
             ),
             failed: aggregatedFailed.filter(
               (f) =>
-                f.item.action.type === "deleteLocal" || f.item.action.type === "deleteRemote",
+                f.item.action.type === "deleteLocal"
+                || f.item.action.type === "deleteRemote"
+                || f.item.action.type === "deleteLocalFolder"
+                || f.item.action.type === "deleteRemoteFolder",
             ),
           };
           const deletionChips = summarizeResultParts(deletionChipSource);
@@ -988,7 +998,15 @@ export default class DropboxSyncPlugin extends Plugin {
         sectionProgress.finishSegmentNotices();
         engine.setDeferDeletes(false);
         engine.setDeferCursorUpdate(false);
-        await engine.commitDeferredCursor();
+        // Hold cursor when any deferred deletes were skipped so remote delete
+        // deltas remain visible on the next sync (re-prompt / re-plan).
+        await engine.commitDeferredCursor(aggregatedDeletesSkipped);
+        if (aggregatedDeletesSkipped > 0) {
+          await this.log("deferred deletes skipped — holding Dropbox cursor", {
+            deletesSkipped: aggregatedDeletesSkipped,
+            cursorUpdated: engine.getLastCursorUpdated(),
+          }, { hypothesisId: SyncHypotheses.guardSkip, location: "main.commitDeferredCursor" });
+        }
         this.engineMgr?.persistDeleteLog();
 
         plan = lastPlan;
@@ -2030,6 +2048,8 @@ export default class DropboxSyncPlugin extends Plugin {
           ...emptySyncPlanStats(),
           deleteLocal: deleteItems.filter((i) => i.action.type === "deleteLocal").length,
           deleteRemote: deleteItems.filter((i) => i.action.type === "deleteRemote").length,
+          deleteLocalFolder: deleteItems.filter((i) => i.action.type === "deleteLocalFolder").length,
+          deleteRemoteFolder: deleteItems.filter((i) => i.action.type === "deleteRemoteFolder").length,
         },
       },
       this.settings.deleteThreshold,

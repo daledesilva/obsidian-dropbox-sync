@@ -286,8 +286,15 @@ export async function executePlan(
   const createRemoteFolders = nonDeleteRemoteExecutable.filter(
     (item) => item.action.type === "createRemoteFolder",
   );
+  // Local folder deletes after file deletes — same-cycle remote folder wipe plans
+  // deleteLocal children + deleteLocalFolder; emptying first avoids rmdir failures.
+  const deleteLocalFolders = nonDeleteRemoteExecutable.filter(
+    (item) => item.action.type === "deleteLocalFolder",
+  );
   const nonFolderExecutable = nonDeleteRemoteExecutable.filter(
-    (item) => item.action.type !== "createRemoteFolder",
+    (item) =>
+      item.action.type !== "createRemoteFolder"
+      && item.action.type !== "deleteLocalFolder",
   );
   // Serial mkdir — even 2 parallel create_folder_v2 calls still 429 under write locks.
   const folderConcurrency = 1;
@@ -306,7 +313,7 @@ export async function executePlan(
   succeeded.push(...folderPass.succeeded);
   failed.push(...folderPass.failed);
 
-  // Pass 1: parallel batch for remaining non-deleteRemote work.
+  // Pass 1: parallel batch for remaining non-deleteRemote work (includes deleteLocal).
   const pass1 = await runExecutableBatch(
     nonFolderExecutable,
     ctx,
@@ -321,7 +328,26 @@ export async function executePlan(
   );
   succeeded.push(...pass1.succeeded);
   failed.push(...pass1.failed);
-  const timedOutForRetry = [...folderPass.timedOut, ...pass1.timedOut];
+
+  const deleteLocalFolderPass = await runExecutableBatch(
+    deleteLocalFolders,
+    ctx,
+    folderConcurrency,
+    itemTimeoutMs,
+    {
+      onSettled: (kind) => {
+        if (kind !== "timeout") bumpProgress();
+      },
+    },
+  );
+  succeeded.push(...deleteLocalFolderPass.succeeded);
+  failed.push(...deleteLocalFolderPass.failed);
+
+  const timedOutForRetry = [
+    ...folderPass.timedOut,
+    ...pass1.timedOut,
+    ...deleteLocalFolderPass.timedOut,
+  ];
   if (timedOutForRetry.length > 0) {
   }
 
@@ -1299,7 +1325,19 @@ async function executeItem(
 
     case "deleteRemoteFolder": {
       logIntent(deps, "deleteRemoteFolder", { path: localPath });
-      await remote.delete(localPath);
+      try {
+        await remote.delete(localPath);
+      } catch (err) {
+        // Same policy as deleteRemote: already-absent remote is success (e.g. parent
+        // folder wipe or a prior sync already removed this empty folder).
+        if (!isDropboxPathNotFoundError(err)) {
+          throw err;
+        }
+        deps.log?.("deleteRemoteFolder already absent — treating as success", {
+          path: localPath,
+          error: err instanceof Error ? err.message : String(err),
+        }, { hypothesisId: SyncHypotheses.deleteNotExecuted, location: "executor.deleteRemoteFolder" });
+      }
       await store.deleteEntry(pathLower);
       logOutcome(deps, "deleteRemoteFolder", { path: localPath });
       break;

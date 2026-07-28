@@ -384,7 +384,11 @@ function applyRenameMatches(
   return { items, stats };
 }
 
-function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
+function planFolderItems(
+  input: PlanEnhancementInput,
+  /** path_lower of file items already planned as deleteLocal in this enhance pass. */
+  plannedDeleteLocalPathLowers: Set<string> = new Set(),
+): SyncPlanItem[] {
   const { localFolders, localFiles, remoteEntries, baseEntries, localDeletedPaths, log } = input;
   const localMap = new Map(localFolders.map((f) => [f.pathLower, f]));
   const remoteMap = new Map<string, RemoteEntry>();
@@ -396,17 +400,32 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
   const baseMap = new Map(
     baseEntries.filter(isFolderEntry).map((e) => [e.pathLower, e]),
   );
-  const hasLocalFilesUnder = (folderPathLower: string): boolean => {
+  const localFilesUnder = (folderPathLower: string): FileInfo[] => {
     const prefix = `${folderPathLower}/`;
-    return localFiles.some((f) => f.pathLower.startsWith(prefix));
+    return localFiles.filter((f) => f.pathLower.startsWith(prefix));
   };
+  const hasLocalFilesUnder = (folderPathLower: string): boolean =>
+    localFilesUnder(folderPathLower).length > 0;
 
   // Local folder gone while base still remembers it: treat as tree wipe unless
   // orphan files remain under the path (then restore the folder shell only).
   // Vault folder delete intents are often dropped as out-of-scope, so inference
   // must cover the same case as deleteIntended for full-folder deletes.
+  // Requires accurate localFolders (config dirs via disk scan) — missing
+  // `.obsidian/plugins` in the vault index previously caused false wipes.
   const shouldInferRemoteFolderDelete = (folderPathLower: string): boolean =>
     !hasLocalFilesUnder(folderPathLower);
+
+  /**
+   * Remote folder wiped: remove local folder when empty, or when every local
+   * child file is already planned deleteLocal (same cycle as the peer wipe).
+   * Unmanaged local files under the path still block folder delete (G8 row 65).
+   */
+  const shouldDeleteLocalFolderForRemoteWipe = (folderPathLower: string): boolean => {
+    const children = localFilesUnder(folderPathLower);
+    if (children.length === 0) return true;
+    return children.every((f) => plannedDeleteLocalPathLowers.has(f.pathLower));
+  };
 
   const allPathLowers = new Set<string>();
   for (const k of localMap.keys()) allPathLowers.add(k);
@@ -453,25 +472,35 @@ function planFolderItems(input: PlanEnhancementInput): SyncPlanItem[] {
     }
 
     if (localExists && !remoteExists) {
-      // G8: peer removed the remote folder — delete local empty folder only.
-      // If unmanaged local children remain (row 65), skip folder wipe; file planner
-      // removes synced children. Brand-new local folders (!base) still createRemoteFolder.
-      if (base && !deleteIntended) {
-        if (!hasLocalFilesUnder(pathLower)) {
+      // G8: peer removed the remote folder. Delete local folder when empty, or in
+      // the same cycle when all synced children are already planned deleteLocal
+      // (otherwise files delete and the empty shell is left behind until next sync).
+      if (!deleteIntended && shouldDeleteLocalFolderForRemoteWipe(pathLower)) {
+        const children = localFilesUnder(pathLower);
+        if (base || children.length > 0) {
+          logRule(log, SyncRules.R14, children.length > 0
+            ? "deleteLocalFolder with planned child deletes — remote folder wipe"
+            : "deleteLocalFolder — remote folder gone, local empty", {
+            path: pathLower,
+            childDeletes: children.length,
+            hasBase: !!base,
+          }, { location: "plan-enhancements.planFolderItems" });
           items.push({
             pathLower,
             localPath,
             action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
           });
+          continue;
         }
-      } else if (!isSyncRootFolderPath(pathLower) && !isSyncRootFolderPath(localPath)) {
+      }
+      if (!base && !isSyncRootFolderPath(pathLower) && !isSyncRootFolderPath(localPath)) {
         // Root already exists as the sync folder — create_folder("/") → remote "//".
         items.push({
           pathLower,
           localPath,
           action: {
             type: "createRemoteFolder",
-            reason: base ? "folder_restored" : "new_local_folder",
+            reason: "new_local_folder",
           },
         });
       }
@@ -622,7 +651,12 @@ export function enhanceSyncPlan(basePlan: SyncPlan, input: PlanEnhancementInput)
   plan = applyRenameMatches(plan, renameMatches, input.log);
 
   const collisionItems = detectPathCollisions(localMap, localFolderMap, remoteMap, input.log);
-  const folderItems = planFolderItems(input);
+  const plannedDeleteLocalPathLowers = new Set(
+    plan.items
+      .filter((item) => item.action.type === "deleteLocal")
+      .map((item) => item.pathLower),
+  );
+  const folderItems = planFolderItems(input, plannedDeleteLocalPathLowers);
 
   const collisionPathLowers = new Set(collisionItems.map((i) => i.pathLower));
   const filteredPlanItems = plan.items.filter((item) => !collisionPathLowers.has(item.pathLower));

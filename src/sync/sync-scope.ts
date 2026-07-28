@@ -50,7 +50,8 @@ function isWorkspacePath(path: string, configDir: string): boolean {
   const prefix = `${obs}/`;
   if (!lower.startsWith(prefix)) return false;
   const rest = lower.slice(prefix.length);
-  if (rest.startsWith("workspaces/")) return true;
+  // Exact folder + children — same as plugins (folder alone is not settings).
+  if (rest === "workspaces" || rest.startsWith("workspaces/")) return true;
   if (rest === "workspaces.json") return true;
   if (rest.startsWith("workspace")) return true;
   return false;
@@ -59,7 +60,10 @@ function isWorkspacePath(path: string, configDir: string): boolean {
 function isPluginsPath(path: string, configDir: string): boolean {
   const obs = normalizeConfigDir(configDir);
   const lower = path.toLowerCase();
-  if (lower.startsWith(`${obs}/plugins/`)) return true;
+  // Exact `.obsidian/plugins` must be plugins — otherwise sectioned settings sync
+  // sees remote folder + empty localFolders (vault API skips .obsidian) and
+  // falsely infers deleteRemoteFolder (R14 wipe of the whole plugins tree).
+  if (lower === `${obs}/plugins` || lower.startsWith(`${obs}/plugins/`)) return true;
   // Enable list must travel with plugin binaries or Obsidian will not load them.
   if (lower === `${obs}/community-plugins.json`) return true;
   return false;

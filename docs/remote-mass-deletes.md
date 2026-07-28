@@ -4,7 +4,7 @@
 
 Deleting thousands of files on Dropbox one RPC at a time is slow and rate-limit heavy. When the planner has already decided many `deleteRemote` actions, the executor collapses safe complete subtrees into folder deletes and sends the rest through Dropbox `/files/delete_batch` so large cleanups finish in far fewer round-trips.
 
-Planner and delete-protection behavior stay **file-level**. Batching is an execution optimization only.
+Planner intents stay path-level (files and explicit/inferred folder actions). Delete protection peels **both** file and folder delete actions into the trailing Deletions segment. Batching/coalesce remains an execution optimization for `deleteRemote` items.
 
 ## Conceptual understanding
 
@@ -40,9 +40,9 @@ flowchart TD
 
 ### Manual sync with deferred deletions
 
-1. Section cycles plan uploads/downloads and may hold deletes for the trailing Deletions segment.
-2. User approves bulk deletes (delete protection).
-3. `executeDeletePlan` runs the delete-only plan through the same batch/coalesce path.
+1. Section cycles plan uploads/downloads; `deferDeletes` holds **file and folder** deletes for the trailing Deletions segment (never run `deleteRemoteFolder` in the content phase).
+2. User approves or skips bulk deletes (delete protection). Skip holds the Dropbox cursor so remote deletes reappear next sync.
+3. On approve, `executeDeletePlan` runs the delete-only plan through the same batch/coalesce path; `deleteLocalFolder` runs after `deleteLocal` children.
 4. Engine passes `lastExistingRemotePathLowers` so coalesce still sees the cycle’s remote file set.
 
 ### Per-entry outcomes
@@ -83,3 +83,5 @@ If a recursive **folder** delete already wiped Dropbox before the other device s
 - **Progress and delete-log stay file-level.** UI and `finalizeState` must see original `SyncPlanItem`s, not only the folder path. Successful downloads that restore a delete-logged path also clear the delete intent.
 - **App/vault root must never be a folder delete target.** Coalesce skips empty/`"/"` prefixes.
 - **Listing must not count the folder as its own member.** `listFilePathLowersUnder` excludes the queried folder path. Including it made `planned` vs `live` differ by one and forced file-only deletes, leaving empty folders on Dropbox.
+- **Inferred `deleteRemoteFolder` must still await R9.** Folder actions are delete-plan actions; peeling only files left recursive Dropbox deletes running before the modal.
+- **`deleteRemoteFolder` not_found is soft-ok.** Same policy as per-file `deleteRemote` — already-absent parents (prior wipe / parent folder delete) must not paint Deletions red.

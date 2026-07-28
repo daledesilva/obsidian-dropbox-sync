@@ -12,6 +12,11 @@ export interface DiskListResult {
   listErrors: string[];
 }
 
+export interface DiskListFoldersResult {
+  folders: string[];
+  listErrors: string[];
+}
+
 /**
  * Resolve a child path from adapter.list().
  * Desktop FileSystemAdapter returns vault-relative paths (e.g. ".obsidian/plugins");
@@ -25,6 +30,58 @@ export function resolveListedChildPath(dir: string, entry: string): string {
     return entryNorm;
   }
   return normalizePath(`${dirNorm}/${entryNorm}`);
+}
+
+/**
+ * Recursively list folder paths under a vault directory via DataAdapter.
+ * Used so listFolders can see `.obsidian/...` which Vault/TFolder does not index.
+ */
+export async function listFoldersRecursive(
+  adapter: DataAdapter,
+  root: string,
+  options?: {
+    signal?: AbortSignal | null;
+    skipDirPrefixes?: string[];
+  },
+): Promise<DiskListFoldersResult> {
+  const folders: string[] = [];
+  const listErrors: string[] = [];
+  const normalizedRoot = normalizePath(root);
+  const skipPrefixes = (options?.skipDirPrefixes ?? []).map((p) =>
+    p.endsWith("/") ? p.toLowerCase() : `${p.toLowerCase()}/`,
+  );
+
+  function shouldSkipDir(dirPath: string): boolean {
+    const lower = `${dirPath.toLowerCase()}/`;
+    return skipPrefixes.some((prefix) => lower.startsWith(prefix) || lower === prefix);
+  }
+
+  async function walk(dir: string): Promise<void> {
+    options?.signal?.throwIfAborted();
+    let listed: { files: string[]; folders: string[] };
+    try {
+      listed = await adapter.list(dir);
+    } catch {
+      listErrors.push(dir || "/");
+      return;
+    }
+
+    for (const folder of listed.folders) {
+      const child = resolveListedChildPath(dir, folder);
+      if (shouldSkipDir(child)) continue;
+      folders.push(child);
+      await walk(child);
+    }
+  }
+
+  if (root === "" || (await adapter.exists(normalizedRoot))) {
+    if (normalizedRoot && normalizedRoot !== "/") {
+      folders.push(normalizedRoot);
+    }
+    await walk(normalizedRoot);
+  }
+
+  return { folders, listErrors };
 }
 
 /**

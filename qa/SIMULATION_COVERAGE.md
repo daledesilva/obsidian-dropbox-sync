@@ -13,7 +13,7 @@ When adding sims, claim the row in the matrix (add `run`) and update this table.
 | §1 | Creating a file | matrix rows 1–7 | Covered |
 | §2 | Modifying a file | matrix 8, 10–17; row 9 todo (G10 editor) | Covered except open-editor |
 | §3 | Simultaneous editing | matrix 19–20, 24–25; 18/21–23 todo (editor) | Covered except editor deferral |
-| §4 | Deleting a file | matrix 26–28, 30–34; 29 todo (open editor) | Covered |
+| §4 | Deleting | matrix 26–28, 30–34; 29 todo (open editor); manual bulk/empty-folder in `qa/templates/_runbooks/04-deleting.md` | Covered |
 | §5 | Delete × edit | matrix 35–40 | Covered |
 | §6 | Renaming / moving | matrix 41–46 | Covered |
 | §7 | Capitalisation | matrix 47–53 | Covered |
