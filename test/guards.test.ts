@@ -1,5 +1,10 @@
 import { describe, test, expect } from "bun:test";
-import { checkDeleteGuard } from "@/sync/guards";
+import {
+  checkDeleteGuard,
+  deleteGuardEffectiveCount,
+  isDeletePlanAction,
+  splitPlanDeletes,
+} from "@/sync/guards";
 import type { SyncPlan, SyncPlanItem } from "@/types"
 import { emptySyncPlanStats } from "@/types";
 
@@ -18,6 +23,76 @@ const mkItem = (path: string, type: string, reason = ""): SyncPlanItem => ({
   action: type === "conflict"
     ? { type: "conflict", localHash: "a", remoteHash: "b" }
     : { type: type as "upload", reason },
+});
+
+describe("isDeletePlanAction / splitPlanDeletes", () => {
+  test("file and folder delete actions are delete-plan actions", () => {
+    expect(isDeletePlanAction("deleteRemote")).toBe(true);
+    expect(isDeletePlanAction("deleteLocal")).toBe(true);
+    expect(isDeletePlanAction("deleteRemoteFolder")).toBe(true);
+    expect(isDeletePlanAction("deleteLocalFolder")).toBe(true);
+    expect(isDeletePlanAction("upload")).toBe(false);
+  });
+
+  test("splitPlanDeletes peels file and folder deletes from non-delete work", () => {
+    const plan = mkPlan(
+      mkItem("keep.md", "upload", "new_local"),
+      mkItem("gone.md", "deleteRemote", "deleted_on_local"),
+      mkItem("tree", "deleteRemoteFolder", "inferred_local_tree_wipe"),
+    );
+    const { deleteItems, nonDeletePlan } = splitPlanDeletes(plan);
+    expect(deleteItems.map((i) => i.action.type).sort()).toEqual([
+      "deleteRemote",
+      "deleteRemoteFolder",
+    ]);
+    expect(nonDeletePlan.items).toHaveLength(1);
+    expect(nonDeletePlan.items[0].localPath).toBe("keep.md");
+    expect(nonDeletePlan.stats.deleteRemote).toBe(0);
+    expect(nonDeletePlan.stats.deleteRemoteFolder).toBe(0);
+  });
+
+  test("splitPlanDeletes peels deleteLocalFolder", () => {
+    const plan = mkPlan(
+      mkItem("a.md", "deleteLocal", "deleted_on_remote"),
+      mkItem("folder", "deleteLocalFolder", "deleted_on_remote"),
+      mkItem("b.md", "download", "new_remote"),
+    );
+    const { deleteItems, nonDeletePlan } = splitPlanDeletes(plan);
+    expect(deleteItems).toHaveLength(2);
+    expect(nonDeletePlan.items.map((i) => i.localPath)).toEqual(["b.md"]);
+  });
+});
+
+describe("deleteGuardEffectiveCount / folder R9 weight", () => {
+  test("one deleteRemoteFolder alone exceeds a file-count threshold", () => {
+    const deletes = [mkItem("tree", "deleteRemoteFolder", "inferred_local_tree_wipe")];
+    expect(deleteGuardEffectiveCount(deletes, 5)).toBe(6);
+    const result = checkDeleteGuard(mkPlan(...deletes), 5);
+    expect(result.passed).toBe(false);
+    expect(result.deleteItems).toHaveLength(1);
+  });
+
+  test("one deleteLocalFolder alone exceeds threshold", () => {
+    const deletes = [mkItem("tree", "deleteLocalFolder", "deleted_on_remote")];
+    expect(deleteGuardEffectiveCount(deletes, 5)).toBe(6);
+    expect(checkDeleteGuard(mkPlan(...deletes), 5).passed).toBe(false);
+  });
+
+  test("two file deletes under threshold pass; adding a folder delete fails", () => {
+    const filesOnly = mkPlan(
+      mkItem("a.md", "deleteRemote", "deleted_on_local"),
+      mkItem("b.md", "deleteRemote", "deleted_on_local"),
+    );
+    expect(checkDeleteGuard(filesOnly, 5).passed).toBe(true);
+
+    const withFolder = mkPlan(
+      mkItem("a.md", "deleteRemote", "deleted_on_local"),
+      mkItem("b.md", "deleteRemote", "deleted_on_local"),
+      mkItem("tree", "deleteRemoteFolder", "inferred_local_tree_wipe"),
+    );
+    expect(checkDeleteGuard(withFolder, 5).passed).toBe(false);
+    expect(checkDeleteGuard(withFolder, 5).deleteItems).toHaveLength(3);
+  });
 });
 
 describe("checkDeleteGuard", () => {

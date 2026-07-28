@@ -228,4 +228,121 @@ describe("삭제 보호", () => {
       expect(sim.remote.has(`file${i}.md`)).toBe(false);
     }
   });
+
+  // ── Thread regressions: cursor hold, tree wipe, keep empty ──
+
+  test("Skip remote deletes holds cursor and re-prompts next sync", async () => {
+    // Remote-originated deletes do not inflate the local delete log — cursor hold
+    // must rely on deletesSkipped (the deferred-commit regression).
+    const sim = new SyncSimulator();
+    const a = sim.addDevice("A", {
+      deleteProtection: true,
+      deleteThreshold: 2,
+      // no onDeleteGuardTriggered → auto skip
+    });
+    const b = sim.addDevice("B");
+
+    for (let i = 0; i < 5; i++) {
+      await a.editFile(`shared${i}.md`, `c${i}`);
+    }
+    await a.sync();
+    await b.sync();
+
+    for (let i = 0; i < 5; i++) {
+      await b.deleteFile(`shared${i}.md`);
+    }
+    await b.sync();
+
+    const first = await a.sync();
+    expect(first.deletesSkipped).toBe(5);
+    expect(first.cursorUpdated).toBe(false);
+    for (let i = 0; i < 5; i++) {
+      expect(a.hasFile(`shared${i}.md`)).toBe(true);
+    }
+
+    const second = await a.sync();
+    expect(second.deletesSkipped).toBe(5);
+    expect(second.cursorUpdated).toBe(false);
+    for (let i = 0; i < 5; i++) {
+      expect(a.hasFile(`shared${i}.md`)).toBe(true);
+    }
+  });
+
+  test("local folder tree wipe clears remote folder shell", async () => {
+    const sim = new SyncSimulator();
+    const a = sim.addDevice("A", {
+      deleteProtection: true,
+      deleteThreshold: 5,
+      onDeleteGuardTriggered: async () => true,
+    });
+
+    await a.createFolder("tree");
+    await a.editFile("tree/a.md", "a");
+    await a.editFile("tree/b.md", "b");
+    await a.sync();
+    expect(sim.remote.has("tree/a.md")).toBe(true);
+    expect(sim.remote.hasFolder("tree")).toBe(true);
+
+    await a.deleteFile("tree/a.md");
+    await a.deleteFile("tree/b.md");
+    await a.deleteFolder("tree");
+    await a.sync();
+
+    expect(sim.remote.has("tree/a.md")).toBe(false);
+    expect(sim.remote.has("tree/b.md")).toBe(false);
+    expect(sim.remote.hasFolder("tree")).toBe(false);
+  });
+
+  test("remote folder tree wipe clears local folder same cycle", async () => {
+    const sim = new SyncSimulator();
+    const a = sim.addDevice("A", {
+      deleteProtection: true,
+      deleteThreshold: 5,
+      onDeleteGuardTriggered: async () => true,
+    });
+    const app = sim.addDropboxAppDevice("Dropbox");
+
+    await a.createFolder("tree");
+    await a.editFile("tree/a.md", "a");
+    await a.editFile("tree/b.md", "b");
+    await a.sync();
+
+    await app.delete("tree/a.md");
+    await app.delete("tree/b.md");
+    await app.deleteFolder("tree");
+
+    await a.sync();
+
+    expect(a.hasFile("tree/a.md")).toBe(false);
+    expect(a.hasFile("tree/b.md")).toBe(false);
+    const folders = await a.fs.listFolders();
+    expect(folders.some((f) => f.pathLower === "tree")).toBe(false);
+  });
+
+  test("delete children only — empty folder kept both sides", async () => {
+    const sim = new SyncSimulator();
+    const a = sim.addDevice("A", {
+      deleteProtection: true,
+      deleteThreshold: 5,
+      onDeleteGuardTriggered: async () => true,
+    });
+    const b = sim.addDevice("B");
+
+    await a.createFolder("bulk");
+    await a.editFile("bulk/a.md", "a");
+    await a.editFile("bulk/b.md", "b");
+    await a.sync();
+    await b.sync();
+
+    await a.deleteFile("bulk/a.md");
+    await a.deleteFile("bulk/b.md");
+    await a.sync();
+    await b.sync();
+
+    expect(sim.remote.has("bulk/a.md")).toBe(false);
+    expect(sim.remote.has("bulk/b.md")).toBe(false);
+    expect(sim.remote.hasFolder("bulk")).toBe(true);
+    expect((await a.fs.listFolders()).some((f) => f.pathLower === "bulk")).toBe(true);
+    expect((await b.fs.listFolders()).some((f) => f.pathLower === "bulk")).toBe(true);
+  });
 });

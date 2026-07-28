@@ -6,6 +6,8 @@
 
 Use this runbook after any change to delete protection, folder deletes, coalesce, or cursor finalize on Skip. The regressions below were found in live QA — each category must pass before calling deletes “done.”
 
+Automated coverage for the same contracts (without Obsidian UI): see [Sync scenario testing](../../../docs/sync-scenario-testing.md) (“Delete protection / folder wipe regressions”) and `bun test` on `test/guards.test.ts`, `test/plan-folder-items.test.ts`, `test/simulation/delete-protection.test.ts`.
+
 ## Setup
 
 1. Sync Now so `_seeds/` and `_runbooks/` match Dropbox.

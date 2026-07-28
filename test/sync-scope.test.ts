@@ -25,6 +25,8 @@ describe("classifyVaultPath", () => {
 
   test("plugins under .obsidian", () => {
     expect(classifyVaultPath(".obsidian/plugins/foo/main.js", CONFIG)).toBe("plugins");
+    // Exact plugins folder is plugins — not settings (false wipe regression).
+    expect(classifyVaultPath(".obsidian/plugins", CONFIG)).toBe("plugins");
     // Enable list travels with the plugins section so installs activate after sync.
     expect(classifyVaultPath(".obsidian/community-plugins.json", CONFIG)).toBe("plugins");
   });
@@ -32,6 +34,7 @@ describe("classifyVaultPath", () => {
   test("workspace files", () => {
     expect(classifyVaultPath(".obsidian/workspace.json", CONFIG)).toBe("workspaces");
     expect(classifyVaultPath(".obsidian/workspaces/foo.json", CONFIG)).toBe("workspaces");
+    expect(classifyVaultPath(".obsidian/workspaces", CONFIG)).toBe("workspaces");
   });
 
   test("other obsidian config is settings", () => {

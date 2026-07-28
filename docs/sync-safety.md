@@ -95,6 +95,7 @@ Delete intents are also **scoped** to paths the current sync sections can act on
 | `applyResurrectionGuard` | `list_revisions` + ask path for `new_local` uploads |
 | `DeferralTracker` / `open-editors.ts` | 60s bound; dirty background tabs; in-place reload after apply |
 | `SyncEngine.finalizeState` | Cursor checkpoint with durable retry set; delete log must not retain moot/out-of-scope intents |
+| Regression tests | `test/guards.test.ts`, `test/plan-folder-items.test.ts`, `test/simulation/delete-protection.test.ts`, plus scope/disk/executor cases — see [Sync scenario testing](sync-scenario-testing.md) |
 
 ## Technical Gotchas
 

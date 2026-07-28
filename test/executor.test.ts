@@ -431,6 +431,78 @@ describe("executePlan", () => {
     expect(await store.getEntry("stale.md")).toBeNull();
   });
 
+  // ── deleteRemoteFolder / deleteLocalFolder ──
+
+  test("deleteRemoteFolder: path not_found soft-succeeds", async () => {
+    await store.setEntry({
+      pathLower: "gone-tree",
+      localPath: "gone-tree",
+      baseLocalHash: null,
+      baseRemoteHash: null,
+      rev: null,
+      lastSynced: 1000,
+      entryKind: "folder",
+    });
+
+    const plan = mkPlan({
+      pathLower: "gone-tree",
+      localPath: "gone-tree",
+      action: { type: "deleteRemoteFolder", reason: "inferred_local_tree_wipe" },
+    });
+
+    const result = await executePlan(plan, deps);
+    expect(result.failed).toHaveLength(0);
+    expect(result.succeeded).toHaveLength(1);
+    expect(result.succeeded[0].action.type).toBe("deleteRemoteFolder");
+    expect(await store.getEntry("gone-tree")).toBeNull();
+  });
+
+  test("deleteLocalFolder runs after deleteLocal children", async () => {
+    await fs.createFolder("tree");
+    await fs.write("tree/a.md", new TextEncoder().encode("a"));
+    await fs.write("tree/b.md", new TextEncoder().encode("b"));
+
+    const callOrder: string[] = [];
+    const origDelete = fs.delete.bind(fs);
+    const origDeleteFolder = fs.deleteFolder.bind(fs);
+    fs.delete = async (path: string) => {
+      callOrder.push(`file:${path}`);
+      return origDelete(path);
+    };
+    fs.deleteFolder = async (path: string) => {
+      callOrder.push(`folder:${path}`);
+      return origDeleteFolder(path);
+    };
+
+    const plan = mkPlan(
+      {
+        pathLower: "tree/a.md",
+        localPath: "tree/a.md",
+        action: { type: "deleteLocal", reason: "deleted_on_remote" },
+      },
+      {
+        pathLower: "tree/b.md",
+        localPath: "tree/b.md",
+        action: { type: "deleteLocal", reason: "deleted_on_remote" },
+      },
+      {
+        pathLower: "tree",
+        localPath: "tree",
+        action: { type: "deleteLocalFolder", reason: "deleted_on_remote" },
+      },
+    );
+
+    const result = await executePlan(plan, deps);
+    expect(result.failed).toHaveLength(0);
+    expect(result.succeeded).toHaveLength(3);
+    const folderIdx = callOrder.indexOf("folder:tree");
+    expect(folderIdx).toBeGreaterThan(-1);
+    expect(callOrder.indexOf("file:tree/a.md")).toBeLessThan(folderIdx);
+    expect(callOrder.indexOf("file:tree/b.md")).toBeLessThan(folderIdx);
+    expect(fs.has("tree/a.md")).toBe(false);
+    expect((await fs.listFolders()).some((f) => f.pathLower === "tree")).toBe(false);
+  });
+
   // ── conflict ──
 
   test("conflict: 양쪽 파일 모두 보존", async () => {

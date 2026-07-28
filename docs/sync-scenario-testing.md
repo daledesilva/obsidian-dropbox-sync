@@ -17,6 +17,20 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 
 Open-file deferral and continuous-typing debounce are now automated for matrix rows **9 / 18 / 21 / 22 / 29** (plus unit suites under `test/background-sync-schedule.test.ts` and friends). See [Background sync triggers](background-sync-triggers.md) for the quiet-window / leaf-flush contracts those tests lock. Row **23** (unsaved buffer after device sleep) remains a stub.
 
+### Delete protection / folder wipe regressions
+
+Bulk delete, Skip+cursor hold, inferred folder wipes, and keep-empty-folder behaviour are locked outside the matrix as well — they pin bugs found in live QA (runbook [`04-deleting`](../qa/templates/_runbooks/04-deleting.md)):
+
+| Layer | Files | What they lock |
+|---|---|---|
+| Guards | `test/guards.test.ts` | Folder actions peel with files; one folder wipe weighs above R9 threshold |
+| Scope / disk folders | `test/sync-scope.test.ts`, `test/vault-adapter-disk-scan.test.ts` | Exact `.obsidian/plugins` is plugins; `listFolders` + `configDiskScan` sees config dirs |
+| Planner | `test/plan-folder-items.test.ts` | `inferred_local_tree_wipe`; same-cycle `deleteLocalFolder`; unmanaged child block; keep empty |
+| Executor | `test/executor.test.ts` | `deleteRemoteFolder` not_found soft-ok; local folder delete after file deletes |
+| Simulator | `test/simulation/delete-protection.test.ts` | Skip holds cursor on remote-originated deletes; local/remote tree wipe; keep empty folder |
+
+Manual runbook **04** remains required for Obsidian UI timing (Deletions segment before Dropbox) — simulation does not exercise `main.ts` multi-section deferDeletes.
+
 After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).
 
 ```mermaid

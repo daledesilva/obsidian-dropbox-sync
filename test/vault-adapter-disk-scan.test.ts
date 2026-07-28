@@ -127,4 +127,33 @@ describe("VaultAdapter disk scan", () => {
     expect(listed.some((f) => f.path.startsWith(".git/"))).toBe(false);
     expect(listed.some((f) => f.path === "notes/a.md")).toBe(true);
   });
+
+  test("listFolders merges config disk folders when configDiskScan is on", async () => {
+    const vault = createMockVault(
+      [{ path: "note.md", stat: { mtime: 1, size: 4 }, extension: "md", data: new TextEncoder().encode("note").buffer }],
+      {
+        "": { folders: [".obsidian", "notes"] },
+        ".obsidian": { folders: ["plugins"] },
+        ".obsidian/plugins": { folders: ["p1"] },
+        ".obsidian/plugins/p1": { files: ["main.js"] },
+        notes: { files: ["a.md"] },
+      },
+    );
+    // getRoot omits .obsidian (empty children) — Vault/TFolder does not index config.
+    const va = new VaultAdapter(vault as never, [".git/"], {} as never);
+    const withScan = await va.listFolders({
+      configDir: ".obsidian",
+      configDiskScan: true,
+    });
+    const paths = withScan.map((f) => f.path).sort();
+    expect(paths).toContain(".obsidian");
+    expect(paths).toContain(".obsidian/plugins");
+    expect(paths).toContain(".obsidian/plugins/p1");
+
+    const withoutScan = await va.listFolders({
+      configDir: ".obsidian",
+      configDiskScan: false,
+    });
+    expect(withoutScan.some((f) => f.path === ".obsidian/plugins")).toBe(false);
+  });
 });
