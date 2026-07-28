@@ -26,5 +26,6 @@
 ## Log signals
 
 - Plan/action: conflict / keep_both (or equivalent).
+- If the note stays open during Sync Now: `deferring — file is open or dirty in editor` with `action: "conflict"` (R12) — resolution is skipped this cycle and retried on a later sync (or after the ~60s deferral bound).
 - Upload of conflict copy path.
 - No silent overwrite of either version.

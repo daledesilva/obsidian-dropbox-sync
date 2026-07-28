@@ -80,9 +80,9 @@ When revision history (or equivalent durable evidence) shows the path was delete
 
 Repointing this installation at a different Dropbox folder, or otherwise changing vault / link identity, must be recognised as a re-link. The device asks what the user intends before removing local files or treating the new empty remote as authoritative. It must not infer a mass deletion (or mass upload) solely from "everything I knew is missing on the other side" after a folder change.
 
-### R12 — Open editors may delay apply or delete; every deferral is bounded
+### R12 — Open editors may delay apply, conflict, or delete; every deferral is bounded
 
-An open or dirty editor may briefly delay applying an incoming download or a remote delete so the view can reload cleanly, or so the user can choose when a note open here was deleted elsewhere. Every such deferral expires after a bound: the change then applies (and unsaved work conflicts by the normal rules), or the delete prompt is forced. Deferral may change *when* a run finishes a path; it must not change *what* P5 would allow a later manual sync to conclude. Unsaved buffers in any tab Obsidian exposes — not only the active file — are protected until flushed, then treated as ordinary local modifications.
+An open or dirty editor may briefly delay applying an incoming download, a planned **conflict** resolution, or a remote delete so the view can reload cleanly (or so the user can choose when a note open here was deleted elsewhere). A planned conflict that is still open is **skipped for that cycle** and retried on a later sync; after the deferral bound expires the conflict applies even if the note remains open. Every such deferral expires after a bound: the change then applies (and unsaved work conflicts by the normal rules), or the delete prompt is forced. Deferral may change *when* a run finishes a path; it must not change *what* P5 would allow a later manual sync to conclude. Unsaved buffers in any tab Obsidian exposes — not only the active file — are protected until flushed, then treated as ordinary local modifications.
 
 ### R13 — Debounce to settled bursts; one unresolved conflict copy per device per path
 

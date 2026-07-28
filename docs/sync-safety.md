@@ -56,12 +56,12 @@ To recover a deleted file, go to [dropbox.com](https://www.dropbox.com), click *
 
 ## Layer 4: Bounded deferrals for open notes
 
-Sometimes the plugin briefly delays applying a download or a remote delete:
+Sometimes the plugin briefly delays applying a download, a **planned conflict**, or a remote delete:
 
-- A note open in an editor (including dirty buffers in background tabs Obsidian exposes) can wait so the view reloads cleanly
-- A conflict you chose to deal with “later” can wait briefly
+- A note open in an editor (including dirty buffers in background tabs Obsidian exposes) can wait so the view reloads cleanly — including skipping conflict apply until a later sync cycle
+- A conflict you chose to deal with “later” (Ask me → skip) can wait briefly
 
-Every deferral expires after about **60 seconds**. After the bound, the change applies (unsaved work conflicts by the normal rules) or the delete prompt is forced. Deferral changes *when* a path finishes, not *what* a later manual sync would conclude — and it must not hold the shared Dropbox cursor forever.
+Every deferral expires after about **60 seconds**. After the bound, the change applies (unsaved work conflicts by the normal rules) or the delete prompt is forced. Deferral changes *when* a path finishes, not *what* a later manual sync would conclude — and it must not hold the shared Dropbox cursor forever. See [Conflict resolution](conflict-resolution.md) for the open-note conflict skip.
 
 When the user **leaves** a deferred note (active-leaf / file-open change), pending downloads flush with an **immediate** sync cycle — they do not wait for the vault-event debounce used for typing settle. See [Background sync triggers](background-sync-triggers.md).
 

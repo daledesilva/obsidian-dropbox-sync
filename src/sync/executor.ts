@@ -110,6 +110,8 @@ export class ItemTimeoutError extends Error {
 
 const DEFAULT_ITEM_TIMEOUT_MS = 90_000;
 
+// R12: do not rewrite an open/dirty editor mid-cycle — download, planned conflict
+// apply, and deleteLocal wait for a later sync (or the deferral bound) instead.
 const DEFERRABLE_APPLY_ACTIONS = new Set(["download", "conflict", "deleteLocal"]);
 
 function resolveShouldDeferApply(ctx: ExecutorContext): ((path: string) => boolean) | undefined {
@@ -123,6 +125,7 @@ function shouldDeferProtectedItem(
 ): boolean {
   const shouldDeferApply = resolveShouldDeferApply(ctx);
   if (!shouldDeferApply?.(item.localPath)) return false;
+  // Uploads stay executable: open notes may still push local bytes; only inbound/conflict apply waits.
   if (!DEFERRABLE_APPLY_ACTIONS.has(item.action.type)) return false;
 
   const tracker = ctx.deferralTracker;
@@ -181,6 +184,7 @@ async function partitionPlanItems(
       }
     }
 
+    // Planned conflict while open: skip keep_both / Ask-me this cycle; retry on next sync.
     if (shouldDeferProtectedItem(item, ctx)) {
       logRule(ctx.log, SyncRules.R12, "deferring — file is open or dirty in editor", {
         path: item.localPath,
