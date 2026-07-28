@@ -181,4 +181,139 @@ describe("VaultAdapter write / ensureParentDir", () => {
     expect(modifyBinaryCalls).toBe(1);
     expect(new TextDecoder().decode(new Uint8Array(files.get("Notes/hello.md")!))).toBe("hi2");
   });
+
+  test("overwrite cleans leftover .tmp-dropbox-sync sibling via trash", async () => {
+    const files = new Map<string, ArrayBuffer>();
+    const folders = new Set<string>(["Notes"]);
+    const trashed: string[] = [];
+    let modifyBinaryCalls = 0;
+    let renameCalls = 0;
+
+    const fileManager = {
+      renameFile: async (file: { path: string }, to: string) => {
+        renameCalls++;
+        if (files.has(to)) {
+          throw new Error("Destination file already exists!");
+        }
+        const data = files.get(file.path);
+        if (data) {
+          files.delete(file.path);
+          files.set(to, data);
+        }
+      },
+      trashFile: async (file: { path: string }) => {
+        trashed.push(file.path);
+        files.delete(file.path);
+      },
+    };
+
+    const vault = {
+      getFiles: () => [],
+      getAbstractFileByPath: (path: string) => {
+        if (!files.has(path)) {
+          if (folders.has(path)) return { children: {} };
+          return null;
+        }
+        return { path, stat: { mtime: 0, size: 0 }, extension: "md" };
+      },
+      createFolder: async (path: string) => {
+        folders.add(path);
+      },
+      createBinary: async (path: string, data: ArrayBuffer) => {
+        files.set(path, data);
+        return { path };
+      },
+      modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
+        modifyBinaryCalls++;
+        files.set(file.path, data);
+      },
+      readBinary: async () => new ArrayBuffer(0),
+      adapter: {
+        exists: async () => false,
+        mkdir: async () => {},
+        writeBinary: async () => {},
+        readBinary: async () => new ArrayBuffer(0),
+        remove: async () => {},
+        rename: async () => {},
+        stat: async () => ({ mtime: 0, size: 0 }),
+      },
+    };
+
+    const adapter = new VaultAdapter(vault as never, [], fileManager as never);
+    files.set("Notes/hello.md", new TextEncoder().encode("old").buffer);
+    files.set(
+      "Notes/hello.md.tmp-dropbox-sync",
+      new TextEncoder().encode("stale temp").buffer,
+    );
+
+    await adapter.write("Notes/hello.md", new TextEncoder().encode("new"));
+    expect(modifyBinaryCalls).toBe(1);
+    expect(renameCalls).toBe(0);
+    expect(trashed).toContain("Notes/hello.md.tmp-dropbox-sync");
+    expect(files.has("Notes/hello.md.tmp-dropbox-sync")).toBe(false);
+    expect(new TextDecoder().decode(new Uint8Array(files.get("Notes/hello.md")!))).toBe("new");
+  });
+
+  test("new indexed file still uses temp sibling then rename", async () => {
+    const files = new Map<string, ArrayBuffer>();
+    const folders = new Set<string>();
+    let createBinaryCalls = 0;
+    let renameCalls = 0;
+    let modifyBinaryCalls = 0;
+
+    const fileManager = {
+      renameFile: async (file: { path: string }, to: string) => {
+        renameCalls++;
+        const data = files.get(file.path);
+        if (data) {
+          files.delete(file.path);
+          files.set(to, data);
+        }
+      },
+      trashFile: async (file: { path: string }) => {
+        files.delete(file.path);
+      },
+    };
+
+    const vault = {
+      getFiles: () => [],
+      getAbstractFileByPath: (path: string) => {
+        if (files.has(path)) {
+          return { path, stat: { mtime: 0, size: 0 }, extension: "md" };
+        }
+        if (folders.has(path)) return { children: {} };
+        return null;
+      },
+      createFolder: async (path: string) => {
+        folders.add(path);
+      },
+      createBinary: async (path: string, data: ArrayBuffer) => {
+        createBinaryCalls++;
+        files.set(path, data);
+        return { path, stat: { mtime: 0, size: 0 }, extension: "md" };
+      },
+      modifyBinary: async (file: { path: string }, data: ArrayBuffer) => {
+        modifyBinaryCalls++;
+        files.set(file.path, data);
+      },
+      readBinary: async () => new ArrayBuffer(0),
+      adapter: {
+        exists: async () => false,
+        mkdir: async () => {},
+        writeBinary: async () => {},
+        readBinary: async () => new ArrayBuffer(0),
+        remove: async () => {},
+        rename: async () => {},
+        stat: async () => ({ mtime: 0, size: 0 }),
+      },
+    };
+
+    const adapter = new VaultAdapter(vault as never, [], fileManager as never);
+    await adapter.write("Notes/brand-new.md", new TextEncoder().encode("hi"));
+    expect(createBinaryCalls).toBe(1);
+    expect(renameCalls).toBe(1);
+    expect(modifyBinaryCalls).toBe(0);
+    expect(files.has("Notes/brand-new.md")).toBe(true);
+    expect(files.has("Notes/brand-new.md.tmp-dropbox-sync")).toBe(false);
+  });
 });

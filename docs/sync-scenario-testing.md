@@ -13,7 +13,9 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 | Coverage map | Which rows are real vs `todo` | `qa/SIMULATION_COVERAGE.md` |
 | Manual QA vault | Real Dropbox + sandboxed Obsidian | `bun run qa:open` → in-repo `qa-test-vault/` via `obsidian-launcher` |
 
-`test.todo` rows are intentional: open-editor deferral, large binaries, and re-link UI need harness work or a human Dropbox peer. Claiming a row means adding a `run` and updating the coverage map.
+`test.todo` rows are intentional when they need harness work or a human Dropbox peer (large binaries, device sleep, re-link UI). Claiming a row means adding a `run` and updating the coverage map.
+
+Open-file deferral and continuous-typing debounce are now automated for matrix rows **9 / 18 / 21 / 22 / 29** (plus unit suites under `test/background-sync-schedule.test.ts` and friends). See [Background sync triggers](background-sync-triggers.md) for the quiet-window / leaf-flush contracts those tests lock. Row **23** (unsaved buffer after device sleep) remains a stub.
 
 After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).
 

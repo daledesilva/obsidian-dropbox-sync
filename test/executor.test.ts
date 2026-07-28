@@ -646,6 +646,60 @@ describe("executePlan", () => {
     expect(result.deferred).toHaveLength(0);
   });
 
+  test("DeferralTracker: within bound defers; past bound applies", async () => {
+    const { DeferralTracker } = await import("@/sync/deferral-tracker");
+    await remote.upload("bound.md", new TextEncoder().encode("remote"));
+    const plan = mkPlan({
+      pathLower: "bound.md",
+      localPath: "bound.md",
+      action: { type: "download", reason: "new_remote" },
+    });
+
+    const within = new DeferralTracker(60_000);
+    const stillDeferred = await executePlan(plan, deps, {
+      isFileActive: () => true,
+      deferralTracker: within,
+    });
+    expect(stillDeferred.deferred).toHaveLength(1);
+    expect(fs.has("bound.md")).toBe(false);
+
+    const expired = new DeferralTracker(1);
+    expired.markDeferred("bound.md", Date.now() - 10);
+    const applied = await executePlan(plan, deps, {
+      isFileActive: () => true,
+      deferralTracker: expired,
+    });
+    expect(applied.deferred).toHaveLength(0);
+    expect(applied.succeeded).toHaveLength(1);
+    expect(fs.has("bound.md")).toBe(true);
+  });
+
+  test("reloadOpenFile called after successful download, not when deferred", async () => {
+    await remote.upload("reload.md", new TextEncoder().encode("remote"));
+    const plan = mkPlan({
+      pathLower: "reload.md",
+      localPath: "reload.md",
+      action: { type: "download", reason: "new_remote" },
+    });
+
+    const deferredReloads: string[] = [];
+    await executePlan(plan, deps, {
+      isFileActive: () => true,
+      reloadOpenFile: async (path) => {
+        deferredReloads.push(path);
+      },
+    });
+    expect(deferredReloads).toEqual([]);
+
+    const reloads: string[] = [];
+    await executePlan(plan, deps, {
+      reloadOpenFile: async (path) => {
+        reloads.push(path);
+      },
+    });
+    expect(reloads).toEqual(["reload.md"]);
+  });
+
   test("혼합: 활성+비활성 파일 동시 처리", async () => {
     await remote.upload("active.md", new TextEncoder().encode("remote1"));
     await remote.upload("other.md", new TextEncoder().encode("remote2"));

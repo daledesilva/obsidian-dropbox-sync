@@ -15,6 +15,9 @@ describe("getBuiltInExcludePatterns", () => {
     expect(patterns).toContain(".sync-state/");
     expect(patterns).toContain("sync-logs/");
     expect(patterns).toContain("sync-debug-*.log");
+    // Failed download temp siblings must not upload as new Dropbox files.
+    expect(patterns).toContain("*.tmp-dropbox-sync");
+    expect(isExcluded("note.md.tmp-dropbox-sync", patterns)).toBe(true);
     // Workspaces are section-gated — not a built-in exclude.
     expect(patterns).not.toContain(".obsidian/workspace*");
     expect(patterns).toContain(".obsidian/plugins/dropbox-sync/data.json");

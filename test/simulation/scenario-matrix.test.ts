@@ -160,7 +160,31 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(await B.readFile("note.md")).toBe("v2");
     },
   },
-  { row: 9, title: "modify while file open in editor", gap: "G10" },
+  { row: 9, title: "modify while file open in editor", gap: "G10",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      let open = false;
+      const B = sim.addDevice("B", {
+        isFileActive: (path) => open && path === "note.md",
+      });
+      await A.editFile("note.md", "v1");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("note.md")).toBe(true);
+
+      open = true;
+      await A.editFile("note.md", "v2-remote");
+      await A.sync();
+      const deferred = await B.sync();
+      expect(deferred.deferredCount).toBe(1);
+      expect(await B.readFile("note.md")).toBe("v1");
+
+      open = false;
+      await B.sync();
+      expect(await B.readFile("note.md")).toBe("v2-remote");
+    },
+  },
   {
     row: 10,
     title: "simultaneous different modifications",
@@ -322,7 +346,28 @@ const SCENARIO_ROWS: ScenarioRow[] = [
   },
 
   // §3 Simultaneous editing
-  { row: 18, title: "open editor, read-only on other device", gap: "G10" },
+  {
+    row: 18,
+    title: "open editor, read-only on other device",
+    gap: "G10",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      let open = true;
+      const B = sim.addDevice("B", {
+        isFileActive: (path) => open && path === "shared.md",
+      });
+      await A.editFile("shared.md", "from A");
+      await A.sync();
+      const r1 = await B.sync();
+      expect(r1.deferredCount).toBe(1);
+      expect(r1.cursorUpdated).toBe(true);
+      expect(B.hasFile("shared.md")).toBe(false);
+      open = false;
+      await B.sync();
+      expect(await B.readFile("shared.md")).toBe("from A");
+    },
+  },
   {
     row: 19,
     title: "both typing, settled burst conflict",
@@ -366,8 +411,71 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(await C.findConflictSibling("note.md")).toBeDefined();
     },
   },
-  { row: 21, title: "unsaved buffer on incoming change", gap: "G10, G27" },
-  { row: 22, title: "continuous typing debounced" },
+  {
+    row: 21,
+    title: "unsaved buffer on incoming change",
+    gap: "G10, G27",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      let dirty = true;
+      const B = sim.addDevice("B", {
+        // G19 dirty tabs use shouldDeferApply; isFileActive stands in for Memory tests.
+        isFileActive: (path) => dirty && path === "draft.md",
+      });
+      await A.editFile("draft.md", "remote");
+      await A.sync();
+      const r1 = await B.sync();
+      expect(r1.deferredCount).toBe(1);
+      expect(r1.cursorUpdated).toBe(true);
+      dirty = false;
+      await B.sync();
+      expect(await B.readFile("draft.md")).toBe("remote");
+    },
+  },
+  {
+    row: 22,
+    title: "continuous typing debounced",
+    run: async () => {
+      const {
+        decideDebounceFire,
+        decideVaultActivityScheduling,
+        shouldRearmDebounceAfterPendingVaultActivity,
+      } = await import("@/sync/background-sync-schedule");
+      const debounceMs = 5_000;
+      // Mid-cycle autosaves must not arm a timer.
+      expect(
+        decideVaultActivityScheduling({ syncing: true, debounceMs }),
+      ).toEqual({ kind: "pending" });
+      expect(
+        shouldRearmDebounceAfterPendingVaultActivity({
+          backgroundEnabled: true,
+          pendingDebouncedSync: true,
+        }),
+      ).toBe(true);
+      // Continuous typing: each modify resets quiet clock — fire only after full quiet.
+      let lastVaultEventAt = 0;
+      for (const t of [0, 1800, 3600, 5400]) {
+        lastVaultEventAt = t;
+        expect(
+          decideDebounceFire({
+            syncing: false,
+            lastVaultEventAt,
+            now: t + 2000,
+            debounceMs,
+          }).kind,
+        ).toBe("rearm");
+      }
+      expect(
+        decideDebounceFire({
+          syncing: false,
+          lastVaultEventAt,
+          now: lastVaultEventAt + debounceMs,
+          debounceMs,
+        }),
+      ).toEqual({ kind: "sync" });
+    },
+  },
   { row: 23, title: "unsaved buffer after device sleep", gap: "G10, G27" },
   {
     row: 24,
@@ -468,7 +576,35 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       expect(sim.remote.has("note.md")).toBe(false);
     },
   },
-  { row: 29, title: "delete while file open in editor", gap: "G10, G27" },
+  {
+    row: 29,
+    title: "delete while file open in editor",
+    gap: "G10, G27",
+    run: async () => {
+      const sim = new SyncSimulator();
+      const A = sim.addDevice("A");
+      let open = false;
+      const B = sim.addDevice("B", {
+        isFileActive: (path) => open && path === "gone.md",
+        confirmDeleteLocalWhileOpen: async () => false,
+      });
+      await A.editFile("gone.md", "exists");
+      await A.sync();
+      await B.sync();
+      expect(B.hasFile("gone.md")).toBe(true);
+
+      open = true;
+      await A.deleteFile("gone.md");
+      await A.sync();
+      const deferred = await B.sync();
+      expect(deferred.deferredCount).toBe(1);
+      expect(B.hasFile("gone.md")).toBe(true);
+
+      open = false;
+      await B.sync();
+      expect(B.hasFile("gone.md")).toBe(false);
+    },
+  },
   {
     row: 30,
     title: "create then delete before ever syncing",

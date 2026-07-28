@@ -79,6 +79,13 @@ import { applyQaDebugBootstrap } from "./debug/qa-debug-bootstrap";
 import { isConflictFile, type SyncEngine } from "./sync/engine";
 import { ACTIVE_FILE_DEFERRAL_MS, DeferralTracker } from "./sync/deferral-tracker";
 import {
+  decideDebounceFire,
+  decideVaultActivityScheduling,
+  LEAF_FLUSH_DEFERRED_TRIGGER,
+  shouldFlushDeferredApplies,
+  shouldRearmDebounceAfterPendingVaultActivity,
+} from "./sync/background-sync-schedule";
+import {
   parseRetrySet,
   RETRY_SET_META_KEY,
 } from "./sync/retry-set";
@@ -1250,7 +1257,12 @@ export default class DropboxSyncPlugin extends Plugin {
       } else if (this.settings.backgroundSyncEnabled) {
         // Mid-cycle vault edits only set pendingDebouncedSync — re-arm a full
         // quiet window here so we never sync ~0.5s after upload while typing.
-        if (this.pendingDebouncedSync) {
+        if (
+          shouldRearmDebounceAfterPendingVaultActivity({
+            backgroundEnabled: true,
+            pendingDebouncedSync: this.pendingDebouncedSync,
+          })
+        ) {
           this.pendingDebouncedSync = false;
           this.scheduleDebouncedSync("finally:pending-vault-activity");
         }
@@ -1784,7 +1796,11 @@ export default class DropboxSyncPlugin extends Plugin {
    */
   private noteVaultActivityAndScheduleDebounce(reason: string): void {
     this.lastVaultEventAt = Date.now();
-    if (this.syncing) {
+    const decision = decideVaultActivityScheduling({
+      syncing: this.syncing,
+      debounceMs: this.settings.vaultEventDebounceSec * 1000,
+    });
+    if (decision.kind === "pending") {
       this.pendingDebouncedSync = true;
       return;
     }
@@ -1823,20 +1839,22 @@ export default class DropboxSyncPlugin extends Plugin {
   /** Start sync only after a full quiet window since lastVaultEventAt. */
   private fireDebouncedSync(reason = "unspecified"): void {
     const debounceMs = this.settings.vaultEventDebounceSec * 1000;
-    const quietMs = this.lastVaultEventAt
-      ? Date.now() - this.lastVaultEventAt
-      : debounceMs;
-    if (this.syncing) {
+    const decision = decideDebounceFire({
+      syncing: this.syncing,
+      lastVaultEventAt: this.lastVaultEventAt,
+      now: Date.now(),
+      debounceMs,
+    });
+    if (decision.kind === "pending") {
       this.pendingDebouncedSync = true;
       return;
     }
-    if (quietMs < debounceMs) {
-      const remainingMs = debounceMs - quietMs;
+    if (decision.kind === "rearm") {
       this.clearDebounceTimer();
       this.debounceTimerId = window.setTimeout(() => {
         this.debounceTimerId = null;
         this.fireDebouncedSync(`${reason}:rearm`);
-      }, remainingMs);
+      }, decision.remainingMs);
       return;
     }
     void this.syncNow({ trigger: `debounce:${reason}` });
@@ -1889,13 +1907,18 @@ export default class DropboxSyncPlugin extends Plugin {
     const store = this.engineMgr?.store;
     if (!store) return;
     const retryEntries = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
-    if (retryEntries.length === 0) return;
-    const unlocked = retryEntries.filter(
-      (entry) => !shouldDeferApplyForOpenEditors(this.app, entry.localPath),
-    );
-    if (unlocked.length === 0) return;
+    if (
+      !shouldFlushDeferredApplies({
+        backgroundEnabled: this.settings.backgroundSyncEnabled,
+        syncing: this.syncing,
+        retryLocalPaths: retryEntries.map((entry) => entry.localPath),
+        stillDeferred: (localPath) => shouldDeferApplyForOpenEditors(this.app, localPath),
+      })
+    ) {
+      return;
+    }
     this.clearDeferredApplyTimer();
-    void this.syncNow({ trigger: "leaf:flush-deferred" });
+    void this.syncNow({ trigger: LEAF_FLUSH_DEFERRED_TRIGGER });
   }
 
   private clearSyncTimer(): void {

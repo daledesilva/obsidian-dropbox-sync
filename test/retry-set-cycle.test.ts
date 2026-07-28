@@ -11,6 +11,7 @@ import {
   mergeRetryItemsIntoPlan,
   parseRetrySet,
   serializeRetrySet,
+  buildRetrySetAfterCycle,
   RETRY_SET_META_KEY,
   type RetrySetEntry,
 } from "@/sync/retry-set";
@@ -96,5 +97,116 @@ describe("retry set after cursor checkpoint (G27)", () => {
     // Notes failure remains durable for a later notes cycle.
     const stillQueued = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
     expect(stillQueued.some((entry) => entry.pathLower === "note.md")).toBe(true);
+  });
+});
+
+describe("retry set weak-action merge (deferred download / same_content)", () => {
+  test("mergeRetryItemsIntoPlan replaces recordBase/noop with durable download retry", () => {
+    const planItems = [
+      {
+        pathLower: "note.md",
+        localPath: "note.md",
+        action: {
+          type: "recordBase" as const,
+          reason: "same_content",
+          localHash: "abc",
+          remoteHash: "abc",
+          rev: "rev1",
+          pathDisplay: "note.md",
+        },
+      },
+      {
+        pathLower: "other.md",
+        localPath: "other.md",
+        action: { type: "noop" as const, reason: "same" },
+      },
+    ];
+    const retries: RetrySetEntry[] = [
+      {
+        pathLower: "note.md",
+        localPath: "note.md",
+        action: { type: "download", reason: "remote_modified" },
+        errorMessage: "deferred: open or dirty editor",
+        addedAt: 1,
+      },
+    ];
+    const merged = mergeRetryItemsIntoPlan(planItems, retries);
+    const note = merged.find((item) => item.pathLower === "note.md");
+    expect(note?.action.type).toBe("download");
+    expect(merged.find((item) => item.pathLower === "other.md")?.action.type).toBe("noop");
+  });
+
+  test("buildRetrySetAfterCycle keeps deferred download and ignores weak success", () => {
+    const previous: RetrySetEntry[] = [
+      {
+        pathLower: "note.md",
+        localPath: "note.md",
+        action: { type: "download", reason: "remote_modified" },
+        addedAt: 10,
+      },
+    ];
+    const next = buildRetrySetAfterCycle(previous, {
+      succeeded: [
+        {
+          pathLower: "note.md",
+          localPath: "note.md",
+          action: {
+            type: "recordBase",
+            reason: "same_content",
+            localHash: "abc",
+            remoteHash: "abc",
+            rev: "rev1",
+            pathDisplay: "note.md",
+          },
+        },
+      ],
+      failed: [],
+      deferred: [],
+    });
+    expect(next).toHaveLength(1);
+    expect(next[0].action.type).toBe("download");
+
+    const withDeferred = buildRetrySetAfterCycle([], {
+      succeeded: [],
+      failed: [],
+      deferred: [
+        {
+          pathLower: "open.md",
+          localPath: "open.md",
+          action: { type: "download", reason: "new_remote" },
+        },
+      ],
+    }, 100);
+    expect(withDeferred).toHaveLength(1);
+    expect(withDeferred[0].errorMessage).toContain("deferred");
+  });
+
+  test("engine: active-file deferral advances cursor and durable retry applies later", async () => {
+    const fs = new MemoryFileSystem();
+    const remote = new MemoryRemoteStorage();
+    const store = new MemoryStateStore();
+    let active = true;
+    const engine = new SyncEngine(
+      { fs, remote, store },
+      {
+        concurrency: 1,
+        isFileActive: (path) => active && path === "editing.md",
+      },
+    );
+
+    await remote.upload("editing.md", new TextEncoder().encode("from remote"));
+    const r1 = await engine.runCycle();
+    expect(r1.deferredCount).toBe(1);
+    expect(r1.cursorUpdated).toBe(true);
+    expect(fs.has("editing.md")).toBe(false);
+
+    const retry = parseRetrySet(await store.getMeta(RETRY_SET_META_KEY));
+    expect(retry.some((e) => e.localPath === "editing.md" && e.action.type === "download")).toBe(true);
+
+    active = false;
+    const r2 = await engine.runCycle();
+    expect(r2.result.deferred).toHaveLength(0);
+    expect(fs.has("editing.md")).toBe(true);
+    expect(new TextDecoder().decode(await fs.read("editing.md"))).toBe("from remote");
   });
 });
