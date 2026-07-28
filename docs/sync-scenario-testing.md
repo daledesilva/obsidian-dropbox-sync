@@ -31,6 +31,16 @@ Bulk delete, Skip+cursor hold, inferred folder wipes, and keep-empty-folder beha
 
 Manual runbook **04** remains required for Obsidian UI timing (Deletions segment before Dropbox) — simulation does not exercise `main.ts` multi-section deferDeletes.
 
+### R5 / R10 / ordinary remote-delete
+
+The three-way distinction in [R6 upload ask](r6-upload-ask.md) and runbook [`05-delete-crossed-with-edit`](../qa/templates/_runbooks/05-delete-crossed-with-edit.md) is locked as:
+
+| Layer | Files | What they lock |
+|---|---|---|
+| Resurrection guard | `test/resurrection-guard.test.ts` | R10 rewrite; R6 ask/upload/discard/defer; `hasSyncCursor` skips R10; deferred re-gate; missing `listRevisions` |
+| Executor | `test/executor.test.ts` (`preserveAsConflictCopy`) | Local rename + conflict upload; canonical absent both sides |
+| Matrix | rows 34 (linked Dropbox-app delete, no conflict sibling), 35–40 (R5 edit×delete), 82–83 (fresh-join R10 / expired ask) | End-to-end contrast |
+
 After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).
 
 ```mermaid

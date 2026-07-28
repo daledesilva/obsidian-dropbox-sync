@@ -234,6 +234,46 @@ describe("executePlan", () => {
     expect(deletedPaths).toEqual(["test.md"]);
   });
 
+  // ── preserveAsConflictCopy (R10) ──
+
+  test("preserveAsConflictCopy: renames local, uploads conflict, leaves canonical deleted", async () => {
+    // R10: durable delete evidence — keep deletion at the original name, preserve bytes
+    // as a Dropbox-format conflict sibling that syncs everywhere.
+    const localBytes = new TextEncoder().encode("local bytes still present");
+    await fs.write("cross-delete.md", localBytes);
+
+    const plan = mkPlan({
+      pathLower: "cross-delete.md",
+      localPath: "cross-delete.md",
+      action: { type: "preserveAsConflictCopy", reason: "r10_deletion_evidence" },
+    });
+
+    const result = await executePlan(plan, deps);
+    expect(result.succeeded).toHaveLength(1);
+    expect(result.failed).toHaveLength(0);
+
+    // Canonical path stays deleted on both sides.
+    expect(fs.has("cross-delete.md")).toBe(false);
+    expect(remote.has("cross-delete.md")).toBe(false);
+    expect(await store.getEntry("cross-delete.md")).toBeNull();
+
+    const conflictPath = await findConflictSibling(fs, "cross-delete.md");
+    expect(conflictPath).toBeDefined();
+    expect(conflictPath).toMatch(/cross-delete \(Device test's conflicted copy \d{4}-\d{2}-\d{2}\)\.md/);
+
+    // Local rename kept the original bytes.
+    const localConflict = await fs.read(conflictPath!);
+    expect(localConflict).toEqual(localBytes);
+
+    // Conflict sibling uploaded; base written for conflict path only.
+    const remoteConflict = await remote.download(conflictPath!);
+    expect(remoteConflict.data).toEqual(localBytes);
+    const conflictEntry = await store.getEntry(conflictPath!.toLowerCase());
+    expect(conflictEntry).not.toBeNull();
+    expect(conflictEntry!.baseLocalHash).toBe(await dropboxContentHash(localBytes));
+    expect(conflictEntry!.rev).toBeTruthy();
+  });
+
   // ── deleteRemote ──
 
   test("deleteRemote: 원격 파일 삭제", async () => {

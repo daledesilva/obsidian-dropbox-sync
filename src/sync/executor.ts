@@ -1177,6 +1177,8 @@ async function executeItem(
     }
 
     case "preserveAsConflictCopy": {
+      // R10: remote deletion stands at the canonical path; local bytes move to a
+      // Dropbox-format conflict sibling and upload there — never resurrect the original name.
       assertValidSyncPath(localPath, deps.strictLocalPaths ?? false);
       const data = await fs.read(localPath);
       const localHash = await dropboxContentHashBrowser(data);

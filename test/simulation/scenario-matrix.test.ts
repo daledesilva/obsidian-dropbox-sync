@@ -683,6 +683,8 @@ const SCENARIO_ROWS: ScenarioRow[] = [
     row: 34,
     title: "(Dropbox app) deletes in Finder",
     run: async () => {
+      // Linked device + remote delete + unchanged local = ordinary deleteLocal,
+      // not R10 (contrast with row 82 fresh-join conflict copy).
       const sim = new SyncSimulator();
       const app = sim.addDropboxAppDevice("Dropbox");
       const A = sim.addDevice("A");
@@ -691,6 +693,8 @@ const SCENARIO_ROWS: ScenarioRow[] = [
       await app.delete("note.md");
       await A.sync();
       expect(A.hasFile("note.md")).toBe(false);
+      expect(await A.findConflictSibling("note.md")).toBeUndefined();
+      expect(sim.remote.has("note.md")).toBe(false);
     },
   },
 

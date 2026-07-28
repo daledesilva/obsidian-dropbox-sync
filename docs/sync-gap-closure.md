@@ -47,10 +47,11 @@ flowchart TB
 
 ### Fresh join vs delete (G3 / R6 / R10)
 
-1. **Only when the device has no Dropbox cursor** (fresh join / cleared history) do `new_local` uploads pass through `applyResurrectionGuard`.
-2. `list_revisions` shows a deletion → preserve as conflict copy, do not resurrect the path.
-3. No evidence (or API unavailable) → ask upload vs discard; never silent resurrect.
-4. A device that already has a cursor and recreates a path after its own delete uploads with `add` — R10 must not turn that recreate into a conflict copy.
+1. **Only when the device has no Dropbox cursor** (fresh join / cleared history) do `new_local` uploads pass through the full `applyResurrectionGuard` revision checks.
+2. `list_revisions` shows a deletion → `preserveAsConflictCopy` (R10): rename local to a conflict sibling, upload the sibling, leave the canonical path deleted.
+3. No evidence (or API unavailable) → ask upload vs discard; never silent resurrect (R6).
+4. A **linked** device (has cursor) with an unchanged local file after remote delete uses ordinary `deleteLocal` — that is not R10. A linked recreate after its own delete uploads with `add`; R10 must not turn that into a conflict copy.
+5. Linked edit after remote delete is R5 (`local_modified_remote_deleted`), not R10.
 
 ### Empty folders (G8)
 
@@ -98,7 +99,7 @@ ClickUp phase tickets (Os: 0.1): `86d3u7bfu` … `86d3u7bjk`. Implementation com
 - **Conflict detection ≠ scan exclusion.** `isConflictFile` associates siblings for UI/reuse; it must not strip paths from local or remote scans (G1).
 - **`verboseDecisionLogging` is device-local.** Trace-level per-path decisions would flood every machine if stored in synced settings.
 - **Gap table in sync-scenarios.md is historical.** Do not treat “Today …” prose in G* rows as current behaviour after release 0.2 — verify against this page and the modules above.
-- **Resurrection (R6/R10) only runs without a sync cursor.** Devices that already sync must recreate after their own delete via `add`, not `preserveAsConflictCopy`.
+- **Resurrection (R6/R10) only runs full revision checks without a sync cursor.** Linked remote-delete of an unchanged file is `deleteLocal`, not a conflict copy. Devices that already sync must recreate after their own delete via `add`, not `preserveAsConflictCopy`.
 - **Folder base rows must seed incremental remote maps.** Empty folders have no hash/rev; omitting them made peers plan `deleteLocalFolder` and drop children just downloaded into that folder.
 - **Do not `deleteLocalFolder` when unmanaged local children remain.** Peer folder deletes must leave unsynced extras (row 65); file-level deletes remove only tracked children.
 - **Do plan `deleteLocalFolder` when all children are planned `deleteLocal`.** Otherwise a remote folder wipe deletes files in the trailing Deletions segment and leaves an empty local folder behind.
