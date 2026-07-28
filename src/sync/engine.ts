@@ -168,7 +168,7 @@ export interface SyncEngineOptions {
    */
   onExecItem?: (
     localPath: string,
-    actionType: string,
+    action: { type: string; fromPath?: string; toPath?: string },
     event: "start" | "end",
     ok?: boolean,
     error?: string,
@@ -878,17 +878,17 @@ export class SyncEngine {
       onBeforeDeleteLocal: this.options.onBeforeDeleteLocal,
       strictLocalPaths: this.options.strictLocalPaths,
       ctx,
-      onExecItem: (localPath, actionType, event, ok, error) => {
+      onExecItem: (localPath, action, event, ok, error) => {
         if (event === "start") {
           // Newest path when an item begins (concurrency may interleave starts).
           this.options.onActivityPath?.(localPath);
         }
         if (event === "end" && !ok) {
           execFailed++;
-          this.liveReport?.line(`\`${localPath}\` — ${actionType} ✗ ${error ?? ""}`);
+          this.liveReport?.line(`\`${localPath}\` — ${action.type} ✗ ${error ?? ""}`);
         }
         // Forward for per-file status (must run for background cycles too).
-        this.options.onExecItem?.(localPath, actionType, event, ok, error);
+        this.options.onExecItem?.(localPath, action, event, ok, error);
       },
       onPathNotice: this.options.onPathNotice,
     });
@@ -909,7 +909,8 @@ export class SyncEngine {
       item.action.type === "upload"
       || item.action.type === "deleteRemote"
       || item.action.type === "deleteRemoteFolder"
-      || item.action.type === "moveRemote",
+      || item.action.type === "moveRemote"
+      || item.action.type === "moveRemoteFolder",
     );
     if (mutatedRemote) {
       try {
@@ -1056,14 +1057,14 @@ export class SyncEngine {
         },
         onBeforeDeleteLocal: this.options.onBeforeDeleteLocal,
         strictLocalPaths: this.options.strictLocalPaths,
-        onExecItem: (localPath, actionType, event, ok, error) => {
+        onExecItem: (localPath, action, event, ok, error) => {
           if (event === "start") {
             this.options.onActivityPath?.(localPath);
           }
           if (event === "end" && !ok) {
             execFailed++;
           }
-          this.options.onExecItem?.(localPath, actionType, event, ok, error);
+          this.options.onExecItem?.(localPath, action, event, ok, error);
         },
       });
 

@@ -41,6 +41,16 @@ The three-way distinction in [R6 upload ask](r6-upload-ask.md) and runbook [`05-
 | Executor | `test/executor.test.ts` (`preserveAsConflictCopy`) | Local rename + conflict upload; canonical absent both sides |
 | Matrix | rows 34 (linked Dropbox-app delete, no conflict sibling), 35–40 (R5 edit×delete), 82–83 (fresh-join R10 / expired ask) | End-to-end contrast |
 
+### Rename / move (G7 / G8)
+
+File and folder renames/moves (including peer-side) and sync-panel rename vs move chips are locked outside the matrix — see [Rename and move detection](rename-move-detection.md):
+
+| Layer | Files | What they lock |
+|---|---|---|
+| Plan enhancements | `test/plan-enhancements-rename.test.ts` | G7 local/remote file rename/move; ambiguous hash refusal; G8 local/remote folder rename/move; empty unique vs ambiguous |
+| Reporter | `test/summarize-actions.test.ts` | `isSameParentRename`; rename (`Aa`) vs move chips; agnostic modal titles |
+| Executor | `test/executor.test.ts` (`moveRemoteFolder` / `moveLocalFolder`) | Base prefix rewrite so children do not ghost-delete next cycle |
+
 After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).
 
 ```mermaid

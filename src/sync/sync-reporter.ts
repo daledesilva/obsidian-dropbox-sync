@@ -5,6 +5,8 @@ export type ActionSummaryType =
   | "failed"
   | "upload"
   | "download"
+  | "rename"
+  | "move"
   | "conflict"
   | "deleteLocal"
   | "deleteRemote";
@@ -17,12 +19,14 @@ export interface ActionSummaryPart {
 
 /**
  * Panel / notice order: failed first (matches "N failed, … ok" copy), then
- * transfer actions, then conflicts/deletes.
+ * transfer actions, renames, moves, then conflicts/deletes.
  */
 const ACTION_ORDER: ActionSummaryType[] = [
   "failed",
   "upload",
   "download",
+  "rename",
+  "move",
   "conflict",
   "deleteLocal",
   "deleteRemote",
@@ -30,6 +34,66 @@ const ACTION_ORDER: ActionSummaryType[] = [
 
 /** Separator between action summary parts in notices and explorer detail lines. */
 export const ACTION_SUMMARY_SEPARATOR = " \u2022 ";
+
+/** Action-like input for chip classification (executor actions carry from/to on moves). */
+export type ActionSummarySource =
+  | string
+  | { type: string; fromPath?: string; toPath?: string };
+
+function parentDirLower(path: string): string {
+  const normalized = path.replace(/\\/g, "/").replace(/\/+$/, "");
+  const slash = normalized.lastIndexOf("/");
+  return (slash < 0 ? "" : normalized.slice(0, slash)).toLowerCase();
+}
+
+/**
+ * Same-parent path change = rename (including case-only).
+ * Different parent = move. Used so the Aa chip covers all renames, not only casing.
+ */
+export function isSameParentRename(fromPath: string, toPath: string): boolean {
+  const fromNorm = fromPath.replace(/\\/g, "/");
+  const toNorm = toPath.replace(/\\/g, "/");
+  if (fromNorm.toLowerCase() === toNorm.toLowerCase() && fromNorm === toNorm) {
+    return false;
+  }
+  return parentDirLower(fromNorm) === parentDirLower(toNorm);
+}
+
+/**
+ * Map executor action types onto panel chip categories.
+ * Same-parent move* actions → rename (Aa); cross-directory → move (corner arrow).
+ */
+export function toActionSummaryType(action: ActionSummarySource): ActionSummaryType | null {
+  const type = typeof action === "string" ? action : action.type;
+  const fromPath = typeof action === "string" ? undefined : action.fromPath;
+  const toPath = typeof action === "string" ? undefined : action.toPath;
+
+  switch (type) {
+    case "failed":
+    case "upload":
+    case "download":
+    case "rename":
+    case "move":
+    case "conflict":
+    case "deleteLocal":
+    case "deleteRemote":
+      return type;
+    case "moveRemote":
+    case "moveLocal":
+    case "moveRemoteFolder":
+    case "moveLocalFolder":
+      if (fromPath && toPath && isSameParentRename(fromPath, toPath)) {
+        return "rename";
+      }
+      return "move";
+    case "deleteLocalFolder":
+      return "deleteLocal";
+    case "deleteRemoteFolder":
+      return "deleteRemote";
+    default:
+      return null;
+  }
+}
 
 /** e.g. "🚫 1 conflict" / "🚫 2 conflicts" */
 export function formatConflictSummary(count: number): string {
@@ -54,11 +118,24 @@ export function formatActionProgressValue(completed: number, total: number): str
 export const LIVE_PROGRESS_ACTION_TYPES: readonly ActionSummaryType[] = [
   "upload",
   "download",
+  "rename",
+  "move",
 ];
 
-/** True when the action type participates in live upload/download chips. */
-export function isLiveProgressActionType(type: string): type is ActionSummaryType {
-  return (LIVE_PROGRESS_ACTION_TYPES as readonly string[]).includes(type);
+const LIVE_RAW_MOVE_TYPES = new Set([
+  "moveRemote",
+  "moveLocal",
+  "moveRemoteFolder",
+  "moveLocalFolder",
+  "move",
+  "rename",
+]);
+
+/** True when the (raw or summary) action type participates in live chips. */
+export function isLiveProgressActionType(type: string): boolean {
+  if (LIVE_RAW_MOVE_TYPES.has(type)) return true;
+  const summary = toActionSummaryType(type);
+  return summary !== null && (LIVE_PROGRESS_ACTION_TYPES as readonly string[]).includes(summary);
 }
 
 /** Notice / status-bar string for one part (emoji/arrows + value). */
@@ -71,6 +148,12 @@ export function formatActionSummaryPart(part: ActionSummaryPart): string {
       return `\u2191${part.count}`;
     case "download":
       return `\u2193${part.count}`;
+    case "rename":
+      // "Aa" — any same-parent rename (including case-only).
+      return `Aa${part.count}`;
+    case "move":
+      // Corner arrow — cross-directory moves.
+      return `\u21B3${part.count}`;
     case "conflict":
       return formatConflictSummary(part.count);
     case "deleteLocal":
@@ -85,16 +168,16 @@ export function formatActionSummaryPart(part: ActionSummaryPart): string {
 export type ActionSummaryPaths = Partial<Record<ActionSummaryType, string[]>>;
 
 /**
- * Group succeeded localPaths by action type (upload/download/conflict/deletes).
+ * Group succeeded localPaths by action type (upload/download/rename/move/…).
  * Order within each type follows the input order; only ACTION_ORDER types are kept.
  */
 export function groupSucceededPathsByAction(
-  items: { action: { type: string }; localPath: string }[],
+  items: { action: { type: string; fromPath?: string; toPath?: string }; localPath: string }[],
 ): ActionSummaryPaths {
   const grouped: ActionSummaryPaths = {};
   for (const item of items) {
-    const type = item.action.type as ActionSummaryType;
-    if (!ACTION_ORDER.includes(type)) continue;
+    const type = toActionSummaryType(item.action);
+    if (!type || !ACTION_ORDER.includes(type)) continue;
     const list = grouped[type] ?? [];
     list.push(item.localPath);
     grouped[type] = list;
@@ -104,7 +187,7 @@ export function groupSucceededPathsByAction(
 
 /** Paths of succeeded conflict actions (thin wrapper over the grouped map). */
 export function listConflictPaths(
-  items: { action: { type: string }; localPath: string }[],
+  items: { action: { type: string; fromPath?: string; toPath?: string }; localPath: string }[],
 ): string[] {
   return groupSucceededPathsByAction(items).conflict ?? [];
 }
@@ -125,22 +208,26 @@ export function mergeActionSummaryPaths(
   return merged;
 }
 
-/** Modal title for a summary chip's affected-file list. */
+/** Modal title / chip aria for a summary chip's affected-path list (files or folders). */
 export function actionSummaryModalTitle(type: ActionSummaryType): string {
   switch (type) {
     case "failed":
-      return "Failed Files";
+      return "Failed";
     case "upload":
-      return "Uploaded Files";
+      return "Uploaded";
     case "download":
-      return "Downloaded Files";
+      return "Downloaded";
+    case "rename":
+      return "Renamed";
+    case "move":
+      return "Moved";
     case "deleteLocal":
       // Local vault deletes that mirror cloud removals.
       return "Local Deletions";
     case "deleteRemote":
       return "Cloud Deletions";
     case "conflict":
-      return "Conflicted Files";
+      return "Conflicted";
   }
 }
 
@@ -151,8 +238,8 @@ export function actionSummaryModalTitle(type: ActionSummaryType): string {
  */
 export function summarizeResultParts(
   result: {
-    succeeded: { action: { type: string }; localPath: string }[];
-    failed: { item: { localPath: string; action: { type: string } } }[];
+    succeeded: { action: { type: string; fromPath?: string; toPath?: string }; localPath: string }[];
+    failed: { item: { localPath: string; action: { type: string; fromPath?: string; toPath?: string } } }[];
   },
 ): { summaryParts: ActionSummaryPart[]; summaryPaths: ActionSummaryPaths } {
   const summaryParts = summarizeActionParts(result.succeeded);
@@ -176,12 +263,12 @@ export function summarizeResultParts(
 
 /** Structured counts for panel icon/value styling. */
 export function summarizeActionParts(
-  items: { action: { type: string } }[],
+  items: { action: { type: string; fromPath?: string; toPath?: string } }[],
 ): ActionSummaryPart[] {
   const counts: Partial<Record<ActionSummaryType, number>> = {};
   for (const item of items) {
-    const type = item.action.type as ActionSummaryType;
-    if (!ACTION_ORDER.includes(type)) continue;
+    const type = toActionSummaryType(item.action);
+    if (!type || !ACTION_ORDER.includes(type)) continue;
     counts[type] = (counts[type] ?? 0) + 1;
   }
   const parts: ActionSummaryPart[] = [];
@@ -193,7 +280,7 @@ export function summarizeActionParts(
 }
 
 /** 동기화 결과를 아이콘 요약 문자열로 변환. 예: "↑2 • ↓1 • 🚫 1 conflict" */
-export function summarizeActions(items: { action: { type: string } }[]): string {
+export function summarizeActions(items: { action: { type: string; fromPath?: string; toPath?: string } }[]): string {
   const parts = summarizeActionParts(items);
   // recordBase / mkdir / noop succeed without a user-facing transfer chip —
   // never fall back to "N synced" prose (that looked like a transfer with no chip).

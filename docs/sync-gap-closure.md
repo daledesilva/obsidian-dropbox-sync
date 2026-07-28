@@ -53,6 +53,10 @@ flowchart TB
 4. A **linked** device (has cursor) with an unchanged local file after remote delete uses ordinary `deleteLocal` — that is not R10. A linked recreate after its own delete uploads with `add`; R10 must not turn that into a conflict copy.
 5. Linked edit after remote delete is R5 (`local_modified_remote_deleted`), not R10.
 
+### File and folder renames / moves (G7 / G8)
+
+Content-preserving path changes become server-side moves via plan enhancements — see [Rename and move detection](rename-move-detection.md). Folder matches run before file matches; executor rewrites the whole sync-base prefix after a folder move.
+
 ### Empty folders (G8)
 
 1. Empty folders are first-class: create/delete sync as folder actions, not inferred from file paths alone.

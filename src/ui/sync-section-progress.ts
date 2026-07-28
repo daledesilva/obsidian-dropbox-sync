@@ -7,6 +7,7 @@ import {
   formatActionSummaryValue,
   isLiveProgressActionType,
   LIVE_PROGRESS_ACTION_TYPES,
+  toActionSummaryType,
   type ActionSummaryPart,
   type ActionSummaryPaths,
   type ActionSummaryType,
@@ -288,15 +289,17 @@ export class SyncSectionProgress {
    */
   beginLiveActionProgress(
     section: ProgressSegmentId,
-    planItems: { action: { type: string } }[],
+    planItems: { action: { type: string; fromPath?: string; toPath?: string } }[],
   ): void {
     const seg = this.segments.find((s) => s.section === section);
     if (!seg || seg.state !== "active") return;
 
     const totals: ActionSummaryTotals = {};
     for (const item of planItems) {
-      if (!isLiveProgressActionType(item.action.type)) continue;
-      totals[item.action.type] = (totals[item.action.type] ?? 0) + 1;
+      // Map moveRemote/moveLocal onto rename (same parent) or move (cross-directory).
+      const summaryType = toActionSummaryType(item.action);
+      if (!summaryType || !isLiveProgressActionType(summaryType)) continue;
+      totals[summaryType] = (totals[summaryType] ?? 0) + 1;
     }
 
     const parts: ActionSummaryPart[] = [];
@@ -322,18 +325,19 @@ export class SyncSectionProgress {
    */
   recordLiveActionStart(
     section: ProgressSegmentId,
-    actionType: string,
+    action: { type: string; fromPath?: string; toPath?: string } | string,
     path: string,
   ): void {
-    if (!isLiveProgressActionType(actionType)) return;
+    const summaryType = toActionSummaryType(action);
+    if (!summaryType || !isLiveProgressActionType(summaryType)) return;
     const trimmed = path.trim();
     if (!trimmed) return;
-    const key = liveChipStartKey(section, actionType, trimmed);
+    const key = liveChipStartKey(section, summaryType, trimmed);
     const kind: ChipLogLine["kind"] = this.liveChipStartedKeys.has(key)
       ? "retrying"
       : "attempt";
     this.liveChipStartedKeys.add(key);
-    this.appendLiveChipLog(section, actionType, { kind, path: trimmed });
+    this.appendLiveChipLog(section, summaryType, { kind, path: trimmed });
   }
 
   /**
@@ -342,15 +346,16 @@ export class SyncSectionProgress {
    */
   recordLiveActionFailure(
     section: ProgressSegmentId,
-    actionType: string,
+    action: { type: string; fromPath?: string; toPath?: string } | string,
     path: string,
     error?: string,
   ): void {
-    if (!isLiveProgressActionType(actionType)) return;
+    const summaryType = toActionSummaryType(action);
+    if (!summaryType || !isLiveProgressActionType(summaryType)) return;
     const trimmed = path.trim();
     if (!trimmed) return;
     const shortError = error?.trim() ? truncateChipError(error.trim()) : undefined;
-    this.appendLiveChipLog(section, actionType, {
+    this.appendLiveChipLog(section, summaryType, {
       kind: "failed",
       path: trimmed,
       text: shortError,
@@ -358,35 +363,36 @@ export class SyncSectionProgress {
   }
 
   /**
-   * Record one successful upload/download during execute.
+   * Record one successful upload/download/rename/move during execute.
    * Bumps the live chip value in place and appends to an open path modal for that type.
    */
   recordLiveActionSuccess(
     section: ProgressSegmentId,
-    actionType: string,
+    action: { type: string; fromPath?: string; toPath?: string } | string,
     path: string,
   ): void {
-    if (!isLiveProgressActionType(actionType)) return;
+    const summaryType = toActionSummaryType(action);
+    if (!summaryType || !isLiveProgressActionType(summaryType)) return;
     const seg = this.segments.find((s) => s.section === section);
     if (!seg || seg.state !== "active" || seg.phase !== "sync") return;
-    const total = seg.summaryTotals[actionType];
+    const total = seg.summaryTotals[summaryType];
     if (!total) return;
 
     const trimmed = path.trim();
     if (!trimmed) return;
 
-    const paths = seg.summaryPaths[actionType] ?? [];
+    const paths = seg.summaryPaths[summaryType] ?? [];
     paths.push(trimmed);
-    seg.summaryPaths[actionType] = paths;
+    seg.summaryPaths[summaryType] = paths;
 
-    const part = seg.summaryParts.find((p) => p.type === actionType);
+    const part = seg.summaryParts.find((p) => p.type === summaryType);
     if (part) {
       part.count = paths.length;
     } else {
-      seg.summaryParts.push({ type: actionType, count: paths.length });
+      seg.summaryParts.push({ type: summaryType, count: paths.length });
     }
 
-    const valueEl = this.chipValueEls.get(chipValueKey(section, actionType));
+    const valueEl = this.chipValueEls.get(chipValueKey(section, summaryType));
     if (valueEl) {
       // Tick only the completed span so slash/total keep theme-aware styling.
       setLiveProgressValue(valueEl, paths.length, total);
@@ -394,7 +400,7 @@ export class SyncSectionProgress {
       if (chip instanceof HTMLElement) {
         chip.setAttr(
           "aria-label",
-          `${actionSummaryModalTitle(actionType)} (${formatActionProgressValue(paths.length, total)})`,
+          `${actionSummaryModalTitle(summaryType)} (${formatActionProgressValue(paths.length, total)})`,
         );
       }
     } else {
@@ -402,7 +408,7 @@ export class SyncSectionProgress {
     }
 
     // Success also goes into the live log (and open modal) as a success line.
-    this.appendLiveChipLog(section, actionType, { kind: "success", path: trimmed });
+    this.appendLiveChipLog(section, summaryType, { kind: "success", path: trimmed });
   }
 
   /** Append one live chip log line and mirror into an open modal for that chip. */
@@ -1336,6 +1342,14 @@ function appendSummaryIcons(parent: HTMLElement, type: ActionSummaryType): void 
       break;
     case "download":
       appendSummaryIcon(wrap, "arrow-down");
+      break;
+    case "rename":
+      // Aa — any same-parent rename (name change or case-only).
+      appendSummaryIcon(wrap, "case-sensitive");
+      break;
+    case "move":
+      // Corner/return arrow — cross-directory path moves.
+      appendSummaryIcon(wrap, "corner-down-right");
       break;
     case "conflict":
       // Circle-slash ≈ Ghostbusters stop; colour comes from themed CSS.

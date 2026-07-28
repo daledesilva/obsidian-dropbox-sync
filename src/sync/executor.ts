@@ -85,7 +85,7 @@ export interface ExecutorConfig {
   /** 라이브 리포트: 실행 항목 시작/종료 */
   onExecItem?: (
     localPath: string,
-    actionType: string,
+    action: { type: string; fromPath?: string; toPath?: string },
     event: "start" | "end",
     ok?: boolean,
     error?: string,
@@ -382,18 +382,18 @@ export async function executePlan(
   for (const item of conflicts) {
     if (ctx.signal?.aborted) break;
     const actionType = item.action.type;
-    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.onExecItem?.(item.localPath, item.action, "start");
     ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
     const start = Date.now();
     try {
       await executeItem(item, ctx);
-      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.onExecItem?.(item.localPath, item.action, "end", true);
       ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
       succeeded.push(item);
     } catch (e) {
       if (e instanceof ConflictSkippedError) {
         if (shouldDeferProtectedItem(item, ctx)) {
-          ctx.onExecItem?.(item.localPath, actionType, "end", true);
+          ctx.onExecItem?.(item.localPath, item.action, "end", true);
           ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
           deferred.push(item);
         } else {
@@ -404,13 +404,13 @@ export async function executePlan(
           if (conflictResult.conflictSiblingPath) {
             item.conflictSiblingPath = conflictResult.conflictSiblingPath;
           }
-          ctx.onExecItem?.(item.localPath, actionType, "end", true);
+          ctx.onExecItem?.(item.localPath, item.action, "end", true);
           ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: Date.now() - start });
           succeeded.push(item);
         }
       } else {
         const errMsg = (e as Error).message;
-        ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
+        ctx.onExecItem?.(item.localPath, item.action, "end", false, errMsg);
         ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: Date.now() - start });
         failed.push({ item, error: e as Error });
       }
@@ -663,7 +663,7 @@ async function executeDeleteRemoteBatch(
     error?: Error,
   ): Promise<void> => {
     const actionType = "deleteRemote";
-    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.onExecItem?.(item.localPath, item.action, "start");
     ctx.ctx?.emit({
       type: "exec_start",
       ts: Date.now(),
@@ -675,12 +675,12 @@ async function executeDeleteRemoteBatch(
         await ctx.store.deleteEntry(item.pathLower);
       } catch (storeErr) {
         const err = storeErr instanceof Error ? storeErr : new Error(String(storeErr));
-        ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+        ctx.onExecItem?.(item.localPath, item.action, "end", false, err.message);
         failed.push({ item, error: err });
         hooks.onItemSettled();
         return;
       }
-      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.onExecItem?.(item.localPath, item.action, "end", true);
       ctx.ctx?.emit({
         type: "exec_end",
         ts: Date.now(),
@@ -692,7 +692,7 @@ async function executeDeleteRemoteBatch(
       succeeded.push(item);
     } else {
       const err = error ?? new Error("deleteRemote failed");
-      ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+      ctx.onExecItem?.(item.localPath, item.action, "end", false, err.message);
       ctx.ctx?.emit({
         type: "exec_end",
         ts: Date.now(),
@@ -719,15 +719,15 @@ async function executeDeleteRemoteBatch(
         continue;
       }
       const actionType = "deleteRemote";
-      ctx.onExecItem?.(item.localPath, actionType, "start");
+      ctx.onExecItem?.(item.localPath, item.action, "start");
       try {
         await executeItem(item, ctx);
-        ctx.onExecItem?.(item.localPath, actionType, "end", true);
+        ctx.onExecItem?.(item.localPath, item.action, "end", true);
         succeeded.push(item);
         hooks.onItemSettled();
       } catch (itemErr) {
         const err = itemErr instanceof Error ? itemErr : new Error(String(itemErr));
-        ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+        ctx.onExecItem?.(item.localPath, item.action, "end", false, err.message);
         failed.push({ item, error: err });
         hooks.onItemSettled();
       }
@@ -756,15 +756,15 @@ async function executeDeleteRemoteBatch(
       continue;
     }
     const actionType = "download";
-    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.onExecItem?.(item.localPath, item.action, "start");
     try {
       await executeItem(item, ctx);
-      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.onExecItem?.(item.localPath, item.action, "end", true);
       succeeded.push(item);
       hooks.onItemSettled();
     } catch (itemErr) {
       const err = itemErr instanceof Error ? itemErr : new Error(String(itemErr));
-      ctx.onExecItem?.(item.localPath, actionType, "end", false, err.message);
+      ctx.onExecItem?.(item.localPath, item.action, "end", false, err.message);
       failed.push({ item, error: err });
       hooks.onItemSettled();
     }
@@ -896,7 +896,7 @@ async function runExecutableBatch(
   const tasks = items.map((item) => async () => {
     const actionType = item.action.type;
     const isDelete = actionType === "deleteRemote" || actionType === "deleteLocal";
-    ctx.onExecItem?.(item.localPath, actionType, "start");
+    ctx.onExecItem?.(item.localPath, item.action, "start");
     ctx.ctx?.emit({ type: "exec_start", ts: Date.now(), pathLower: item.pathLower, action: actionType });
     if (isDelete) {
       ctx.log?.("exec delete start", {
@@ -908,7 +908,7 @@ async function runExecutableBatch(
     try {
       await raceWithTimeout(executeItem(item, ctx), itemTimeoutMs, ctx.signal);
       const durationMs = Date.now() - start;
-      ctx.onExecItem?.(item.localPath, actionType, "end", true);
+      ctx.onExecItem?.(item.localPath, item.action, "end", true);
       ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: true, duration: durationMs });
       if (isDelete) {
         ctx.log?.("exec delete ok", {
@@ -929,7 +929,7 @@ async function runExecutableBatch(
     } catch (e) {
       const errMsg = (e as Error).message;
       const durationMs = Date.now() - start;
-      ctx.onExecItem?.(item.localPath, actionType, "end", false, errMsg);
+      ctx.onExecItem?.(item.localPath, item.action, "end", false, errMsg);
       ctx.ctx?.emit({ type: "exec_end", ts: Date.now(), pathLower: item.pathLower, action: actionType, ok: false, error: errMsg, duration: durationMs });
       if (isDelete || e instanceof ItemTimeoutError || durationMs >= SLOW_ITEM_LOG_MS) {
         ctx.log?.("exec item failed", {
@@ -1428,9 +1428,45 @@ async function relocateFolderSyncEntry(
 ): Promise<void> {
   const fromLower = fromPath.toLowerCase();
   const toLower = toPath.toLowerCase();
-  await updateFolderSyncState(store, toLower, toPath, pathDisplay ?? toPath);
-  if (fromLower !== toLower) {
-    await store.deleteEntry(fromLower);
+  // Folder server-move relocates the whole tree on Dropbox — rewrite every base
+  // entry under the old prefix so the next cycle does not see ghost deletes.
+  const entries = await store.getAllEntries();
+  const toRewrite = entries.filter(
+    (entry) =>
+      entry.pathLower === fromLower || entry.pathLower.startsWith(`${fromLower}/`),
+  );
+  // Deepest paths first so we never briefly collide path_lower keys while rewriting.
+  toRewrite.sort((a, b) => b.pathLower.length - a.pathLower.length);
+
+  for (const entry of toRewrite) {
+    const newLower =
+      entry.pathLower === fromLower
+        ? toLower
+        : `${toLower}${entry.pathLower.slice(fromLower.length)}`;
+    // Preserve child-segment casing from the existing localPath / display.
+    const newLocalPath =
+      entry.pathLower === fromLower
+        ? toPath
+        : `${toPath}${entry.localPath.slice(fromLower.length)}`;
+    const priorDisplay = entry.basePathDisplay ?? entry.localPath;
+    const newDisplay =
+      entry.pathLower === fromLower
+        ? (pathDisplay ?? toPath)
+        : `${pathDisplay ?? toPath}${priorDisplay.slice(fromLower.length)}`;
+    await store.setEntry({
+      ...entry,
+      pathLower: newLower,
+      localPath: newLocalPath,
+      basePathDisplay: newDisplay,
+      lastSynced: Date.now(),
+    });
+    if (entry.pathLower !== newLower) {
+      await store.deleteEntry(entry.pathLower);
+    }
+  }
+
+  if (toRewrite.length === 0) {
+    await updateFolderSyncState(store, toLower, toPath, pathDisplay ?? toPath);
   }
 }
 

@@ -70,9 +70,24 @@ export class MemoryFileSystem implements FileSystem {
   // eslint-disable-next-line @typescript-eslint/require-await -- sync-only implementation
   async rename(from: string, to: string): Promise<void> {
     const file = this.files.get(from);
-    if (!file) throw new Error(`File not found: ${from}`);
-    this.files.delete(from);
-    this.files.set(to, file);
+    if (file) {
+      this.files.delete(from);
+      this.files.set(to, file);
+      return;
+    }
+    // Folder rename (G8): same prefix rewrite as renameFolder so moveLocalFolder
+    // memory tests mirror VaultAdapter.rename on TFolder.
+    const fromNorm = from.replace(/\/+$/, "");
+    const fromPrefix = `${fromNorm}/`;
+    const hasFolder = this.folders.has(fromNorm);
+    const hasChildren = [...this.files.keys()].some(
+      (p) => p.startsWith(fromPrefix) || p.toLowerCase().startsWith(fromPrefix.toLowerCase()),
+    );
+    if (hasFolder || hasChildren) {
+      await this.renameFolder(from, to);
+      return;
+    }
+    throw new Error(`File not found: ${from}`);
   }
 
   /**

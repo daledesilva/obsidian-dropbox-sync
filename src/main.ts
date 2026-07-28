@@ -1563,7 +1563,8 @@ export default class DropboxSyncPlugin extends Plugin {
         if (plan.items.length <= threshold) return;
         this.promoteBackgroundToInteractive(plan.items.length, threshold, plan.items);
       },
-      onExecItem: (localPath: string, actionType: string, event: "start" | "end", ok?: boolean, error?: string) => {
+      onExecItem: (localPath: string, action: { type: string; fromPath?: string; toPath?: string }, event: "start" | "end", ok?: boolean, error?: string) => {
+        const actionType = action.type;
         if (event === "start") {
           this.fileSyncStatus.markSyncing(
             localPath,
@@ -1576,17 +1577,17 @@ export default class DropboxSyncPlugin extends Plugin {
           ) {
             this.sectionProgress?.recordLiveActionStart(
               this.progressSection,
-              actionType,
+              action,
               localPath,
             );
           }
           return;
         }
-        // Grow live upload/download chips + open path modal as items succeed.
+        // Grow live upload/download/rename/move chips + open path modal as items succeed.
         if (event === "end" && ok === true && this.progressSection) {
           this.sectionProgress?.recordLiveActionSuccess(
             this.progressSection,
-            actionType,
+            action,
             localPath,
           );
         }
@@ -1603,7 +1604,7 @@ export default class DropboxSyncPlugin extends Plugin {
           ) {
             this.sectionProgress?.recordLiveActionFailure(
               this.progressSection,
-              actionType,
+              action,
               localPath,
               error,
             );

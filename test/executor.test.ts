@@ -1195,6 +1195,157 @@ describe("executePlan", () => {
     expect(await findConflictSibling(fs, "test.md")).toBe(existingCopy);
     expect(await fs.read(existingCopy)).toEqual(localData);
   });
+
+  // ── folder move base relocation (G8) ──
+
+  test("moveRemoteFolder rewrites all base entries under the moved prefix", async () => {
+    const fileData = new TextEncoder().encode("nested body");
+    const fileHash = await dropboxContentHash(fileData);
+    const fileRev = "rev-nested-1";
+
+    await remote.createFolder("seeds/notes");
+    await remote.createFolder("seeds/notes/empty-child");
+    await remote.upload("seeds/notes/a.md", fileData);
+
+    await store.setEntry({
+      pathLower: "seeds/notes",
+      localPath: "seeds/notes",
+      basePathDisplay: "seeds/notes",
+      baseLocalHash: null,
+      baseRemoteHash: null,
+      rev: null,
+      lastSynced: 1000,
+      entryKind: "folder",
+    });
+    await store.setEntry({
+      pathLower: "seeds/notes/empty-child",
+      localPath: "seeds/notes/empty-child",
+      basePathDisplay: "seeds/notes/empty-child",
+      baseLocalHash: null,
+      baseRemoteHash: null,
+      rev: null,
+      lastSynced: 1000,
+      entryKind: "folder",
+    });
+    await store.setEntry({
+      pathLower: "seeds/notes/a.md",
+      localPath: "seeds/notes/a.md",
+      basePathDisplay: "seeds/notes/a.md",
+      baseLocalHash: fileHash,
+      baseRemoteHash: fileHash,
+      rev: fileRev,
+      lastSynced: 1000,
+      entryKind: "file",
+    });
+
+    const plan = mkPlan({
+      pathLower: "seeds/notes",
+      localPath: "seeds/notes",
+      action: {
+        type: "moveRemoteFolder",
+        fromPath: "seeds/notes",
+        toPath: "seeds/notes-renamed",
+        reason: "folder_rename_detected",
+      },
+    });
+
+    const result = await executePlan(plan, deps);
+    expect(result.failed).toHaveLength(0);
+    expect(result.succeeded).toHaveLength(1);
+
+    expect(await store.getEntry("seeds/notes")).toBeNull();
+    expect(await store.getEntry("seeds/notes/a.md")).toBeNull();
+    expect(await store.getEntry("seeds/notes/empty-child")).toBeNull();
+
+    const folderEntry = await store.getEntry("seeds/notes-renamed");
+    expect(folderEntry).not.toBeNull();
+    expect(folderEntry!.localPath).toBe("seeds/notes-renamed");
+    expect(folderEntry!.entryKind).toBe("folder");
+
+    const nestedFolder = await store.getEntry("seeds/notes-renamed/empty-child");
+    expect(nestedFolder).not.toBeNull();
+    expect(nestedFolder!.localPath).toBe("seeds/notes-renamed/empty-child");
+
+    const nestedFile = await store.getEntry("seeds/notes-renamed/a.md");
+    expect(nestedFile).not.toBeNull();
+    expect(nestedFile!.localPath).toBe("seeds/notes-renamed/a.md");
+    expect(nestedFile!.baseLocalHash).toBe(fileHash);
+    expect(nestedFile!.baseRemoteHash).toBe(fileHash);
+    expect(nestedFile!.rev).toBe(fileRev);
+  });
+
+  test("moveLocalFolder rewrites all base entries under the moved prefix", async () => {
+    const fileData = new TextEncoder().encode("peer nested");
+    const fileHash = await dropboxContentHash(fileData);
+
+    await fs.createFolder("folders");
+    await fs.createFolder("folders/empty-keep");
+    await fs.write("folders/nested.md", fileData);
+
+    await store.setEntry({
+      pathLower: "folders",
+      localPath: "folders",
+      basePathDisplay: "folders",
+      baseLocalHash: null,
+      baseRemoteHash: null,
+      rev: null,
+      lastSynced: 1000,
+      entryKind: "folder",
+    });
+    await store.setEntry({
+      pathLower: "folders/empty-keep",
+      localPath: "folders/empty-keep",
+      basePathDisplay: "folders/empty-keep",
+      baseLocalHash: null,
+      baseRemoteHash: null,
+      rev: null,
+      lastSynced: 1000,
+      entryKind: "folder",
+    });
+    await store.setEntry({
+      pathLower: "folders/nested.md",
+      localPath: "folders/nested.md",
+      basePathDisplay: "folders/nested.md",
+      baseLocalHash: fileHash,
+      baseRemoteHash: fileHash,
+      rev: "rev-peer-1",
+      lastSynced: 1000,
+      entryKind: "file",
+    });
+
+    const plan = mkPlan({
+      pathLower: "folders",
+      localPath: "folders",
+      action: {
+        type: "moveLocalFolder",
+        fromPath: "folders",
+        toPath: "case/folders",
+        reason: "folder_rename_detected",
+      },
+    });
+
+    const result = await executePlan(plan, deps);
+    expect(result.failed).toHaveLength(0);
+    expect(result.succeeded).toHaveLength(1);
+
+    expect(await store.getEntry("folders")).toBeNull();
+    expect(await store.getEntry("folders/nested.md")).toBeNull();
+    expect(await store.getEntry("folders/empty-keep")).toBeNull();
+
+    expect(await store.getEntry("case/folders")).not.toBeNull();
+    expect((await store.getEntry("case/folders"))!.localPath).toBe("case/folders");
+    expect((await store.getEntry("case/folders/empty-keep"))!.localPath).toBe(
+      "case/folders/empty-keep",
+    );
+    const nestedFile = await store.getEntry("case/folders/nested.md");
+    expect(nestedFile).not.toBeNull();
+    expect(nestedFile!.localPath).toBe("case/folders/nested.md");
+    expect(nestedFile!.baseLocalHash).toBe(fileHash);
+    expect(nestedFile!.rev).toBe("rev-peer-1");
+
+    // Local tree relocated too (memory FS folder rename).
+    expect(await fs.read("case/folders/nested.md")).toEqual(fileData);
+  });
 });
 
 // ── makeConflictPath ──

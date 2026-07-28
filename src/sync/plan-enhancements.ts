@@ -140,6 +140,26 @@ function isFolderRemote(entry: RemoteEntry): boolean {
   return !!entry.isFolder;
 }
 
+function pathIsUnderOrEqual(pathLower: string, folderLower: string): boolean {
+  return pathLower === folderLower || pathLower.startsWith(`${folderLower}/`);
+}
+
+function relativizeUnder(pathLower: string, folderLower: string): string | null {
+  if (pathLower === folderLower) return "";
+  const prefix = `${folderLower}/`;
+  if (!pathLower.startsWith(prefix)) return null;
+  return pathLower.slice(prefix.length);
+}
+
+function joinUnder(folderLower: string, relative: string): string {
+  return relative ? `${folderLower}/${relative}` : folderLower;
+}
+
+function pathBasename(pathLower: string): string {
+  const slash = pathLower.lastIndexOf("/");
+  return slash < 0 ? pathLower : pathLower.slice(slash + 1);
+}
+
 /** G14: detect file-vs-folder at the same path_lower. */
 function detectPathCollisions(
   localFiles: Map<string, FileInfo>,
@@ -214,6 +234,7 @@ function detectContentRenames(
   remoteMap: Map<string, RemoteEntry>,
   baseMap: Map<string, SyncEntry>,
   consumedPaths: Set<string>,
+  log?: SyncMonitorLog,
 ): RenameMatch[] {
   const matches: RenameMatch[] = [];
   const hashToLocal = new Map<string, FileInfo[]>();
@@ -236,8 +257,13 @@ function detectContentRenames(
     if (isFolderEntry(base)) continue;
     const hash = base.baseLocalHash ?? base.baseRemoteHash;
     if (!hash) continue;
-    if (localMap.has(base.pathLower) || remoteMap.has(base.pathLower)) continue;
     if (consumedPaths.has(base.pathLower)) continue;
+
+    const localAtBase = localMap.has(base.pathLower);
+    const remoteAtBase = remoteMap.has(base.pathLower);
+    // Skip only when both sides still have the base path — a local rename leaves
+    // remote at the old path, and a remote rename leaves local there.
+    if (localAtBase && remoteAtBase) continue;
 
     const localCandidates = (hashToLocal.get(hash) ?? []).filter(
       (f) => f.pathLower !== base.pathLower,
@@ -246,10 +272,33 @@ function detectContentRenames(
       (e) => e.pathLower !== base.pathLower,
     );
 
-    const localMatch = localCandidates[0];
-    const remoteMatch = remoteCandidates[0];
+    // Prefer a unique same-hash candidate so duplicate content cannot false-pair.
+    const localMatch = localCandidates.length === 1 ? localCandidates[0] : undefined;
+    const remoteMatch = remoteCandidates.length === 1 ? remoteCandidates[0] : undefined;
 
-    if (localMatch && remoteMatch && localMatch.pathLower === remoteMatch.pathLower) {
+    // #region agent log
+    logTemp(log, "P5", "G7 rename candidate probe", {
+      runId: "post-fix",
+      hypothesisId: "H1-H2",
+      base: base.pathLower,
+      hash: hash.slice(0, 8),
+      localAtBase,
+      remoteAtBase,
+      localCandidateCount: localCandidates.length,
+      remoteCandidateCount: remoteCandidates.length,
+      localCandidatesSample: localCandidates.map((f) => f.pathLower).slice(0, 3),
+      remoteCandidatesSample: remoteCandidates.map((e) => e.pathLower).slice(0, 3),
+    }, { location: "plan-enhancements.detectContentRenames", hypothesisId: "H1" });
+    // #endregion
+
+    // Both sides left base and landed on the same new path (peer already synced).
+    if (
+      localMatch
+      && remoteMatch
+      && localMatch.pathLower === remoteMatch.pathLower
+      && !localAtBase
+      && !remoteAtBase
+    ) {
       matches.push({
         fromPathLower: base.pathLower,
         toPathLower: localMatch.pathLower,
@@ -263,9 +312,28 @@ function detectContentRenames(
       continue;
     }
 
-    if (localMatch && !remoteMap.has(base.pathLower)) {
+    // Local rename/move: old path gone locally, still on remote; unique new local path.
+    if (localMatch && !localAtBase) {
       const remoteStillAtBase = remoteMap.get(base.pathLower);
-      if (remoteStillAtBase && !remoteStillAtBase.deleted && remoteStillAtBase.hash === hash) {
+      const willMatch = Boolean(
+        remoteStillAtBase
+        && !remoteStillAtBase.deleted
+        && remoteStillAtBase.hash === hash
+        && !remoteMap.has(localMatch.pathLower),
+      );
+      // #region agent log
+      logTemp(log, "P5", "G7 local-branch attempt", {
+        runId: "post-fix",
+        hypothesisId: "H2",
+        base: base.pathLower,
+        to: localMatch.pathLower,
+        remoteStillAtBase: Boolean(remoteStillAtBase),
+        remoteHashMatch: remoteStillAtBase?.hash === hash,
+        destFreeOnRemote: !remoteMap.has(localMatch.pathLower),
+        willMatch,
+      }, { location: "plan-enhancements.detectContentRenames", hypothesisId: "H2" });
+      // #endregion
+      if (willMatch) {
         matches.push({
           fromPathLower: base.pathLower,
           toPathLower: localMatch.pathLower,
@@ -277,9 +345,27 @@ function detectContentRenames(
         consumedPaths.add(base.pathLower);
         consumedPaths.add(localMatch.pathLower);
       }
-    } else if (remoteMatch && !localMap.has(base.pathLower)) {
+    } else if (remoteMatch && !remoteAtBase) {
+      // Remote rename/move: old path gone remotely, still local; unique new remote path.
       const localStillAtBase = localMap.get(base.pathLower);
-      if (localStillAtBase && localStillAtBase.hash === hash) {
+      const willMatch = Boolean(
+        localStillAtBase
+        && localStillAtBase.hash === hash
+        && !localMap.has(remoteMatch.pathLower),
+      );
+      // #region agent log
+      logTemp(log, "P5", "G7 remote-branch attempt", {
+        runId: "post-fix",
+        hypothesisId: "H2",
+        base: base.pathLower,
+        to: remoteMatch.pathLower,
+        localStillAtBase: Boolean(localStillAtBase),
+        localHashMatch: localStillAtBase?.hash === hash,
+        destFreeOnLocal: !localMap.has(remoteMatch.pathLower),
+        willMatch,
+      }, { location: "plan-enhancements.detectContentRenames", hypothesisId: "H2" });
+      // #endregion
+      if (willMatch) {
         matches.push({
           fromPathLower: base.pathLower,
           toPathLower: remoteMatch.pathLower,
@@ -304,6 +390,17 @@ function detectContentRenames(
       );
       if (remotes.length !== 1) continue;
       const remote = remotes[0]!;
+      // #region agent log
+      // H5: warm renames fail cold path when old remote path still has a base row.
+      logTemp(log, "P5", "G7 cold-path candidate", {
+        hypothesisId: "H5",
+        local: local.pathLower,
+        remote: remote.pathLower,
+        hash: hash.slice(0, 8),
+        remoteHasBase: baseMap.has(remote.pathLower),
+        willSkipForBase: baseMap.has(remote.pathLower),
+      }, { location: "plan-enhancements.detectContentRenames", hypothesisId: "H5" });
+      // #endregion
       if (baseMap.has(remote.pathLower)) continue;
       matches.push({
         fromPathLower: remote.pathLower,
@@ -317,6 +414,20 @@ function detectContentRenames(
       consumedPaths.add(local.pathLower);
     }
   }
+
+  // #region agent log
+  logTemp(log, "P5", "G7 detectContentRenames result", {
+    runId: "post-fix",
+    hypothesisId: "H1-H5",
+    matchCount: matches.length,
+    matches: matches.map((m) => ({
+      from: m.fromPathLower,
+      to: m.toPathLower,
+      side: m.side,
+      hash: m.hash.slice(0, 8),
+    })),
+  }, { location: "plan-enhancements.detectContentRenames", hypothesisId: "H1" });
+  // #endregion
 
   return matches;
 }
@@ -384,10 +495,371 @@ function applyRenameMatches(
   return { items, stats };
 }
 
+interface FolderRenameMatch {
+  fromPathLower: string;
+  toPathLower: string;
+  fromDisplay: string;
+  toDisplay: string;
+  side: "local" | "remote";
+  fileCount: number;
+}
+
+type FolderRenameCandidate = {
+  from: SyncEntry;
+  toPathLower: string;
+  toDisplay: string;
+  fileCount: number;
+  basenameMatch: boolean;
+  side: "local" | "remote";
+};
+
+/**
+ * G8: detect folder rename/move by preserved relative tree under a new path.
+ * Local side → moveRemoteFolder; remote (peer) side → moveLocalFolder.
+ * Without this, a renamed folder becomes create*Folder + N file moves +
+ * delete*Folder instead of one folder move.
+ */
+function detectFolderRenames(
+  localFolders: Map<string, FolderInfo>,
+  remoteFolders: Map<string, RemoteEntry>,
+  baseFolders: Map<string, SyncEntry>,
+  localFiles: Map<string, FileInfo>,
+  remoteFiles: Map<string, RemoteEntry>,
+  baseFiles: SyncEntry[],
+  localDeletedPaths: Set<string> | undefined,
+  log?: SyncMonitorLog,
+): FolderRenameMatch[] {
+  const matches: FolderRenameMatch[] = [];
+  const consumed = new Set<string>();
+  const candidates: FolderRenameCandidate[] = [];
+
+  // Local renamed/moved: old path gone locally, still on remote; new local folder.
+  const oldLocals = [...baseFolders.values()].filter((base) => {
+    if (localFolders.has(base.pathLower)) return false;
+    if (!remoteFolders.has(base.pathLower)) return false;
+    if (localDeletedPaths?.has(base.pathLower)) return false;
+    return true;
+  });
+  const newLocals = [...localFolders.values()].filter(
+    (folder) => !remoteFolders.has(folder.pathLower),
+  );
+  for (const from of oldLocals) {
+    for (const to of newLocals) {
+      const scored = scoreLocalFolderRename(
+        from.pathLower,
+        to.pathLower,
+        baseFolders,
+        baseFiles,
+        localFolders,
+        localFiles,
+        log,
+      );
+      if (!scored.ok) continue;
+      candidates.push({
+        from,
+        toPathLower: to.pathLower,
+        toDisplay: to.path,
+        fileCount: scored.fileCount,
+        basenameMatch: pathBasename(from.pathLower) === pathBasename(to.pathLower),
+        side: "local",
+      });
+    }
+  }
+
+  // Remote (peer) renamed/moved: old path still local, gone on remote; new remote folder.
+  const oldRemotes = [...baseFolders.values()].filter((base) => {
+    if (!localFolders.has(base.pathLower)) return false;
+    if (remoteFolders.has(base.pathLower)) return false;
+    if (localDeletedPaths?.has(base.pathLower)) return false;
+    return true;
+  });
+  const newRemotes = [...remoteFolders.values()].filter(
+    (folder) => !localFolders.has(folder.pathLower),
+  );
+  for (const from of oldRemotes) {
+    for (const to of newRemotes) {
+      const scored = scoreRemoteFolderRename(
+        from.pathLower,
+        to.pathLower,
+        baseFolders,
+        baseFiles,
+        remoteFolders,
+        remoteFiles,
+      );
+      if (!scored.ok) continue;
+      candidates.push({
+        from,
+        toPathLower: to.pathLower,
+        toDisplay: to.pathDisplay,
+        fileCount: scored.fileCount,
+        basenameMatch: pathBasename(from.pathLower) === pathBasename(to.pathLower),
+        side: "remote",
+      });
+    }
+  }
+
+  // Prefer parent folders (shorter paths) so one move covers the tree.
+  candidates.sort((a, b) => {
+    const len = a.from.pathLower.length - b.from.pathLower.length;
+    if (len !== 0) return len;
+    if (a.basenameMatch !== b.basenameMatch) return a.basenameMatch ? -1 : 1;
+    return b.fileCount - a.fileCount;
+  });
+
+  for (const candidate of candidates) {
+    if (consumed.has(candidate.from.pathLower) || consumed.has(candidate.toPathLower)) {
+      continue;
+    }
+    if ([...consumed].some((root) =>
+      pathIsUnderOrEqual(candidate.from.pathLower, root)
+      || pathIsUnderOrEqual(candidate.toPathLower, root)
+    )) {
+      continue;
+    }
+    // Empty-folder renames are ambiguous when many empties appear; require basename match.
+    if (candidate.fileCount === 0 && !candidate.basenameMatch) {
+      const sameBasename = candidates.filter((c) =>
+        c.from.pathLower === candidate.from.pathLower
+        && c.side === candidate.side
+        && c.basenameMatch
+      );
+      if (sameBasename.length === 0) {
+        const rivals = candidates.filter((c) =>
+          c.from.pathLower === candidate.from.pathLower && c.side === candidate.side
+        );
+        if (rivals.length !== 1) continue;
+      } else {
+        continue;
+      }
+    }
+
+    const fromDisplay = candidate.side === "local"
+      ? (
+        remoteFolders.get(candidate.from.pathLower)?.pathDisplay
+        ?? candidate.from.basePathDisplay
+        ?? candidate.from.localPath
+      )
+      : (
+        localFolders.get(candidate.from.pathLower)?.path
+        ?? candidate.from.basePathDisplay
+        ?? candidate.from.localPath
+      );
+
+    matches.push({
+      fromPathLower: candidate.from.pathLower,
+      toPathLower: candidate.toPathLower,
+      fromDisplay,
+      toDisplay: candidate.toDisplay,
+      side: candidate.side,
+      fileCount: candidate.fileCount,
+    });
+    consumed.add(candidate.from.pathLower);
+    consumed.add(candidate.toPathLower);
+  }
+
+  // #region agent log
+  logTemp(log, "P5", "G8 folder rename detect result", {
+    runId: "post-fix",
+    hypothesisId: "F2",
+    oldLocalCount: oldLocals.length,
+    newLocalCount: newLocals.length,
+    oldRemoteCount: oldRemotes.length,
+    newRemoteCount: newRemotes.length,
+    candidateCount: candidates.length,
+    matchCount: matches.length,
+    matches: matches.map((m) => ({
+      from: m.fromPathLower,
+      to: m.toPathLower,
+      side: m.side,
+      fileCount: m.fileCount,
+    })),
+  }, { location: "plan-enhancements.detectFolderRenames", hypothesisId: "F2" });
+  // #endregion
+
+  return matches;
+}
+
+/**
+ * True when every base file/folder under `from` is present under `to` locally
+ * at the *same relative path* with matching hash. A folder rename plus an
+ * inner-file rename in the same window fails here (relative lookup misses) —
+ * that concurrent case needs residual same-tree file moves after the folder move.
+ */
+function scoreLocalFolderRename(
+  fromLower: string,
+  toLower: string,
+  baseFolders: Map<string, SyncEntry>,
+  baseFiles: SyncEntry[],
+  localFolders: Map<string, FolderInfo>,
+  localFiles: Map<string, FileInfo>,
+  log?: SyncMonitorLog,
+): { ok: boolean; fileCount: number } {
+  let fileCount = 0;
+  for (const base of baseFiles) {
+    if (isFolderEntry(base)) continue;
+    const relative = relativizeUnder(base.pathLower, fromLower);
+    if (relative === null || relative === "") continue;
+    const expectedLower = joinUnder(toLower, relative);
+    const local = localFiles.get(expectedLower);
+    if (!local) {
+      // #region agent log
+      logTemp(log, "P5", "G8 scoreLocal miss — relative path absent under destination", {
+        runId: "nested-rename",
+        hypothesisId: "N1",
+        fromLower,
+        toLower,
+        baseFile: base.pathLower,
+        expectedLower,
+        relative,
+      }, { location: "plan-enhancements.scoreLocalFolderRename", hypothesisId: "N1" });
+      // #endregion
+      return { ok: false, fileCount: 0 };
+    }
+    const hash = base.baseLocalHash ?? base.baseRemoteHash;
+    if (hash && local.hash !== hash) {
+      // #region agent log
+      logTemp(log, "P5", "G8 scoreLocal miss — hash mismatch at relative path", {
+        runId: "nested-rename",
+        hypothesisId: "N2",
+        fromLower,
+        toLower,
+        baseFile: base.pathLower,
+        expectedLower,
+      }, { location: "plan-enhancements.scoreLocalFolderRename", hypothesisId: "N2" });
+      // #endregion
+      return { ok: false, fileCount: 0 };
+    }
+    fileCount++;
+  }
+  for (const base of baseFolders.values()) {
+    const relative = relativizeUnder(base.pathLower, fromLower);
+    if (relative === null || relative === "") continue;
+    if (!localFolders.has(joinUnder(toLower, relative))) {
+      // #region agent log
+      logTemp(log, "P5", "G8 scoreLocal miss — nested folder absent under destination", {
+        runId: "nested-rename",
+        hypothesisId: "N3",
+        fromLower,
+        toLower,
+        baseFolder: base.pathLower,
+        expectedLower: joinUnder(toLower, relative),
+      }, { location: "plan-enhancements.scoreLocalFolderRename", hypothesisId: "N3" });
+      // #endregion
+      return { ok: false, fileCount: 0 };
+    }
+  }
+  return { ok: true, fileCount };
+}
+
+/** True when every base file/folder under `from` is present under `to` on remote. */
+function scoreRemoteFolderRename(
+  fromLower: string,
+  toLower: string,
+  baseFolders: Map<string, SyncEntry>,
+  baseFiles: SyncEntry[],
+  remoteFolders: Map<string, RemoteEntry>,
+  remoteFiles: Map<string, RemoteEntry>,
+): { ok: boolean; fileCount: number } {
+  let fileCount = 0;
+  for (const base of baseFiles) {
+    if (isFolderEntry(base)) continue;
+    const relative = relativizeUnder(base.pathLower, fromLower);
+    if (relative === null || relative === "") continue;
+    const remote = remoteFiles.get(joinUnder(toLower, relative));
+    if (!remote || remote.deleted || remote.isFolder || !remote.hash) {
+      return { ok: false, fileCount: 0 };
+    }
+    const hash = base.baseLocalHash ?? base.baseRemoteHash;
+    if (hash && remote.hash !== hash) return { ok: false, fileCount: 0 };
+    fileCount++;
+  }
+  for (const base of baseFolders.values()) {
+    const relative = relativizeUnder(base.pathLower, fromLower);
+    if (relative === null || relative === "") continue;
+    if (!remoteFolders.has(joinUnder(toLower, relative))) {
+      return { ok: false, fileCount: 0 };
+    }
+  }
+  return { ok: true, fileCount };
+}
+
+function applyFolderRenameMatches(
+  plan: SyncPlan,
+  matches: FolderRenameMatch[],
+  log?: SyncMonitorLog,
+): SyncPlan {
+  if (matches.length === 0) return plan;
+
+  // Drop per-file moves/uploads/deletes covered by a folder-level move.
+  const filteredItems = plan.items.filter((item) => {
+    const covered = matches.some((match) =>
+      pathIsUnderOrEqual(item.pathLower, match.fromPathLower)
+      || pathIsUnderOrEqual(item.pathLower, match.toPathLower)
+      || (
+        "fromPath" in item.action
+        && typeof (item.action as { fromPath?: string }).fromPath === "string"
+        && pathIsUnderOrEqual(
+          (item.action as { fromPath: string }).fromPath.toLowerCase(),
+          match.fromPathLower,
+        )
+      )
+    );
+    if (!covered) return true;
+    const action = item.action.type;
+    return action === "noop" || action === "recordBase";
+  });
+
+  const stats = emptyStats();
+  const items: SyncPlanItem[] = [...filteredItems];
+
+  for (const match of matches) {
+    // Local rename → push folder move to Dropbox; remote rename → adopt locally.
+    const action: SyncAction = match.side === "local"
+      ? {
+          type: "moveRemoteFolder",
+          fromPath: match.fromDisplay,
+          toPath: match.toDisplay,
+          reason: match.fileCount === 0 ? "empty_folder_rename" : "folder_rename_detected",
+        }
+      : {
+          type: "moveLocalFolder",
+          fromPath: match.fromDisplay,
+          toPath: match.toDisplay,
+          reason: match.fileCount === 0 ? "empty_folder_rename" : "folder_rename_detected",
+        };
+    logTemp(log, "P5", "G8 folder rename match", {
+      runId: "post-fix",
+      hypothesisId: "F2",
+      from: match.fromDisplay,
+      to: match.toDisplay,
+      side: match.side,
+      fileCount: match.fileCount,
+      reason: action.reason,
+      actionType: action.type,
+    }, { location: "plan-enhancements.applyFolderRenameMatches", hypothesisId: "F2" });
+    items.push({
+      pathLower: match.toPathLower,
+      localPath: match.toDisplay,
+      action,
+    });
+    if (action.type === "moveRemoteFolder") stats.moveRemoteFolder++;
+    else stats.moveLocalFolder++;
+  }
+
+  for (const item of filteredItems) {
+    const t = item.action.type;
+    if (t in stats) (stats as Record<string, number>)[t]++;
+  }
+
+  return { items, stats };
+}
+
 function planFolderItems(
   input: PlanEnhancementInput,
   /** path_lower of file items already planned as deleteLocal in this enhance pass. */
   plannedDeleteLocalPathLowers: Set<string> = new Set(),
+  /** Folder paths (and trees) already handled by moveRemoteFolder / moveLocalFolder. */
+  folderMoveConsumed: Set<string> = new Set(),
 ): SyncPlanItem[] {
   const { localFolders, localFiles, remoteEntries, baseEntries, localDeletedPaths, log } = input;
   const localMap = new Map(localFolders.map((f) => [f.pathLower, f]));
@@ -434,7 +906,11 @@ function planFolderItems(
 
   const items: SyncPlanItem[] = [];
 
+  const isConsumedByFolderMove = (pathLower: string): boolean =>
+    [...folderMoveConsumed].some((root) => pathIsUnderOrEqual(pathLower, root));
+
   for (const pathLower of allPathLowers) {
+    if (isConsumedByFolderMove(pathLower)) continue;
     const local = localMap.get(pathLower);
     const remote = remoteMap.get(pathLower);
     const base = baseMap.get(pathLower);
@@ -551,30 +1027,6 @@ function planFolderItems(
     }
   }
 
-  // Empty folder rename: base folder gone locally, new local folder, remote still at old path.
-  for (const base of baseMap.values()) {
-    if (localMap.has(base.pathLower) || remoteMap.has(base.pathLower)) continue;
-    if (localDeletedPaths?.has(base.pathLower)) continue;
-    const remoteAtBase = remoteMap.get(base.pathLower);
-    if (!remoteAtBase) continue;
-
-    for (const local of localMap.values()) {
-      if (baseMap.has(local.pathLower)) continue;
-      if (remoteMap.has(local.pathLower)) continue;
-      items.push({
-        pathLower: local.pathLower,
-        localPath: local.path,
-        action: {
-          type: "moveRemoteFolder",
-          fromPath: base.localPath,
-          toPath: local.path,
-          reason: "empty_folder_rename",
-        },
-      });
-      break;
-    }
-  }
-
   return items;
 }
 
@@ -646,9 +1098,72 @@ export function enhanceSyncPlan(basePlan: SyncPlan, input: PlanEnhancementInput)
 
   let plan = applyCasingToFilePlan(basePlan, input);
 
+  const remoteFolders = new Map(
+    input.remoteEntries
+      .filter((e) => e.isFolder && !e.deleted)
+      .map((e) => [e.pathLower, e]),
+  );
+  const remoteFiles = new Map(
+    input.remoteEntries
+      .filter((e) => !e.isFolder && !e.deleted && !!e.hash)
+      .map((e) => [e.pathLower, e]),
+  );
+  const baseFolders = new Map(
+    input.baseEntries.filter(isFolderEntry).map((e) => [e.pathLower, e]),
+  );
+  const baseFiles = input.baseEntries.filter((e) => !isFolderEntry(e));
+
+  // G8 folder moves first — one folder move covers the tree and avoids
+  // create*Folder + N file moves + delete*Folder.
+  const folderMatches = detectFolderRenames(
+    localFolderMap,
+    remoteFolders,
+    baseFolders,
+    localMap,
+    remoteFiles,
+    baseFiles,
+    input.localDeletedPaths,
+    input.log,
+  );
+
   const consumedPaths = new Set<string>();
-  const renameMatches = detectContentRenames(localMap, remoteMap, baseMap, consumedPaths);
+  for (const match of folderMatches) {
+    for (const pathLower of baseMap.keys()) {
+      if (
+        pathIsUnderOrEqual(pathLower, match.fromPathLower)
+        || pathIsUnderOrEqual(pathLower, match.toPathLower)
+      ) {
+        consumedPaths.add(pathLower);
+      }
+    }
+    for (const pathLower of localMap.keys()) {
+      if (
+        pathIsUnderOrEqual(pathLower, match.fromPathLower)
+        || pathIsUnderOrEqual(pathLower, match.toPathLower)
+      ) {
+        consumedPaths.add(pathLower);
+      }
+    }
+    // Peer folder moves: suppress G7 file pairs that target the new remote tree.
+    for (const pathLower of remoteMap.keys()) {
+      if (
+        pathIsUnderOrEqual(pathLower, match.fromPathLower)
+        || pathIsUnderOrEqual(pathLower, match.toPathLower)
+      ) {
+        consumedPaths.add(pathLower);
+      }
+    }
+  }
+
+  const renameMatches = detectContentRenames(
+    localMap,
+    remoteMap,
+    baseMap,
+    consumedPaths,
+    input.log,
+  );
   plan = applyRenameMatches(plan, renameMatches, input.log);
+  plan = applyFolderRenameMatches(plan, folderMatches, input.log);
 
   const collisionItems = detectPathCollisions(localMap, localFolderMap, remoteMap, input.log);
   const plannedDeleteLocalPathLowers = new Set(
@@ -656,7 +1171,16 @@ export function enhanceSyncPlan(basePlan: SyncPlan, input: PlanEnhancementInput)
       .filter((item) => item.action.type === "deleteLocal")
       .map((item) => item.pathLower),
   );
-  const folderItems = planFolderItems(input, plannedDeleteLocalPathLowers);
+  const folderMoveConsumed = new Set<string>();
+  for (const match of folderMatches) {
+    folderMoveConsumed.add(match.fromPathLower);
+    folderMoveConsumed.add(match.toPathLower);
+  }
+  const folderItems = planFolderItems(
+    input,
+    plannedDeleteLocalPathLowers,
+    folderMoveConsumed,
+  );
 
   const collisionPathLowers = new Set(collisionItems.map((i) => i.pathLower));
   const filteredPlanItems = plan.items.filter((item) => !collisionPathLowers.has(item.pathLower));
