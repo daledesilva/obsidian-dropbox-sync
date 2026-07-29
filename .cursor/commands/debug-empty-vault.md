@@ -2,7 +2,7 @@
 
 Wipe the in-repo QA vault **without** `_seeds/` fixtures (join / rejoin shape), wire Cursor Debug ingest to **this** Debug session, and open sandboxed Obsidian.
 
-Invoke as `/debug-empty-vault`. Optional text after the command is context (e.g. runbook 10, iPad).
+Invoke as `/debug-empty-vault`. Optional text after the command is context (e.g. runbook 07, iPad).
 
 ## Preconditions
 
@@ -43,9 +43,9 @@ One shot: matching ingest offer + relay for **this** session → `bun run qa:emp
    - Confirm the canary appears in `.cursor/debug-<sessionId>.log`.
 
 5. **Hand off** briefly:
-   - Local vault is empty of test fixtures (no `_seeds/` notes) — use for **runbook 10** (joining / rejoining), not seeded playground scenarios.
+   - Local vault is empty of test fixtures (no `_seeds/` notes) — use for **runbook 07** (joining / rejoining), not seeded playground scenarios.
    - Dropbox remote was **not** wiped — clear the linked folder in Dropbox web if they need an empty peer.
-   - Point them at `_runbooks/10-joining-or-rejoining.md` (or the runbook they named).
+   - Point them at `_runbooks/07-joining-or-rejoining.md` (or the runbook they named).
 
 ## Do not
 

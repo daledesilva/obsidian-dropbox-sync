@@ -89,5 +89,5 @@ flowchart TD
 - **Empty folders never use G8.** No content signal — always create+delete (guards false pairs like `empty-keep` → renamed parent).
 - **Sync root (`""` / `"/"`) is never a folder-rename endpoint.** Empty remnants must not pair with the vault root (Dropbox rejects `move_v2` to `/`).
 - **Base rewrite is prefix-wide.** Updating only the folder row leaves children keyed under the old path_lower.
-- **Manual QA:** runbook `06-renaming-and-moving` uses two Sync Now passes — Pass 1 (A–D intact moves) then Pass 2 (E–H sibling renames + compound/empty fallbacks) — with exact seed paths. Rate-limited `move_v2` failures (`too_many_write_operations`) are real executor failures; retry Sync Now is expected, not a detection bug.
+- **Manual QA:** runbook `02-renaming-and-moving` uses two Sync Now passes — Pass 1 (A–D intact moves) then Pass 2 (E–H sibling renames + compound/empty fallbacks) — with exact seed paths. Rate-limited `move_v2` failures (`too_many_write_operations`) are real executor failures; retry Sync Now is expected, not a detection bug.
 - **Memory FS `rename` must handle folders** the same way as `VaultAdapter` so executor tests exercise `moveLocalFolder`.

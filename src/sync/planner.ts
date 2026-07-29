@@ -74,6 +74,7 @@ function classifyBothExist(
   }
 
   if (!base) {
+    // Runbook-dependent log — do not remove: runbook 08 asserts conflict / keep_both plan path.
     logRule(options?.log, [SyncRules.R1, SyncRules.R2], "conflict: differing content, no base", {
       path,
       localHash: shortHash(local.hash),
@@ -86,6 +87,7 @@ function classifyBothExist(
   const remoteChanged = remote.hash !== base.baseRemoteHash;
 
   if (localChanged && remoteChanged) {
+    // Runbook-dependent log — do not remove: runbook 08 asserts both-sides-changed conflict.
     logRule(options?.log, [SyncRules.R1, SyncRules.R2], "conflict: both sides changed since base", {
       path,
       localHash: shortHash(local.hash),
@@ -124,6 +126,7 @@ function classifyLocalOnly(
     // base 대비 변경됨 → 삭제+수정 교차 → upload (변경 우선)
     if (local.hash !== base.baseLocalHash) {
       // R5: an edit beats a delete — the file is resurrected.
+      // Runbook-dependent log — do not remove: runbook 04 Pass 1 asserts "edit beats … delete".
       logRule(options?.log, SyncRules.R5, "edit beats remote delete — resurrecting", {
         path,
         localHash: shortHash(local.hash),
@@ -156,6 +159,7 @@ function classifyRemoteOnly(
     // base 대비 변경됨 → 삭제+수정 교차 → download (변경 우선)
     if (remote.hash !== base.baseRemoteHash) {
       // R5: the remote edit beats this device's delete.
+      // Runbook-dependent log — do not remove: paired with local R5; runbook 04 notices / logs.
       logRule(options?.log, SyncRules.R5, "remote edit beats local delete — restoring", {
         path,
         remoteHash: shortHash(remote.hash),

@@ -331,6 +331,7 @@ export async function resolveConflictKeepRemoteCanonical(
     conflictHash: shortHash(localHash),
   }, { location: "conflict-handlers.resolveKeepRemoteCanonical" });
 
+  // Runbook-dependent log — do not remove: runbook 08 asserts keep_both / remote canonical.
   logRule(log, [SyncRules.R1, SyncRules.R2, SyncRules.R4], "conflict resolved: keep_both (remote canonical)", {
     path: localPath,
     canonicalHolder: "remote",

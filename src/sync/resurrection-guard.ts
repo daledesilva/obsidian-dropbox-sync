@@ -103,6 +103,7 @@ export async function applyResurrectionGuard(
       continue;
     }
 
+    // Runbook-dependent log — do not remove: runbook 04 Pass D asserts list_revisions evidence probe.
     logRule(options.log, [SyncRules.R6, SyncRules.R10], "list_revisions checked for resurrection risk", {
       path: item.localPath,
       revisionCount: revisions.length,
@@ -110,6 +111,7 @@ export async function applyResurrectionGuard(
     }, { location: "resurrection-guard.apply" });
 
     if (hasDeletionEvidence(revisions)) {
+      // Runbook-dependent log — do not remove: runbook 04 Pass D asserts list_revisions / R10 / preserveAsConflictCopy.
       logTemp(options.log, "P3", "R10 — deletion evidence; preserving as conflict copy", {
         path: item.localPath,
         revisionCount: revisions.length,

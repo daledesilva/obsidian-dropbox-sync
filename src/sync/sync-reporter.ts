@@ -64,6 +64,9 @@ export function isSameParentRename(fromPath: string, toPath: string): boolean {
  * Map executor action types onto panel chip categories.
  * Same-parent move* actions → rename (Aa); cross-directory → move (corner arrow).
  * Folder creates count under upload/download so file + folder creations share one chip.
+ *
+ * Runbook-dependent chips — do not remove or reclassify without updating runbooks:
+ * runbook 02 expects Aa rename chips and ↳ move chips for moveRemote / moveRemoteFolder.
  */
 export function toActionSummaryType(action: ActionSummarySource): ActionSummaryType | null {
   const type = typeof action === "string" ? action : action.type;
@@ -151,21 +154,28 @@ export function formatActionSummaryPart(part: ActionSummaryPart): string {
       // Ballot X — distinct from conflict’s prohibition sign.
       return `\u2717${part.count}`;
     case "upload":
+      // Runbook-dependent chip — do not remove: runbooks 01 / 02 / 05 assert upload chips.
       return `\u2191${part.count}`;
     case "download":
+      // Runbook-dependent chip — do not remove: runbooks 01 / 07 assert download chips.
       return `\u2193${part.count}`;
     case "rename":
       // "Aa" — any same-parent rename (including case-only).
+      // Runbook-dependent chip — do not remove: runbook 02 asserts rename chip (Aa).
       return `Aa${part.count}`;
     case "move":
       // Corner arrow — cross-directory moves.
+      // Runbook-dependent chip — do not remove: runbook 02 asserts move chip.
       return `\u21B3${part.count}`;
     case "conflict":
+      // Runbook-dependent chip — do not remove: runbooks 05 / 08 assert conflict chips.
       return formatConflictSummary(part.count);
     case "deleteLocal":
       // Keep direction (local↓ / remote↑) but use a trash can instead of ✗.
+      // Runbook-dependent chip — do not remove: runbooks 01 / 03 assert local delete chips.
       return `\u2193\u{1F5D1}${part.count}`;
     case "deleteRemote":
+      // Runbook-dependent chip — do not remove: runbooks 01 / 03 assert cloud delete chips.
       return `\u2191\u{1F5D1}${part.count}`;
   }
 }

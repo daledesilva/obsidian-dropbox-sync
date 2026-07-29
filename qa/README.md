@@ -52,13 +52,13 @@ bun run qa:deploy      # copy dist into that vault’s dropbox-sync plugin folde
 ```bash
 bun run qa:reset       # reseed _seeds/_runbooks only — keeps auth + sync state
 bun run qa:restart     # ERASE local vault, recreate *with* _seeds/ fixtures, open
-bun run qa:empty        # ERASE local vault, recreate *empty* (no fixtures), open — runbook 10
+bun run qa:empty        # ERASE local vault, recreate *empty* (no fixtures), open — runbook 07
 bun run qa:wipe        # erase + regenerate only (no Obsidian launch)
 ```
 
 **Local wipe ≠ remote wipe.** `qa:restart` / `qa:empty` / `qa:wipe` clear the local vault only. Clear the linked Dropbox folder in Dropbox web if you need a clean remote peer.
 
-For **runbook 10 (Joining or rejoining)**, use `bun run qa:empty` (empty vault). Use `qa:restart` when you need the seeded playground again.
+For **runbook 07 (Joining or rejoining)**, use `bun run qa:empty` (empty vault). Use `qa:restart` when you need the seeded playground again.
 
 ## Live protocol (you + agent)
 
@@ -92,7 +92,7 @@ qa-test-vault/            # generated vault root (gitignored)
 
 ## Source of truth for scenarios
 
-Runbooks cite sections of [`docs/sync-scenarios.md`](../docs/sync-scenarios.md). Simulation coverage for those rows is tracked in [`SIMULATION_COVERAGE.md`](./SIMULATION_COVERAGE.md). How the matrix, simulator, and this vault fit together: [`docs/sync-scenario-testing.md`](../docs/sync-scenario-testing.md).
+Runbooks cite sections of [`docs/sync-scenarios.md`](../docs/sync-scenarios.md). How the eight lean multi-pass scripts are structured (disjoint paths, Sync and validate, runbook-dependent logs): [`docs/qa-runbooks.md`](../docs/qa-runbooks.md). Simulation coverage for matrix rows is tracked in [`SIMULATION_COVERAGE.md`](./SIMULATION_COVERAGE.md). How the matrix, simulator, and this vault fit together: [`docs/sync-scenario-testing.md`](../docs/sync-scenario-testing.md).
 
 ## Future
 

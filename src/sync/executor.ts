@@ -168,6 +168,7 @@ async function partitionPlanItems(
         const deleteHere = await ctx.confirmDeleteLocalWhileOpen(item.localPath);
         if (!deleteHere) {
           if (shouldDeferProtectedItem(item, ctx)) {
+            // Runbook-dependent log — do not remove: runbook 06 / 08 assert open-file deferral wording.
             logRule(ctx.log, SyncRules.R12, "deferring deleteLocal — keep editing", {
               path: item.localPath,
               action: actionType,
@@ -186,6 +187,7 @@ async function partitionPlanItems(
 
     // Planned conflict while open: skip keep_both / Ask-me this cycle; retry on next sync.
     if (shouldDeferProtectedItem(item, ctx)) {
+      // Runbook-dependent log — do not remove: runbook 08 expects this exact message with action: "conflict".
       logRule(ctx.log, SyncRules.R12, "deferring — file is open or dirty in editor", {
         path: item.localPath,
         action: actionType,
@@ -478,6 +480,7 @@ async function verifyCoalescedFolderDeletes(
       const liveFolders = live.filter((f) => f.isFolder).map((f) => f.pathLower).slice(0, 8);
       // Include liveOnly / liveFolders so logs show whether an extra file or nested
       // folder blocked coalesce (self-folder entries are already filtered above).
+      // Runbook-dependent log — do not remove: runbook 03 Pass E asserts liveOnly / liveFolders fields.
       log?.("exec folder verify set mismatch — file deletes only", {
         folder,
         planned: planned.size,
@@ -1015,6 +1018,10 @@ function isDropboxPathNotFoundError(err: unknown): boolean {
 /**
  * Log the intent of a mutation before it is attempted. Paired with logOutcome
  * so a truncated log still shows what was in flight when things stopped.
+ *
+ * Runbook-dependent logs — do not remove: emits `"<action> intent"` / `"<action> done"`
+ * strings that manual QA runbooks assert (deleteRemote/Local[/Folder], moveRemote,
+ * createRemoteFolder, upload, … — see runbooks 01–04, 02, 08).
  */
 function logIntent(
   deps: ExecutorContext,
@@ -1129,6 +1136,7 @@ async function executeItem(
     }
 
     case "deleteLocal": {
+      // Runbook-dependent logs — do not remove: runbooks 01 / 03 / 04 assert deleteLocal intent/done.
       logIntent(deps, "deleteLocal", { path: localPath });
       deps.onBeforeDeleteLocal?.(pathLower);
       await fs.delete(localPath);
@@ -1138,6 +1146,7 @@ async function executeItem(
     }
 
     case "deleteRemote": {
+      // Runbook-dependent logs — do not remove: runbooks 01 / 03 assert deleteRemote intent/done.
       logIntent(deps, "deleteRemote", { path: localPath, coalesced: false });
       const verify = await verifyIndividualDeleteRemote(item, remote, store, deps.log);
       if (verify === "reclassified-download") {
@@ -1186,6 +1195,7 @@ async function executeItem(
       const conflictPath = await resolveConflictCopyPath(fs, localPath, deps.log);
       const conflictPathLower = conflictPath.toLowerCase();
 
+      // Runbook-dependent log — do not remove: runbook 04 Pass D asserts preserveAsConflictCopy / R10 wording.
       logRule(deps.log, SyncRules.R10, "preserving local bytes as conflict copy — path stays deleted", {
         path: localPath,
         conflictCopyPath: conflictPath,
@@ -1211,6 +1221,7 @@ async function executeItem(
         entry.pathDisplay,
       );
       item.conflictSiblingPath = conflictPath;
+      // Runbook-dependent log — do not remove: runbook 04 Pass D asserts canonical path not restored.
       logTemp(deps.log, "P2", "R10 conflict copy uploaded; canonical path not restored", {
         originalPath: localPath,
         conflictCopyPath: conflictPath,
@@ -1267,6 +1278,7 @@ async function executeItem(
     }
 
     case "moveRemote": {
+      // Runbook-dependent logs — do not remove: runbook 02 asserts moveRemote intent/done (+ rename/move chips).
       logIntent(deps, "moveRemote", {
         from: action.fromPath,
         to: action.toPath,
@@ -1309,6 +1321,7 @@ async function executeItem(
         logTemp(deps.log, "P5", "createRemoteFolder skipped — sync root", { path: localPath }, { location: "executor.createRemoteFolder" });
         break;
       }
+      // Runbook-dependent logs — do not remove: runbook 02 Pass F/G accept createRemoteFolder fallback.
       logIntent(deps, "createRemoteFolder", { path: localPath });
       const created = await remote.createFolder(localPath);
       await updateFolderSyncState(store, pathLower, localPath, created.pathDisplay);
@@ -1318,6 +1331,7 @@ async function executeItem(
     }
 
     case "deleteLocalFolder": {
+      // Runbook-dependent logs — do not remove: runbook 03 Pass D asserts deleteLocalFolder same cycle.
       logIntent(deps, "deleteLocalFolder", { path: localPath });
       await fs.deleteFolder(localPath);
       await store.deleteEntry(pathLower);
@@ -1326,6 +1340,7 @@ async function executeItem(
     }
 
     case "deleteRemoteFolder": {
+      // Runbook-dependent logs — do not remove: runbooks 01–03 assert deleteRemoteFolder / tree wipe.
       logIntent(deps, "deleteRemoteFolder", { path: localPath });
       try {
         await remote.delete(localPath);
@@ -1356,6 +1371,7 @@ async function executeItem(
     }
 
     case "moveRemoteFolder": {
+      // Runbook-dependent log — do not remove: runbook 02 Pass C/D/E prefer moveRemoteFolder.
       const moved = await moveRemotePath(remote, action.fromPath, action.toPath);
       await relocateFolderSyncEntry(store, action.fromPath, action.toPath, moved.pathDisplay);
       logTemp(deps.log, "P5", "moveRemoteFolder completed", {

@@ -13,7 +13,7 @@ Cancel must mean **skip for now**, not “forget forever.” After Files/Setting
 | Situation | Rule | Outcome |
 |---|---|---|
 | Linked device, local **edited** after remote delete | **R5** | Upload restores the canonical path (`local_modified_remote_deleted`) |
-| Linked device, local **unchanged** after remote delete | Ordinary delete | `deleteLocal` — no conflict copy (runbook 04 / matrix row 34) |
+| Linked device, local **unchanged** after remote delete | Ordinary delete | `deleteLocal` — no conflict copy (runbook 01 / 04 / matrix row 34) |
 | **Fresh join** (no cursor), local still holds a path Dropbox deleted | **R10** | Canonical path stays deleted; local bytes become a conflict copy |
 
 R6 sits on the fresh-join path only: when `list_revisions` finds **no** deletion evidence (or the API is missing), the plugin asks Upload / Discard / Cancel instead of deciding silently.
@@ -64,4 +64,4 @@ flowchart TD
 - **Cancel must never mean discard.** Default modal choice is `defer` so Esc/X cannot mass-delete.
 - **Per-section asks are expected on first sync.** Notes, settings, and plugins each run their own cycle and may each open the modal.
 - **`list_revisions` budget** (`MAX_REVISION_CHECKS_PER_CYCLE`) still puts overflow paths in the same ask batch rather than silent-uploading them.
-- **Manual check:** runbook [`05-delete-crossed-with-edit`](../qa/templates/_runbooks/05-delete-crossed-with-edit.md) separates R5, linked delete, and fresh-join R10; runbook **11** is the fuller unseen-delete script.
+- **Manual check:** runbook [`04-delete-edge-cases`](../qa/templates/_runbooks/04-delete-edge-cases.md) separates R5, linked delete, and never-saw / fresh-join R10.

@@ -3,7 +3,7 @@
 #
 # Unlike qa:restart (which reseeds `_seeds/` fixtures), this leaves no test
 # notes/folders — only runbooks + Obsidian config + Dropbox Sync. Use for
-# runbook 10 (Joining or rejoining).
+# runbook 07 (Joining or rejoining).
 #
 # Does NOT wipe the linked Dropbox folder. Clear that in Dropbox web when you
 # need an empty remote peer.
@@ -22,7 +22,7 @@ cd "$ROOT"
 
 VAULT="${SYNC_TESTER_VAULT:-$ROOT/qa-test-vault}"
 
-echo "==> qa:empty (empty local vault for runbook 10)"
+echo "==> qa:empty (empty local vault for runbook 07)"
 echo ""
 echo "    Local wipe:   auth, sync state, and vault files under:"
 echo "                  $VAULT"
@@ -40,7 +40,7 @@ fi
 echo ""
 echo "    After Obsidian opens:"
 echo "      1. Enable Dropbox Sync if needed; complete OAuth."
-echo "      2. Open _runbooks/10-joining-or-rejoining.md"
+echo "      2. Open _runbooks/07-joining-or-rejoining.md"
 echo "      3. Sync Now — expect download of remote files when the peer has content."
 echo ""
 

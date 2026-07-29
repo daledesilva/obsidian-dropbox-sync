@@ -340,7 +340,7 @@ async function main() {
   console.log(`  Vault: ${VAULT_ROOT}`);
   console.log(
     EMPTY_SEEDS
-      ? "  OAuth, then Sync Now (download join) — open _runbooks/10-joining-or-rejoining.md"
+      ? "  OAuth, then Sync Now (download join) — open _runbooks/07-joining-or-rejoining.md"
       : "  Sync Now once, then open _runbooks/INDEX.md",
   );
   console.log("");

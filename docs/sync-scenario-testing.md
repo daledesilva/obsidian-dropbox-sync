@@ -12,6 +12,7 @@ Release 0.2 closed the sync-scenario gap backlog in code, but regressions are ea
 | Scenario matrix | One test slot per scenario row 1–101 | `test/simulation/scenario-matrix.test.ts` |
 | Coverage map | Which rows are real vs `todo` | `qa/SIMULATION_COVERAGE.md` |
 | Manual QA vault | Real Dropbox + sandboxed Obsidian | `bun run qa:open` → in-repo `qa-test-vault/` via `obsidian-launcher` |
+| Manual runbooks | Lean multi-pass scripts (exact paths, shared Sync Now) | [QA runbooks](qa-runbooks.md) + `qa/templates/_runbooks/` |
 
 `test.todo` rows are intentional when they need harness work or a human Dropbox peer (large binaries, device sleep, re-link UI). Claiming a row means adding a `run` and updating the coverage map.
 
@@ -19,7 +20,7 @@ Open-file deferral and continuous-typing debounce are now automated for matrix r
 
 ### Delete protection / folder wipe regressions
 
-Bulk delete, Skip+cursor hold, inferred folder wipes, and keep-empty-folder behaviour are locked outside the matrix as well — they pin bugs found in live QA (runbook [`04-deleting`](../qa/templates/_runbooks/04-deleting.md)):
+Bulk delete, Skip+cursor hold, inferred folder wipes, and keep-empty-folder behaviour are locked outside the matrix as well — they pin bugs found in live QA (runbook [`03-delete-protection`](../qa/templates/_runbooks/03-delete-protection.md); simple deletes also in [`01-basic-operations`](../qa/templates/_runbooks/01-basic-operations.md)):
 
 | Layer | Files | What they lock |
 |---|---|---|
@@ -29,11 +30,11 @@ Bulk delete, Skip+cursor hold, inferred folder wipes, and keep-empty-folder beha
 | Executor | `test/executor.test.ts` | `deleteRemoteFolder` not_found soft-ok; local folder delete after file deletes |
 | Simulator | `test/simulation/delete-protection.test.ts` | Skip holds cursor on remote-originated deletes; local/remote tree wipe; keep empty folder |
 
-Manual runbook **04** remains required for Obsidian UI timing (Deletions segment before Dropbox) — simulation does not exercise `main.ts` multi-section deferDeletes.
+Manual runbook **03** (delete protection) remains required for Obsidian UI timing (Deletions segment before Dropbox) — simulation does not exercise `main.ts` multi-section deferDeletes.
 
 ### R5 / R10 / ordinary remote-delete
 
-The three-way distinction in [R6 upload ask](r6-upload-ask.md) and runbook [`05-delete-crossed-with-edit`](../qa/templates/_runbooks/05-delete-crossed-with-edit.md) is locked as:
+The three-way distinction in [R6 upload ask](r6-upload-ask.md) and runbook [`04-delete-edge-cases`](../qa/templates/_runbooks/04-delete-edge-cases.md) is locked as:
 
 | Layer | Files | What they lock |
 |---|---|---|
@@ -77,7 +78,7 @@ flowchart LR
 2. Or `qa:generate` + `qa:deploy` into `SYNC_TESTER_VAULT` / `~/Documents/sync-tester` for system Obsidian.
 
 Harness sources (`qa/generate.mjs`, `qa/templates/`) live **outside** the vault so deleting folders in Obsidian cannot wipe tracked runbooks.
-3. Follow a runbook; capture decisions via debug ingest — see [Cursor Debug ingest](cursor-debug-ingest.md).
+3. Follow a runbook; capture decisions via debug ingest — see [Cursor Debug ingest](cursor-debug-ingest.md). Format and catalog: [QA runbooks](qa-runbooks.md).
 
 ## Technical details
 
@@ -90,7 +91,7 @@ Harness sources (`qa/generate.mjs`, `qa/templates/`) live **outside** the vault 
 | `applyResurrectionGuard({ hasSyncCursor })` | R10 only on fresh join — see [Sync gap closure](sync-gap-closure.md) |
 | `qa:open` / `open-qa` / `qa:generate` / `qa:deploy` | `package.json` + `obsidian-launcher` |
 | `qa:restart` | Local wipe + regenerate **with** `_seeds/` fixtures + open |
-| `qa:empty` | Local wipe + regenerate **empty** vault (no fixtures) + open — runbook 10 |
+| `qa:empty` | Local wipe + regenerate **empty** vault (no fixtures) + open — runbook 07 |
 
 ## Technical Gotchas
 

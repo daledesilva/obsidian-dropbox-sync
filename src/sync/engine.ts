@@ -323,6 +323,7 @@ export class SyncEngine {
   trackDelete(pathLower: string, displayPath?: string): void {
     const vaultPath = displayPath ?? pathLower;
     if (!this.pathInScope(vaultPath)) {
+      // Runbook-dependent log — do not remove: runbook 06 Pass C asserts exclude / out-of-scope skip reasons.
       logTemp(this.options.log, "P4", "ignored out-of-scope delete intent", {
         path: vaultPath,
         pathLower,
@@ -391,6 +392,7 @@ export class SyncEngine {
       }
     }
     if (cleared > 0) {
+      // Runbook-dependent log — do not remove: runbook 06 Pass C asserts out-of-scope exclude skip reasons.
       logTemp(this.options.log, "P4", "cleared out-of-scope delete intents", {
         cleared,
       }, { location: "engine.clearOutOfScopeDeleteIntents" });

@@ -1,4 +1,4 @@
-# 06 — Renaming and moving
+# 02 — Renaming and moving
 
 ## Setup
 

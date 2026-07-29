@@ -1,9 +1,12 @@
-# 05 — Delete crossed with edit
+# 04 — Delete edge cases
+
+Edit-vs-delete (R5), ordinary remote delete on a linked device, and deletes a device never saw (R6 / R10). Uses different seed paths so logs stay separable (§5, §11).
 
 ## Setup
 
-1. Sync Now so `_seeds/notes/cross-delete.md` matches Dropbox.
+1. Sync Now so `_seeds/notes/cross-delete.md` and `_seeds/notes/never-saw-delete.md` match Dropbox.
 2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
+3. Peer: Dropbox web. For Pass 3, prefer a second Obsidian vault that never had base state.
 
 ---
 
@@ -23,6 +26,7 @@ After A–B:
 
 - Dropbox has no `_seeds/notes/cross-delete.md`.
 - Local vault still has `_seeds/notes/cross-delete.md` with the new string.
+- `_seeds/notes/never-saw-delete.md` untouched on both sides.
 
 ### Sync and validate (Pass 1)
 
@@ -55,15 +59,15 @@ Paths below assume Pass 1 left `_seeds/notes/cross-delete.md` synced again. If n
 
 ---
 
-## Pass 3 — D (fresh join / R10)
+## Pass 3 — D (never-saw / R10)
 
-Requires a device that still has the file on disk but no usable sync cursor. Prefer a second Obsidian vault that never linked, **or** clear this vault’s plugin sync state (base + cursor) after the remote delete below. Full join wipe: runbook **11** / `bun run qa:empty` patterns.
+Requires a device that still has the file on disk but no usable sync cursor. Prefer a second Obsidian vault that never linked, **or** clear this vault’s plugin sync state (base + cursor) after the remote delete below. Full join wipe patterns: runbook **07** / `bun run qa:empty`.
 
 ### D — Durable delete evidence + local bytes, no cursor
 
-1. Reseed or restore `_seeds/notes/cross-delete.md`, Sync Now so it is on Dropbox (linked device with base/cursor).
-2. On Dropbox web, delete `_seeds/notes/cross-delete.md`.
-3. Do **not** Sync yet. Leave the local file on disk; do not edit its content.
+1. Confirm `_seeds/notes/never-saw-delete.md` is still on Dropbox and locally (reseed + Sync Now if Pass 1–2 polluted state).
+2. On Dropbox web, delete `_seeds/notes/never-saw-delete.md`.
+3. Do **not** Sync on the linked device yet. Leave the local file on disk; do not edit its content.
 4. Clear this vault’s sync state (base + cursor), **or** switch to the never-linked second vault that still has the file.
 
 ### Sync and validate (Pass 3)
@@ -73,6 +77,6 @@ Requires a device that still has the file on disk but no usable sync cursor. Pre
 
 **Expected**
 
-- **On Dropbox:** `_seeds/notes/cross-delete.md` must **not** exist; a conflict-copy sibling **must** exist (e.g. `_seeds/notes/cross-delete (Device …'s conflicted copy YYYY-MM-DD).md`) with the pre-sync local bytes.
-- **Locally:** canonical `_seeds/notes/cross-delete.md` must **not** exist; same conflict-copy filename present with those bytes.
-- Logs: `preserveAsConflictCopy` / R10 / `list_revisions` evidence; canonical path not restored; nothing silently discarded.
+- **On Dropbox:** `_seeds/notes/never-saw-delete.md` must **not** exist; a conflict-copy sibling **must** exist (e.g. `_seeds/notes/never-saw-delete (Device …'s conflicted copy YYYY-MM-DD).md`) with the pre-sync local bytes — **or**, without durable evidence, an **ask** before re-upload or local remove (R6).
+- **Locally:** canonical `_seeds/notes/never-saw-delete.md` must **not** exist when R10 applied; same conflict-copy filename present with those bytes.
+- Never silent resurrection or silent discard. Logs: `preserveAsConflictCopy` / R10 / `list_revisions`, or the user-prompt path when evidence is missing.

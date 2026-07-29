@@ -6,7 +6,11 @@ export interface PathNoticeContext {
   remotePathDisplay?: string;
 }
 
-/** Reasons that warrant an explanatory notice beyond action counts (G13). */
+/** Reasons that warrant an explanatory notice beyond action counts (G13).
+ *
+ * Runbook-dependent notices — do not remove these reason keys without updating
+ * runbooks 01 / 04 (R5 restore, R10 conflict-copy, case-only adopt_remote_casing).
+ */
 const REASON_MESSAGES: Record<string, (path: string) => string> = {
   local_modified_remote_deleted: (path) =>
     `Dropbox Sync: restored "${path}" — you edited it after it was deleted on Dropbox.`,

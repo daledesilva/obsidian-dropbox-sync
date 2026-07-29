@@ -719,6 +719,9 @@ export class DropboxAdapter implements RemoteStorage {
   /**
    * Durable delete evidence for R6/R10. Paths that never existed return [] (not an
    * error) so first-sync seeds do not spam 409s before the batch upload ask.
+   *
+   * Runbook-dependent logs — do not remove: runbook 04 Pass D asserts `list_revisions`
+   * evidence probes (including neverExisted / entryCount payload).
    */
   async listRevisions(path: string): Promise<
     Array<{ rev: string; serverModified: number; deleted: boolean; hash: string | null }>
@@ -908,6 +911,8 @@ export class DropboxAdapter implements RemoteStorage {
             waitMs = Math.min(8_000, 1_000 * Math.pow(2, attempt)) + jitterMs;
           }
           this.extendRateLimitGate(waitMs);
+          // Runbook-dependent log — do not remove: runbook 02 Pass 2 asserts too_many_write_operations /
+          // DropboxRateLimitError as a real executor failure (retry Sync Now), not a false chip.
           this.log("dropbox 429", {
             endpoint,
             reason,
@@ -1072,6 +1077,9 @@ export class DropboxAdapter implements RemoteStorage {
   }
 }
 
+/** Thrown when Dropbox 429 retries are exhausted. `.reason` may be `too_many_write_operations`.
+ * Runbook-dependent — do not rename/remove: runbook 02 asserts DropboxRateLimitError / that reason on failed move chips.
+ */
 export class DropboxRateLimitError extends Error {
   constructor(
     message: string,

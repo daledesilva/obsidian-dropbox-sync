@@ -74,6 +74,7 @@ export function classifyCasingAction(
   }
 
   if (localChanged && !remoteChanged) {
+    // Runbook-dependent log — do not remove: runbook 01 letter D asserts case-only move / display-path update.
     logRule(log, SyncRules.R8, "local casing changed — push case-only server move", {
       path: pathLower ?? localPath,
       from: remotePathDisplay,
@@ -906,6 +907,7 @@ function planFolderItems(
       if (!deleteIntended && shouldDeleteLocalFolderForRemoteWipe(pathLower)) {
         const children = localFilesUnder(pathLower);
         if (base || children.length > 0) {
+          // Runbook-dependent log — do not remove: runbook 03 Pass D asserts deleteLocalFolder same cycle.
           logRule(log, SyncRules.R14, children.length > 0
             ? "deleteLocalFolder with planned child deletes — remote folder wipe"
             : "deleteLocalFolder — remote folder gone, local empty", {
@@ -938,6 +940,8 @@ function planFolderItems(
     if (!localExists && remoteExists) {
       if (deleteIntended || (base && shouldInferRemoteFolderDelete(pathLower))) {
         const inferred = !deleteIntended && !!base;
+        // Runbook-dependent log — do not remove: runbook 03 Pass C asserts inferred_local_tree_wipe /
+        // "inferred deleteRemoteFolder — local tree wipe without folder delete intent".
         logRule(log, SyncRules.R14, inferred
           ? "inferred deleteRemoteFolder — local tree wipe without folder delete intent"
           : "deleteRemoteFolder — folder delete intended", {

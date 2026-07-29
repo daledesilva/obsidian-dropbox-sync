@@ -895,6 +895,7 @@ export default class DropboxSyncPlugin extends Plugin {
               liveReport?.line(
                 `${sectionLabel}: skipped ${items.length} deletion(s) by protection`,
               );
+              // Runbook-dependent log — do not remove: runbook 03 Pass A asserts deletesSkipped / Skip path.
               await this.log(`deferred deletes skipped (${section})`, {
                 count: items.length,
                 sample: samplePaths(items.map((i) => i.localPath)),
@@ -1009,6 +1010,8 @@ export default class DropboxSyncPlugin extends Plugin {
         // deltas remain visible on the next sync (re-prompt / re-plan).
         await engine.commitDeferredCursor(aggregatedDeletesSkipped);
         if (aggregatedDeletesSkipped > 0) {
+          // Runbook-dependent log — do not remove: runbook 03 Pass A asserts
+          // "holding Dropbox cursor" + deletesSkipped + cursorUpdated: false.
           await this.log("deferred deletes skipped — holding Dropbox cursor", {
             deletesSkipped: aggregatedDeletesSkipped,
             cursorUpdated: engine.getLastCursorUpdated(),
@@ -2213,6 +2216,7 @@ export default class DropboxSyncPlugin extends Plugin {
       for (const f of result.failed) {
         const err = f.error;
         const detail = err ? { message: err.message, name: err.name, stack: err.stack?.split("\n").slice(0, 3).join(" | ") } : err;
+        // Runbook-dependent log — do not remove: runbook 02 correlates FAIL moveRemote + DropboxRateLimitError.
         void this.log(`FAIL ${f.item.action.type} ${f.item.localPath}`, detail);
       }
     }

@@ -12,17 +12,17 @@ When adding sims, claim the row in the matrix (add `run`) and update this table.
 |--------:|-------|--------------------|---------------|
 | §1 | Creating a file | matrix rows 1–7 | Covered |
 | §2 | Modifying a file | matrix 8, 10–17; row 9 todo (G10 editor) | Covered except open-editor |
-| §3 | Simultaneous editing | matrix 19–20, 24–25; 18/21–23 todo (editor) | Covered except editor deferral |
-| §4 | Deleting | matrix 26–28, 30–34 (row 34 asserts no conflict sibling on linked delete); 29 todo (open editor); guards + `delete-protection` + `plan-folder-items` (Skip cursor, tree wipe, keep empty); manual `04-deleting.md` | Covered |
-| §5 | Delete × edit | matrix 35–40; manual `05-delete-crossed-with-edit.md` (R5 vs linked delete vs R10) | Covered |
-| §6 | Renaming / moving | matrix 41–46 | Covered |
+| §3 | Simultaneous editing | matrix 19–20, 24–25; 18/21–23 todo (editor); manual `08-simultaneous-editing.md` | Covered except editor deferral |
+| §4 | Deleting | matrix 26–28, 30–34 (row 34 asserts no conflict sibling on linked delete); 29 todo (open editor); guards + `delete-protection` + `plan-folder-items` (Skip cursor, tree wipe, keep empty); manual `01-basic-operations.md` + `03-delete-protection.md` | Covered |
+| §5 | Delete × edit | matrix 35–40; manual `04-delete-edge-cases.md` (R5 vs linked delete vs R10 / never-saw) | Covered |
+| §6 | Renaming / moving | matrix 41–46; manual `02-renaming-and-moving.md` | Covered |
 | §7 | Capitalisation | matrix 47–53 | Covered |
 | §8 | Empty folders | matrix 54–62 | Covered |
 | §9 | Folders with files | matrix 63–74; 75 todo (Dropbox-app mass folder) | Coalesce + rename covered |
-| §10 | Join / rejoin | matrix 76–79, 81–83; 80 todo (re-link UI) | Covered except re-link |
-| §11 | Unseen deletes | matrix 82–83; `test/resurrection-guard.test.ts` + executor `preserveAsConflictCopy`; 84–85 todo (bulk / aged Dropbox-app) | R10 + expired ask covered |
-| §12 | Size / content type | matrix 88–89, 96; 86–87/90–93 todo | Binary + excludes covered |
-| §13 | Interruptions | matrix 94–96, 98–101; 97 todo (G10 defer) | Transfer failure + cursor covered |
+| §10 | Join / rejoin | matrix 76–79, 81–83; 80 todo (re-link UI); manual `07-joining-or-rejoining.md` | Covered except re-link |
+| §11 | Unseen deletes | matrix 82–83; `test/resurrection-guard.test.ts` + executor `preserveAsConflictCopy`; manual `04-delete-edge-cases.md` Pass 3; 84–85 todo (bulk / aged Dropbox-app) | R10 + expired ask covered |
+| §12 | Size / content type | matrix 88–89, 96; 86–87/90–93 todo; manual `05-file-size-and-content-type.md` | Binary + excludes covered |
+| §13 | Interruptions | matrix 94–96, 98–101; 97 todo (G10 defer); manual `06-interruptions.md` | Transfer failure + cursor covered |
 
 ## Supporting unit tests
 

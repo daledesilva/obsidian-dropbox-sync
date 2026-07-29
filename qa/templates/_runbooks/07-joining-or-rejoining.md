@@ -1,4 +1,4 @@
-# 10 — Joining or rejoining
+# 07 — Joining or rejoining
 
 ## Setup
 
