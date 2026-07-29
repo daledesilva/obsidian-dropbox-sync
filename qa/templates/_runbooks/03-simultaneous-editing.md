@@ -1,31 +1,55 @@
 # 03 — Simultaneous editing
 
-**Scenario:** `docs/sync-scenarios.md` §3  
-**Seeds:** `_seeds/notes/conflict-target.md`  
-**Remote wipe before reset:** yes
-
 ## Setup
 
-1. Sync Now so `conflict-target.md` is on Dropbox.
-2. Peer: Dropbox web (or another device) ready to edit the same file.
+1. Sync Now so `_seeds/notes/conflict-target.md` matches Dropbox.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
+3. Peer: Dropbox web ready to edit the same path.
 
-## Steps
+---
 
-1. Locally edit `conflict-target.md` to version **A** (do not sync yet if testing true race; or sync first then race the peer — follow one path consistently).
-2. On Dropbox web, edit the same path to version **B** and save (Dropbox holds B).
-3. Sync Now locally.
-4. Inspect vault: Dropbox version should keep the canonical name; local divergent bytes become a Dropbox-style conflicted copy (R2–R4).
-5. Sync Now again; conflict copy should upload and appear on Dropbox too (R3).
+## Pass 1 — A, B (one Sync Now)
 
-## Expected
+Apply **both** side edits **before** Sync Now. Do not sync between them.
 
-- Two different contents → two real files; nothing discarded (R1).
-- Canonical path holds the version already on Dropbox (R2).
-- Conflict copy name resembles Dropbox’s `… conflicted copy YYYY-MM-DD` form (R4).
+### A — Local divergent edit
 
-## Log signals
+1. Edit `_seeds/notes/conflict-target.md` to version **A** (unique local string). Leave the note closed if you want resolution this cycle (open/dirty defers — R12).
 
-- Plan/action: conflict / keep_both (or equivalent).
-- If the note stays open during Sync Now: `deferring — file is open or dirty in editor` with `action: "conflict"` (R12) — resolution is skipped this cycle and retried on a later sync (or after the ~60s deferral bound).
-- Upload of conflict copy path.
-- No silent overwrite of either version.
+### B — Peer divergent edit (Dropbox web)
+
+1. On Dropbox web, edit `_seeds/notes/conflict-target.md` to version **B** (different unique string) and save.
+
+After A–B:
+
+- Local vault holds version **A** at `_seeds/notes/conflict-target.md`.
+- Dropbox holds version **B** at `_seeds/notes/conflict-target.md`.
+
+### Sync and validate (Pass 1)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- Canonical `_seeds/notes/conflict-target.md` keeps Dropbox’s version **B** (R2).
+- Local version **A** becomes a conflicted-copy sibling (Dropbox-style name with device + date) (R4).
+- Nothing discarded (R1); conflict / keep_both (or equivalent) in the plan.
+- If the note was open/dirty: `deferring — file is open or dirty in editor` with `action: "conflict"` — resolution skipped this cycle; close the note and Sync Now again.
+
+---
+
+## Pass 2 — C (one Sync Now)
+
+### C — Conflict copy uploads
+
+1. Confirm the conflict-copy file from Pass 1 exists locally (do not delete it).
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once (skip if Pass 1 already uploaded the conflict copy).
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **C:** Conflict-copy path exists on Dropbox too (R3); both versions present on both sides.

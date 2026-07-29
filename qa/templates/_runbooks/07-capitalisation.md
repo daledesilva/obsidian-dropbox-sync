@@ -1,27 +1,46 @@
 # 07 — Capitalisation
 
-**Scenario:** `docs/sync-scenarios.md` §7  
-**Seeds:** `_seeds/case/Note.md`  
-**Remote wipe before reset:** yes
-
 ## Setup
 
-1. Sync Now so `_seeds/case/Note.md` is on Dropbox with that display casing.
+1. Sync Now so `_seeds/case/Note.md` matches Dropbox with that display casing.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
 
-## Steps
+---
 
-1. Rename `Note.md` → `note.md` (case-only) in Obsidian / Finder.
-2. Sync Now.
-3. Confirm Dropbox display path is `note.md` (one file; Dropbox is case-insensitive).
-4. Optional race: change casing locally one way and on Dropbox web the other before either sync finishes — first landing wins; no content loss (R8).
+## Pass 1 — A (one Sync Now)
 
-## Expected
+### A — Case-only file rename
 
-- Case-only change propagates; single file remains.
-- No stuck delete intent on unchanged `path_lower` (C1 / G6).
-- Content conflicts are separate from casing (R2 vs R8).
+1. Rename `_seeds/case/Note.md` → `_seeds/case/note.md` (case-only; same folder).
 
-## Log signals
+After A, local tree should include at least:
 
-- Case-only move / display-path update — not a content conflict.
-- Cursor still advances (no stuck delete log from case rename).
+- `_seeds/case/note.md`
+- no `_seeds/case/Note.md` as a second file
+
+### Sync and validate (Pass 1)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **A:** Case-only move / display-path update to `note.md`; one file remains on Dropbox; not a content conflict; no stuck delete intent on unchanged `path_lower` (C1 / G6); cursor still advances.
+
+---
+
+## Pass 2 — B (optional race)
+
+### B — Competing case changes
+
+1. Rename `_seeds/case/note.md` → `_seeds/case/NOTE.md` locally (do not sync yet).
+2. On Dropbox web, rename the same path to a different casing (e.g. `Note.md`) and save.
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **B:** Exactly one file remains; first landing casing wins; no content loss (R8).

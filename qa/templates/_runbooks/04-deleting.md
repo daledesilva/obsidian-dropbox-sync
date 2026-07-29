@@ -1,114 +1,140 @@
 # 04 — Deleting
 
-**Scenario:** `docs/sync-scenarios.md` §4 (plus G8 empty-folder / tree-wipe cases)  
-**Seeds:** `_seeds/notes/deletable.md`, `_seeds/bulk/bulk-*.md`, `_seeds/` tree, `_runbooks/`  
-**Remote wipe before reset:** yes
-
-Use this runbook after any change to delete protection, folder deletes, coalesce, or cursor finalize on Skip. The regressions below were found in live QA — each category must pass before calling deletes “done.”
-
-Automated coverage for the same contracts (without Obsidian UI): see [Sync scenario testing](../../../docs/sync-scenario-testing.md) (“Delete protection / folder wipe regressions”) and `bun test` on `test/guards.test.ts`, `test/plan-folder-items.test.ts`, `test/simulation/delete-protection.test.ts`.
-
 ## Setup
 
 1. Sync Now so `_seeds/` and `_runbooks/` match Dropbox.
-2. Agent: ingest connected (`/debug-ingest` / Send test log).
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
 3. Delete protection on; threshold at default (5) unless a step says otherwise.
 
 ---
 
-## A. Standard deletes (either way)
+## Pass 1 — A, B (one Sync Now)
 
-Single-file deletes in both directions. Confirms intent tracking and remote/local apply without bulk UI.
+Apply **all** of the following local changes in Obsidian **before** Sync Now. Do not sync between them.
 
-### A1 — Local → remote
+### A — Local single-file delete
 
-1. Delete `_seeds/notes/deletable.md` in Obsidian (or Finder with Obsidian closed — colder path).
-2. Sync Now.
-3. Confirm Dropbox no longer has the file.
+1. Delete `_seeds/notes/deletable.md`.
 
-**Expected / logs:** `deleteRemote` for the path; cursor finalize allowed when the delete log clears.
+### B — Local: delete children, keep empty folder
 
-### A2 — Remote → local
+1. Delete `_seeds/folders/empty-keep/.keep.md`.
+2. Leave the folder `_seeds/folders/empty-keep/` in place (do not delete the folder).
 
-1. Delete the same (or another synced) file on Dropbox web.
-2. Sync Now.
-3. Confirm the vault no longer has the file (trashed/removed per adapter).
+After A–B, local tree should include at least:
 
-**Expected / logs:** `deleteLocal` for the path; no re-upload of the deleted content.
+- no `_seeds/notes/deletable.md`
+- `_seeds/folders/empty-keep/` (empty)
+- `_seeds/bulk/bulk-01.md` … `_seeds/bulk/bulk-50.md` (untouched)
 
----
+### Sync and validate (Pass 1)
 
-## B. Bulk deletes (either way)
+1. Sync Now once (approve Deletions if prompted — count should be under threshold for A+B alone).
+2. Validate **logs** and **files** (vault + Dropbox agree).
 
-Mass file deletes that trip R9. Folder actions must **not** run before the confirm modal; Skip must not advance the Dropbox cursor.
+**Expected**
 
-### B1 — Bulk local → remote (approve)
-
-1. Delete many files under `_seeds/` at once (e.g. wipe most of `_seeds` in Finder/Obsidian, enough to exceed the threshold). Prefer a tree wipe so the plan includes `deleteRemote` **and** `deleteRemoteFolder` / `inferred_local_tree_wipe`.
-2. Sync Now — expect a **Deletions** segment and the confirm modal **before** any Dropbox deletes.
-3. Confirm logs show deferred delete counts including folders (e.g. `deferredDeletes` with file + folder counts) **before** you click Delete.
-4. Click **Delete**.
-5. Confirm Dropbox: files gone **and** emptied parent folders gone (no empty shell left on Dropbox that then restores locally).
-
-**Expected / logs:** `deleteRemote` / `deleteRemoteFolder` only **after** confirm; Deletions segment succeeds (not red for `not_found` on already-gone parents). Must **not** delete `.obsidian/plugins` during a Settings section pass.
-
-### B2 — Bulk local → remote (Skip holds cursor)
-
-1. Repeat a smaller bulk local delete (or restore `_seeds`, sync, delete again).
-2. Sync Now → confirm modal → click **Skip deletions**.
-3. Sync Now again immediately.
-
-**Expected / logs:** First cycle: `deletesSkipped` > 0, `holding Dropbox cursor` / `cursorUpdated: false`. Second cycle: delete prompt returns (not “up to date” with deletes vanished). Files still on Dropbox until you Approve.
-
-### B3 — Bulk remote → local (approve)
-
-1. On Dropbox web, delete a whole synced subtree (e.g. wipe `_runbooks/` or a large `_seeds` subfolder remotely).
-2. Sync Now → approve the Deletions modal.
-3. Confirm vault: files gone **and** the emptied folder removed locally in the **same** cycle (`deleteLocal` + `deleteLocalFolder`).
-
-**Expected / logs:** Plan includes `deleteLocalFolder` for the wiped folder even while children still existed at plan time; folder delete runs after file deletes; no empty local folder left behind requiring a second sync.
+- **A:** `deleteRemote` for `_seeds/notes/deletable.md`; gone on Dropbox.
+- **B:** `.keep.md` gone on Dropbox; `_seeds/folders/empty-keep/` still exists on both sides (empty folder kept).
 
 ---
 
-## C. Bulk files in folders, empty folder kept
+## Pass 2 — C, D (one Sync Now)
 
-Delete **files** inside a folder but leave the folder itself. Empty folders are first-class sync state (G8) — they must remain on both sides.
+Apply **all** of the following on Dropbox web **before** Sync Now. Do not sync between them.
 
-### C1 — Local: delete children, keep empty folder
+### C — Remote single-file delete
 
-1. Pick a folder that has several synced files (e.g. under `_seeds/bulk/` or a runbook folder).
-2. Delete **all files inside** but **do not** delete the folder.
-3. Sync Now (approve if prompted).
-4. Confirm Dropbox: files gone; **empty folder still exists**.
-5. Confirm vault: empty folder still exists (not removed, not re-filled).
+1. On Dropbox web, delete `_seeds/notes/rename-me.md`.
 
-### C2 — Remote: delete children, keep empty folder
+### D — Remote: delete children, keep empty folder
 
-1. On Dropbox web, delete the files inside a synced folder but leave the folder.
-2. Sync Now (approve if prompted).
-3. Confirm vault: files gone; **empty folder still exists** locally.
-4. Confirm Dropbox: empty folder still exists.
+1. On Dropbox web, delete `_seeds/folders/nested/deep-note.md`.
+2. Leave the folder `_seeds/folders/nested/` in place.
 
-### C3 — Do not confuse with full tree wipe
+### Sync and validate (Pass 2)
 
-If you delete the folder itself (or wipe the tree including the folder), that is category **B**, not C — empty shells should **not** remain. Category C is only “children gone, folder path intentionally kept.”
+1. Sync Now once (approve Deletions if prompted).
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **C:** `deleteLocal` for `_seeds/notes/rename-me.md`; gone from the vault; no re-upload.
+- **D:** `deep-note.md` gone locally; `_seeds/folders/nested/` still exists on both sides (empty).
 
 ---
 
-## Ambiguous / related
+## Pass 3 — E (Skip holds cursor)
 
-- Missing file with no durable delete evidence must not silently destroy the other side (R6) — use runbook **11**.
-- Delete crossed with edit — runbook **05**.
-- Folder create/empty-only matrix — runbooks **08** / **09**.
+### E — Bulk local deletes, then Skip
 
-## Log signals (quick checklist)
+1. Delete these files locally (leave `_seeds/bulk/` folder if the UI leaves it):
+   - `_seeds/bulk/bulk-01.md`
+   - `_seeds/bulk/bulk-02.md`
+   - `_seeds/bulk/bulk-03.md`
+   - `_seeds/bulk/bulk-04.md`
+   - `_seeds/bulk/bulk-05.md`
+   - `_seeds/bulk/bulk-06.md`
 
-| Signal | Means |
-|--------|--------|
-| `deferredDeletes` with file + folder counts before modal | Folder deletes peeled correctly |
-| Dropbox deletes only after Approve | No pre-modal `deleteRemoteFolder` |
-| `holding Dropbox cursor` after Skip | Skip did not consume remote deltas |
-| `inferred_local_tree_wipe` / `deleteRemoteFolder` after local tree wipe | Empty remote shells cleared |
-| `deleteLocalFolder` with remote tree wipe | Empty local shells cleared same cycle |
-| No `deleteRemoteFolder` on `.obsidian/plugins` during settings | Scope + disk folder listing OK |
-| Soft-ok `not_found` on folder delete | No false-red Deletions bar |
+### Sync and validate (Pass 3)
+
+1. Sync Now once — expect Deletions modal **before** any Dropbox deletes.
+2. Click **Skip deletions**.
+3. Sync Now again immediately — expect Deletions modal again (not “up to date” with deletes gone).
+4. Validate **logs** and **files**: those six files still on Dropbox; `deletesSkipped` > 0; `holding Dropbox cursor` / `cursorUpdated: false`.
+
+**Expected**
+
+- **E:** No `deleteRemote` for the six paths until Approve; Skip does not consume the Dropbox cursor.
+
+---
+
+## Pass 4 — F (Approve deferred)
+
+### F — Approve the skipped bulk deletes
+
+1. No further local edits required — the six `bulk-0N.md` deletes from Pass 3 are still pending.
+
+### Sync and validate (Pass 4)
+
+1. Sync Now once → Deletions modal → click **Delete**.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **F:** `deleteRemote` for `_seeds/bulk/bulk-01.md` … `bulk-06.md` only after Approve; those paths gone on Dropbox.
+
+---
+
+## Pass 5 — G (bulk local tree wipe, approve)
+
+### G — Wipe remaining bulk locally
+
+1. Delete all remaining `_seeds/bulk/bulk-07.md` … `_seeds/bulk/bulk-50.md`.
+2. Delete the folder `_seeds/bulk/` itself if it is still present.
+
+### Sync and validate (Pass 5)
+
+1. Sync Now once → Deletions modal → click **Delete**.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **G:** `deleteRemote` / `deleteRemoteFolder` / `inferred_local_tree_wipe` after confirm; `_seeds/bulk/` gone on Dropbox (no empty shell left that restores locally); must **not** delete `.obsidian/plugins`.
+
+---
+
+## Pass 6 — H (bulk remote → local, approve)
+
+### H — Remote subtree wipe
+
+1. On Dropbox web, delete the entire `_runbooks/` folder (all runbook markdown files under it).
+
+### Sync and validate (Pass 6)
+
+1. Sync Now once → Deletions modal → click **Delete**.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **H:** `deleteLocal` + `deleteLocalFolder` in the same cycle; `_runbooks/` gone locally (no empty shell left for a second sync).

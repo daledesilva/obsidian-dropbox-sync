@@ -1,9 +1,5 @@
 # 06 — Renaming and moving
 
-**Scenario:** `docs/sync-scenarios.md` §6  
-**Seeds:** `_seeds/notes/rename-me.md`, `_seeds/notes/baseline.md`, `_seeds/folders/nested/deep-note.md`, `_seeds/folders/empty-keep/`, `_seeds/bulk/`, `_seeds/binaries/`, `_seeds/case/`, `_seeds/exclude-bait/`  
-**Remote wipe before reset:** yes
-
 ## Setup
 
 1. Sync Now so `_seeds/` matches Dropbox.
@@ -19,13 +15,19 @@ Apply **all** of the following local changes in Obsidian **before** Sync Now. Do
 
 1. Rename `_seeds/notes/rename-me.md` → `_seeds/notes/renamed.md`.
 
+
+
 ### B — Simple file move (G7)
 
 1. Move `_seeds/folders/nested/deep-note.md` → `_seeds/folders/deep-note.md`.
 
+
+
 ### C — Intact populated folder rename (G8)
 
 1. Rename `_seeds/case` → `_seeds/case-renamed` (leave `Note.md` inside at `_seeds/case-renamed/Note.md`).
+
+
 
 ### D — Intact populated folder move (G8)
 
@@ -40,6 +42,8 @@ After A–D, local tree should include at least:
 - `_seeds/bulk/binaries/` (with the former binaries contents)
 - `_seeds/folders/empty-keep/.keep.md` (untouched)
 - `_seeds/exclude-bait/` (untouched)
+
+
 
 ### Sync and validate (Pass 1)
 
@@ -56,6 +60,8 @@ After A–D, local tree should include at least:
 
 ---
 
+
+
 ## Pass 2 — E, F, G, H (one Sync Now)
 
 Paths below assume Pass 1 succeeded. Apply **all** of the following local changes in Obsidian **before** Sync Now. Do not sync between them.
@@ -68,14 +74,20 @@ Doing **E and F in the same cycle** is intentional: renaming `notes` while also 
 2. Rename `_seeds/exclude-bait` → `_seeds/exclude-bait-renamed` (leave relative file names inside unchanged).
 3. Rename `_seeds/notes` → `_seeds/notes-renamed` (after F’s inner file rename below, or do F first then this rename — both before Sync Now).
 
+
+
 ### F — Folder rename + inner file rename (same cycle) — fallback OK
 
 1. Rename `_seeds/notes/baseline.md` → `_seeds/notes/baseline-renamed.md`.
 2. Then ensure the folder rename from E is applied: `_seeds/notes` → `_seeds/notes-renamed` so the file ends at `_seeds/notes-renamed/baseline-renamed.md`.
 
+
+
 ### G — Empty-keep folder rename — fallback OK
 
 1. Rename `_seeds/folders/empty-keep` → `_seeds/folders/empty-keep-renamed`.
+
+
 
 ### H — Parent rename + child moved out (compound) — fallback OK
 
@@ -93,6 +105,8 @@ After E–H, local tree should include at least:
 - `_seeds/case-renamed-again/` (vacated of `Note.md`)
 - `_seeds/folders/deep-note.md` (unchanged from Pass 1)
 
+
+
 ### Sync and validate (Pass 2)
 
 1. Sync Now once.
@@ -107,23 +121,3 @@ After E–H, local tree should include at least:
 - **H:** Detection may fall back to create+delete for vacated shells. Prefer `moveRemote` for `_seeds/case-renamed/Note.md` → `_seeds/Note.md`, then create/rename for `_seeds/case-renamed-again` and delete vacated `_seeds/case-renamed`. Must not false-pair a small folder onto a larger renamed parent. End state: `_seeds/Note.md` present; `_seeds/case-renamed-again/` present without `Note.md`.
 - **Rate limits:** A failed chip count for `moveRemote` with `DropboxRateLimitError` / `too_many_write_operations` is a **real** executor failure (not a false chip). Retry Sync Now; local files should still be present and will finish moving/uploading.
 
----
-
-## Optional peer check
-
-1. After either pass succeeds on this device, open Dropbox web (or a second vault) and confirm the same paths.
-2. Peer adopts remote renames/moves without duplicating content.
-
-## Log signals
-
-| Pass / category | Prefer to see | Also OK |
-|---|---|---|
-| Pass 1 A–B file | `moveRemote`, rename/move chip | — |
-| Pass 1 C–D intact folder | `moveRemoteFolder`, rename/move chip | — |
-| Pass 2 E intact siblings | `moveRemoteFolder` for bulk / exclude-bait | — |
-| Pass 2 E+F notes compound | file `moveRemote`s into `notes-renamed` | create+delete folder shell |
-| Pass 2 G empty-keep rename | create+delete folders | folder move if `.keep.md` travels intact |
-| Pass 2 H compound | `moveRemote` for `Note.md` out; create/delete for folder shell | delete-protection prompt for leftovers |
-
-- No conflict copies when only the path changed and content matches.
-- Failures: `too_many_write_operations` on many parallel moves — retry Sync Now; not a detection bug.

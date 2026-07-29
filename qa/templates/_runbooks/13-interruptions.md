@@ -1,28 +1,81 @@
 # 13 — Interruptions and other cases
 
-**Scenario:** `docs/sync-scenarios.md` §13  
-**Seeds:** `_seeds/notes/baseline.md`, `_seeds/exclude-bait/`
-
 ## Setup
 
-1. Sync Now.
-2. Agent: ingest connected (interruption timing is easier with live logs).
+1. Sync Now so `_seeds/` matches Dropbox.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
+3. Agent: ingest connected (interruption timing is easier with live logs).
 
-## Steps
+---
 
-1. **Mid-sync interrupt:** start Sync Now with a few pending uploads (edit several notes), quit Obsidian or disable network mid-cycle; reopen/reconnect; Sync Now again — expect resume without losing either side’s originals (R7 temp writes; partial progress retained per file where possible).
-2. **Open editor deferral (R12):** keep `baseline.md` open/dirty; change it on Dropbox web; Sync Now — download/delete may defer briefly then apply or prompt within a bound.
-3. **Exclude bait:** confirm paths under `_seeds/exclude-bait/` behave per device exclude settings (or built-in excludes) — out-of-scope paths must not be treated as mass deletes of an unsynced section (P4).
-4. **Debounce (R13):** type rapidly in a note with live sync on; expect one settled upload burst, not one upload per keystroke.
+## Pass 1 — A (mid-sync interrupt)
 
-## Expected
+### A — Quit or disconnect mid-cycle
 
-- Interrupted cycle does not corrupt destination files (atomic replace).
-- Deferrals are bounded; manual Sync Now later reaches the same conclusion (P5).
-- Exclude / scope boundaries do not invent deletions.
+1. Edit `_seeds/notes/baseline.md` — append unique line `interrupt-1`.
+2. Edit `_seeds/notes/conflict-target.md` — append unique line `interrupt-2`.
+3. Edit `_seeds/notes/rename-me.md` — append unique line `interrupt-3`.
+4. Start Sync Now; quit Obsidian or disable network mid-cycle; reopen/reconnect.
 
-## Log signals
+### Sync and validate (Pass 1)
 
-- Per-file success/failure isolation.
-- Defer / active-file skip then retry.
-- Exclude skip reasons; no unprompted mass delete of out-of-scope trees.
+1. Sync Now once after reconnect.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **A:** Resume without losing either side’s originals (R7 temp writes); partial progress retained per file where possible; no corrupt destination files (atomic replace).
+
+---
+
+## Pass 2 — B (open editor deferral)
+
+### B — Dirty local note vs remote change
+
+1. Keep `_seeds/notes/baseline.md` open and dirty in the editor.
+2. On Dropbox web, edit `_seeds/notes/baseline.md` to a different unique string and save.
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once.
+2. Validate **logs** and **files**.
+3. Close/reload the note if deferred; Sync Now again if needed.
+
+**Expected**
+
+- **B:** Download/conflict/delete may defer briefly (R12) then apply or prompt within a bound; manual Sync Now later reaches the same conclusion (P5).
+
+---
+
+## Pass 3 — C (exclude bait)
+
+### C — Out-of-scope paths
+
+1. Confirm device exclude settings (or built-in excludes) cover paths under `_seeds/exclude-bait/` if you are testing excludes — otherwise note that bait files are currently in scope.
+2. Do not delete `_seeds/exclude-bait/README.md` or `_seeds/exclude-bait/should-stay-local.md` unless your exclude test requires it.
+
+### Sync and validate (Pass 3)
+
+1. Sync Now once.
+2. Validate **logs** and **files**.
+
+**Expected**
+
+- **C:** Out-of-scope paths are not treated as mass deletes of an unsynced section (P4); exclude skip reasons in logs when excluded.
+
+---
+
+## Pass 4 — D (debounce)
+
+### D — Rapid typing with live sync
+
+1. With live sync on, type rapidly in `_seeds/notes/baseline.md` for several seconds, then stop and wait for settle.
+
+### Sync and validate (Pass 4)
+
+1. Wait for live sync to settle (or Sync Now once if live sync is off).
+2. Validate **logs** and **files**.
+
+**Expected**
+
+- **D:** One settled upload burst (R13), not one upload per keystroke.

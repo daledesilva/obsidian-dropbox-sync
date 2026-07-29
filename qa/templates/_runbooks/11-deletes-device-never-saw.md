@@ -1,28 +1,26 @@
 # 11 — Deletes a device never saw
 
-**Scenario:** `docs/sync-scenarios.md` §11  
-**Seeds:** `_seeds/notes/never-saw-delete.md`  
-**Remote wipe before reset:** yes
-
 ## Setup
 
-1. Sync Now so the seed is on Dropbox.
-2. Peer: Dropbox web.
+1. Sync Now so `_seeds/notes/never-saw-delete.md` matches Dropbox.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
+3. Peer: Dropbox web. Prefer a second Obsidian vault that never had base state for the “never knew” device.
 
-## Steps
+---
 
-1. On Dropbox web, delete `never-saw-delete.md`.
-2. Locally, simulate “never knew”: clear this device’s sync state for that path if you can (or use a second Obsidian vault that never had base state — preferred), **or** wait until revision evidence would be ambiguous (hard to wait 30 days — prefer the fresh-join device).
-3. Sync Now on the device that still has the local file but weak/no delete evidence.
-4. Expect an **ask** before re-upload or local remove — never silent resurrection or silent discard (R6).
+## Pass 1 — A (durable evidence → R10)
 
-## Expected
+### A — Remote delete, then sync on a device that still has the file
 
-- With durable revision evidence: deletion stands; local bytes may become conflict copy (R10).
-- Without evidence: prompt the user (R6).
+1. On Dropbox web, delete `_seeds/notes/never-saw-delete.md`.
+2. Do **not** Sync on the linked device yet.
+3. On a device that still has `_seeds/notes/never-saw-delete.md` on disk but weak/no base for that path (fresh-join second vault, or clear this vault’s sync state for that path), leave the file unedited.
 
-## Log signals
+### Sync and validate (Pass 1)
 
-- list_revisions / delete-evidence probe (if logged).
-- User prompt path vs automatic deleteLocal/upload.
-- No silent decision when evidence is missing.
+1. Sync Now once on that device.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **A:** With durable revision evidence: deletion stands at `_seeds/notes/never-saw-delete.md`; local bytes become a conflict copy (R10) that syncs everywhere — or, without evidence, an **ask** before re-upload or local remove (R6). Never silent resurrection or silent discard. Logs may show `list_revisions` / delete-evidence probe vs user-prompt path.

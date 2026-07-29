@@ -1,28 +1,54 @@
 # 01 — Creating a file
 
-**Scenario:** `docs/sync-scenarios.md` §1  
-**Seeds:** `_seeds/notes/`
-
 ## Setup
 
-1. Confirm vault is linked and last Sync Now finished clean.
-2. Agent: debug ingest connected; Send test log once.
+1. Sync Now so `_seeds/` matches Dropbox.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
 
-## Steps
+---
+
+## Pass 1 — A, B (one Sync Now)
+
+Apply **all** of the following local changes in Obsidian **before** Sync Now. Do not sync between them.
+
+### A — Local create
 
 1. Create `_seeds/notes/created-live.md` with a short unique sentence (include a timestamp).
-2. Sync Now (or wait for live sync).
-3. In Dropbox web, open the linked folder and confirm the file exists with the same bytes.
-4. (Optional peer) On Dropbox web, add `peer-created.md`, then Sync Now here and confirm download.
 
-## Expected
+### B — Empty file still present
 
-- Local create → upload; remote appears at the same path.
-- Peer create → download; no conflict when only one side wrote.
-- Empty file create (optional): `_seeds/binaries/empty.txt` already exists — editing it to still-empty and syncing must not treat it as missing.
+1. Confirm `_seeds/binaries/empty.txt` still exists at 0 bytes (do not delete it).
 
-## Log signals
+After A–B, local tree should include at least:
 
-- Upload / plan action for the new path (not conflict).
-- Cycle completes; cursor advances when the cycle is clean.
-- No mass-delete guard for a single create.
+- `_seeds/notes/created-live.md`
+- `_seeds/binaries/empty.txt` (0 bytes)
+- `_seeds/notes/baseline.md` (untouched)
+
+### Sync and validate (Pass 1)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **A:** Upload of `_seeds/notes/created-live.md`; same bytes on Dropbox; not a conflict.
+- **B:** Empty file remains content, not treated as missing; no delete/re-upload storm for `empty.txt`.
+
+---
+
+## Pass 2 — C (one Sync Now)
+
+### C — Peer create (Dropbox web)
+
+1. On Dropbox web, create `_seeds/notes/peer-created.md` with a short unique sentence.
+2. Do not create that path locally first.
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **C:** Download of `_seeds/notes/peer-created.md`; no conflict when only the peer wrote.

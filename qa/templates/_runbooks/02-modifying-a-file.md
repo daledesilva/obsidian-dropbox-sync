@@ -1,28 +1,57 @@
 # 02 — Modifying a file
 
-**Scenario:** `docs/sync-scenarios.md` §2  
-**Seeds:** `_seeds/notes/baseline.md`
-
 ## Setup
 
-1. Sync Now so `baseline.md` matches Dropbox.
-2. Agent: ingest connected.
+1. Sync Now so `_seeds/notes/baseline.md` matches Dropbox.
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
 
-## Steps
+---
 
-1. Edit `_seeds/notes/baseline.md` — append a unique line.
-2. Sync Now.
-3. Confirm Dropbox web shows the new content.
-4. Edit again (second modify), Sync Now, confirm both devices/peers would see the latest only (no conflict copies).
-5. Optional: re-save without changing bytes; Sync Now — expect noop / no re-upload of identical content.
+## Pass 1 — A (one Sync Now)
 
-## Expected
+### A — Local modify
 
-- Local-only modify → upload; remote hash updates; no conflict file.
-- Identical content after re-save → no spurious conflict.
+1. Edit `_seeds/notes/baseline.md` — append one unique line (include a timestamp).
 
-## Log signals
+### Sync and validate (Pass 1)
 
-- Plan: upload for the path; not conflict.
-- content_hash / rev update recorded after success.
-- Second identical sync: zero transfers or noop stats.
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **A:** Upload for `_seeds/notes/baseline.md`; Dropbox shows the new line; no conflict copy.
+
+---
+
+## Pass 2 — B (one Sync Now)
+
+### B — Second local modify
+
+1. Edit `_seeds/notes/baseline.md` again — append a second unique line.
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **B:** Upload again; Dropbox holds both appended lines; still no conflict copy.
+
+---
+
+## Pass 3 — C (one Sync Now)
+
+### C — Identical re-save
+
+1. Re-save `_seeds/notes/baseline.md` without changing bytes (touch/save only).
+
+### Sync and validate (Pass 3)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+
+**Expected**
+
+- **C:** Noop / no re-upload of identical content; no conflict copy.
