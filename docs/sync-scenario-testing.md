@@ -48,7 +48,7 @@ File and folder renames/moves (including peer-side) and sync-panel rename vs mov
 | Layer | Files | What they lock |
 |---|---|---|
 | Plan enhancements | `test/plan-enhancements-rename.test.ts` | G7 local/remote file rename/move; ambiguous hash refusal; G8 populated local/remote folder rename/move; empty / folder+inner / sync-root / empty-vs-parent / sibling / hash-mismatch / child-out-of-tree fallbacks; bijection guards (local+peer) |
-| Reporter | `test/summarize-actions.test.ts` | `isSameParentRename`; rename (`Aa`) vs move chips; agnostic modal titles |
+| Reporter | `test/summarize-actions.test.ts` | `isSameParentRename`; rename (`Aa`) vs move chips; `createRemoteFolder`/`createLocalFolder` fold into upload/download; agnostic modal titles |
 | Executor | `test/executor.test.ts` (`moveRemoteFolder` / `moveLocalFolder`) | Base prefix rewrite so children do not ghost-delete next cycle |
 
 After the solo validation pass on `release_0.2`, most rows 1–101 have real `run`s; remaining todos are listed under “Highest-priority uncovered” / “Remaining for manual” in [`qa/SIMULATION_COVERAGE.md`](../qa/SIMULATION_COVERAGE.md).

@@ -1,121 +1,129 @@
 # 06 — Renaming and moving
 
 **Scenario:** `docs/sync-scenarios.md` §6  
-**Seeds:** `_seeds/notes/rename-me.md`, `_seeds/notes/baseline.md`, `_seeds/folders/nested/deep-note.md`, `_seeds/folders/empty-keep/`, `_seeds/bulk/`, `_seeds/binaries/`, `_seeds/case/`  
-**Remote wipe before reset:** yes  
-**Contract:** Rename/move detection is best-effort — see `docs/rename-move-detection.md`. Confident detections → server-side move + rename/move chips. Ambiguous/compound cases → create+delete (or G7 file move) is **accepted**, not a failure.
+**Seeds:** `_seeds/notes/rename-me.md`, `_seeds/notes/baseline.md`, `_seeds/folders/nested/deep-note.md`, `_seeds/folders/empty-keep/`, `_seeds/bulk/`, `_seeds/binaries/`, `_seeds/case/`, `_seeds/exclude-bait/`  
+**Remote wipe before reset:** yes
 
 ## Setup
 
 1. Sync Now so `_seeds/` matches Dropbox.
-2. Prefer Sync Now once after each category below (do not batch unrelated categories into one plan unless the category says so).
+2. Prefer Sync Now once after each pass below (do not Sync Now between steps inside a pass).
 
-## A — Simple file rename (G7)
+---
 
-1. Rename `_seeds/notes/rename-me.md` → `_seeds/notes/renamed.md` in Obsidian (same parent).
-2. Sync Now.
+## Pass 1 — A, B, C, D (one Sync Now)
 
-**Expected**
+Apply **all** of the following local changes in Obsidian **before** Sync Now. Do not sync between them.
 
-- Prefer server-side move: one remote file at the new path; no stale `rename-me.md`.
-- Sync panel: **rename** chip (`Aa`), not upload+delete of different bytes when content unchanged.
+### A — Simple file rename (G7)
 
-## B — Simple file move (G7)
+1. Rename `_seeds/notes/rename-me.md` → `_seeds/notes/renamed.md`.
 
-1. Move `_seeds/folders/nested/deep-note.md` to a sibling path (e.g. `_seeds/folders/moved-here.md` or into another existing folder under `_seeds/`).
-2. Sync Now.
+### B — Simple file move (G7)
 
-**Expected**
+1. Move `_seeds/folders/nested/deep-note.md` → `_seeds/folders/deep-note.md`.
 
-- Remote path updated; content unchanged.
-- Sync panel: **move** chip (cross-directory).
+### C — Intact populated folder rename (G8)
 
-## C — Intact populated folder rename (G8)
+1. Rename `_seeds/case` → `_seeds/case-renamed` (leave `Note.md` inside at `_seeds/case-renamed/Note.md`).
 
-1. Rename a whole folder **without** renaming files inside it, e.g. `_seeds/case` → `_seeds/case-renamed` (keep `Note.md` at the same relative path).
-2. Sync Now.
+### D — Intact populated folder move (G8)
 
-**Expected**
+1. Move `_seeds/binaries` → `_seeds/bulk/binaries` (leave inner files unchanged).
 
-- Prefer one folder move (`moveRemoteFolder`): children travel with the folder; no mass upload of every child.
-- Sync panel: **rename** chip when the parent directory of the folder path is unchanged.
+After A–D, local tree should include at least:
 
-## D — Intact populated folder move (G8)
+- `_seeds/notes/renamed.md`
+- `_seeds/folders/deep-note.md`
+- `_seeds/folders/nested/` (empty leftover after B — leave it)
+- `_seeds/case-renamed/Note.md`
+- `_seeds/bulk/binaries/` (with the former binaries contents)
+- `_seeds/folders/empty-keep/.keep.md` (untouched)
+- `_seeds/exclude-bait/` (untouched)
 
-1. Move an intact populated folder to a new parent, e.g. `_seeds/binaries` → `_seeds/bulk/binaries` (do not rename inner files).
-2. Sync Now.
+### Sync and validate (Pass 1)
 
-**Expected**
-
-- Prefer one folder move; remote tree under the new path matches local relative layout.
-- Sync panel: **move** chip.
-
-## E — Sibling folder renames in one Sync Now
-
-1. Without renaming `_seeds` itself, rename two sibling folders in Obsidian before syncing, e.g.:
-   - `_seeds/notes` → `_seeds/notes-renamed`
-   - `_seeds/bulk` → `_seeds/bulk-renamed`  
-   (leave relative file names inside each folder unchanged).
-2. Sync Now once.
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
 
 **Expected**
 
-- Prefer **two** folder moves (one per sibling); no cross-claim (notes content must not land under `bulk-renamed` as a false pair).
-- Rename chips for same-parent folder renames; no spurious wipe of unrelated `_seeds` children.
+- **A:** Prefer `moveRemote` for the note; rename chip (`Aa`); no stale `rename-me.md` on Dropbox.
+- **B:** Prefer `moveRemote` to `_seeds/folders/deep-note.md`; move chip; content unchanged.
+- **C:** Prefer `moveRemoteFolder` for `_seeds/case` → `_seeds/case-renamed`; children travel with the folder; rename chip.
+- **D:** Prefer `moveRemoteFolder` for `_seeds/binaries` → `_seeds/bulk/binaries`; move chip; no mass re-upload of every child when detection succeeds.
+- End state paths match the local tree above; no silent data loss; no conflict copies when only paths changed.
 
-## F — Folder rename + inner file rename (same cycle) — fallback OK
+---
 
-1. Sync so `_seeds/folders/nested/` is on Dropbox.
-2. In Obsidian, **before** Sync Now: rename the folder **and** a file inside it, e.g.:
-   - `_seeds/folders/nested` → `_seeds/folders/nested-renamed`
-   - `deep-note.md` → `deep-note-renamed.md` inside that folder
-3. Sync Now.
+## Pass 2 — E, F, G, H (one Sync Now)
+
+Paths below assume Pass 1 succeeded. Apply **all** of the following local changes in Obsidian **before** Sync Now. Do not sync between them.
+
+Doing **E and F in the same cycle** is intentional: renaming `notes` while also renaming a file inside it forces the compound folder+inner path (create+file-moves fallback is OK).
+
+### E — Sibling folder renames (G8)
+
+1. Rename `_seeds/bulk` → `_seeds/bulk-renamed` (leave relative file names inside unchanged).
+2. Rename `_seeds/exclude-bait` → `_seeds/exclude-bait-renamed` (leave relative file names inside unchanged).
+3. Rename `_seeds/notes` → `_seeds/notes-renamed` (after F’s inner file rename below, or do F first then this rename — both before Sync Now).
+
+### F — Folder rename + inner file rename (same cycle) — fallback OK
+
+1. Rename `_seeds/notes/baseline.md` → `_seeds/notes/baseline-renamed.md`.
+2. Then ensure the folder rename from E is applied: `_seeds/notes` → `_seeds/notes-renamed` so the file ends at `_seeds/notes-renamed/baseline-renamed.md`.
+
+### G — Empty-keep folder rename — fallback OK
+
+1. Rename `_seeds/folders/empty-keep` → `_seeds/folders/empty-keep-renamed`.
+
+### H — Parent rename + child moved out (compound) — fallback OK
+
+1. Move `_seeds/case-renamed/Note.md` → `_seeds/Note.md`.
+2. Rename `_seeds/case-renamed` → `_seeds/case-renamed-again`.
+
+After E–H, local tree should include at least:
+
+- `_seeds/notes-renamed/baseline-renamed.md`
+- `_seeds/notes-renamed/renamed.md`
+- `_seeds/bulk-renamed/binaries/`
+- `_seeds/exclude-bait-renamed/`
+- `_seeds/folders/empty-keep-renamed/` (with former `empty-keep` contents)
+- `_seeds/Note.md`
+- `_seeds/case-renamed-again/` (vacated of `Note.md`)
+- `_seeds/folders/deep-note.md` (unchanged from Pass 1)
+
+### Sync and validate (Pass 2)
+
+1. Sync Now once.
+2. Validate **logs** and **files** (vault + Dropbox agree).
+3. If chips show failures with `too_many_write_operations` / rate limit: wait briefly, Sync Now again — that is expected under many parallel moves, not a detection bug.
 
 **Expected**
 
-- **Not** required to be one `moveRemoteFolder` with residuals.
-- Accepted: create+delete for the folder shell and/or **G7 file move** for the unique-hash note; upload/delete chips are fine.
-- End state: one copy of the note content at the new path; no silent loss; no conflict copies when only paths changed.
+- **E:** Prefer folder moves for intact siblings (`bulk` → `bulk-renamed`, `exclude-bait` → `exclude-bait-renamed`). `notes` → `notes-renamed` may **not** be one `moveRemoteFolder` when F also renames an inner file in the same cycle — create folder + per-file `moveRemote` (or create+delete) is accepted.
+- **F:** Not required to be one compound `moveRemoteFolder`. Accepted: `createRemoteFolder` for `_seeds/notes-renamed` plus G7 `moveRemote` for unique-hash files (including `baseline.md` → `baseline-renamed.md`); upload/delete chips are fine. End state: content under `_seeds/notes-renamed/`; no silent loss.
+- **G:** No invented folder move required — `createRemoteFolder` + `deleteRemoteFolder` (or equivalent) is accepted. End state: `_seeds/folders/empty-keep-renamed/` on both sides; no leftover `_seeds/folders/empty-keep/`.
+- **H:** Detection may fall back to create+delete for vacated shells. Prefer `moveRemote` for `_seeds/case-renamed/Note.md` → `_seeds/Note.md`, then create/rename for `_seeds/case-renamed-again` and delete vacated `_seeds/case-renamed`. Must not false-pair a small folder onto a larger renamed parent. End state: `_seeds/Note.md` present; `_seeds/case-renamed-again/` present without `Note.md`.
+- **Rate limits:** A failed chip count for `moveRemote` with `DropboxRateLimitError` / `too_many_write_operations` is a **real** executor failure (not a false chip). Retry Sync Now; local files should still be present and will finish moving/uploading.
 
-## G — Empty folder rename — fallback OK
+---
 
-1. Create a truly empty folder (no files), e.g. `_seeds/folders/empty-to-rename/`, Sync Now so it exists on Dropbox if the plugin tracks empty folders.
-2. Rename it to `_seeds/folders/empty-renamed/` (still empty).
-3. Sync Now.
+## Optional peer check
 
-**Expected**
-
-- **No** invented folder move required — `createRemoteFolder` + `deleteRemoteFolder` (or equivalent) is accepted.
-- Upload/delete / folder create-delete chips are fine; do not treat absence of a rename chip as a bug.
-
-## H — Parent rename + child moved out (compound) — fallback OK
-
-1. Sync so `_seeds` is populated on Dropbox.
-2. In one offline window:
-   - Rename parent `_seeds` → `_seeds (Renamed)` **or** leave parent and only move children — either compound pattern from QA.
-   - Also move/rename one child **out** of that tree (e.g. `_seeds/notes` → vault-root `notes (Renamed)`, and/or rename a file inside a moved folder).
-3. Sync Now.
-
-**Expected**
-
-- Detection may fall back to create+delete for vacated shells; delete-protection may prompt for leftover empty parents — **confirm only real leftovers**, not mass wipe of content that still exists under new paths.
-- **Must not:** false-pair a small folder onto a larger renamed parent (e.g. empty folder or `notes` claiming `_seeds (Renamed)` as its move target).
-- Final vault + Dropbox should agree on paths and content; no silent data loss.
-
-## I — Optional peer check
-
-1. After any category above succeeds on this device, open Dropbox web (or a second vault) and confirm the same paths.
+1. After either pass succeeds on this device, open Dropbox web (or a second vault) and confirm the same paths.
 2. Peer adopts remote renames/moves without duplicating content.
 
 ## Log signals
 
-| Category | Prefer to see | Also OK |
+| Pass / category | Prefer to see | Also OK |
 |---|---|---|
-| A–B file | `moveRemote`, rename/move chip | — |
-| C–E intact folder | `moveRemoteFolder`, rename/move chip | — |
-| F folder+inner | no compound residual folder move; often `moveRemote` for the file | create+delete |
-| G empty rename | create+delete folders | — |
-| H compound | file/folder moves for intact pieces; deletes for vacated shells | delete-protection prompt for leftovers |
+| Pass 1 A–B file | `moveRemote`, rename/move chip | — |
+| Pass 1 C–D intact folder | `moveRemoteFolder`, rename/move chip | — |
+| Pass 2 E intact siblings | `moveRemoteFolder` for bulk / exclude-bait | — |
+| Pass 2 E+F notes compound | file `moveRemote`s into `notes-renamed` | create+delete folder shell |
+| Pass 2 G empty-keep rename | create+delete folders | folder move if `.keep.md` travels intact |
+| Pass 2 H compound | `moveRemote` for `Note.md` out; create/delete for folder shell | delete-protection prompt for leftovers |
 
 - No conflict copies when only the path changed and content matches.
 - Failures: `too_many_write_operations` on many parallel moves — retry Sync Now; not a detection bug.

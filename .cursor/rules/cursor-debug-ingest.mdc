@@ -43,7 +43,7 @@ Use this rule when **debugging an Obsidian plugin on mobile**, **desktop**, or a
 1. Write **debug-ingest-offer.json** then start the relay (sidecar + socat).
 2. Ensure **Debug logging** is on; same Mac should auto-connect; mobile taps **Connect**.
 3. **Remind deploy path** (local `dist/` copy vs release + commit).
-4. Clear **only** the session log file (`.cursor/debug-<sessionId>.log`) before each reproduction run.
+4. Clear **only** `.cursor/debug-<sessionId>.log` when **preparing a new reproduction you are about to ask for** — never when the user already synced and you need to analyze. Never delete vault `sync-debug-*.log` / `sync-logs/` mid-investigation (see `preserve-sync-debug-logs.mdc`).
 5. Prefer **Send test log** in settings to verify the pipeline before diagnosing the real bug.
 6. Read the log file after reproduction; cite line evidence before fixing.
 

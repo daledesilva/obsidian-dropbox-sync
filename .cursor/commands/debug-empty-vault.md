@@ -38,7 +38,7 @@ One shot: matching ingest offer + relay for **this** session → `bun run qa:emp
 
 4. **Verify ingest** after Obsidian is up:
    - Confirm offer/relay: session matches this chat; relay is `7662 → <CURSOR_DEBUG_PORT>`.
-   - Clear **only** `.cursor/debug-<sessionId>.log` for this session (delete_file; do not wipe other `debug-*.log` files).
+   - Clear **only** `.cursor/debug-<sessionId>.log` for this session so the canary is unambiguous (delete_file; do not wipe other `debug-*.log` files, vault `sync-debug-*.log`, or `sync-logs/`). This clear is for ingest verification at vault open — not for analyzing a sync the user already ran afterward. See `preserve-sync-debug-logs.mdc`.
    - Ask the user: Debug logging on → Connected (auto on Mac; **Connect** on iPad) → **Send test log**.
    - Confirm the canary appears in `.cursor/debug-<sessionId>.log`.
 

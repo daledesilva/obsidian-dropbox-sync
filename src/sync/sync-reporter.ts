@@ -20,6 +20,7 @@ export interface ActionSummaryPart {
 /**
  * Panel / notice order: failed first (matches "N failed, … ok" copy), then
  * transfer actions, renames, moves, then conflicts/deletes.
+ * Folder creates fold into upload/download so one direction gets one chip.
  */
 const ACTION_ORDER: ActionSummaryType[] = [
   "failed",
@@ -62,6 +63,7 @@ export function isSameParentRename(fromPath: string, toPath: string): boolean {
 /**
  * Map executor action types onto panel chip categories.
  * Same-parent move* actions → rename (Aa); cross-directory → move (corner arrow).
+ * Folder creates count under upload/download so file + folder creations share one chip.
  */
 export function toActionSummaryType(action: ActionSummarySource): ActionSummaryType | null {
   const type = typeof action === "string" ? action : action.type;
@@ -86,6 +88,10 @@ export function toActionSummaryType(action: ActionSummarySource): ActionSummaryT
         return "rename";
       }
       return "move";
+    case "createLocalFolder":
+      return "download";
+    case "createRemoteFolder":
+      return "upload";
     case "deleteLocalFolder":
       return "deleteLocal";
     case "deleteRemoteFolder":
@@ -282,8 +288,9 @@ export function summarizeActionParts(
 /** 동기화 결과를 아이콘 요약 문자열로 변환. 예: "↑2 • ↓1 • 🚫 1 conflict" */
 export function summarizeActions(items: { action: { type: string; fromPath?: string; toPath?: string } }[]): string {
   const parts = summarizeActionParts(items);
-  // recordBase / mkdir / noop succeed without a user-facing transfer chip —
+  // recordBase / noop succeed without a user-facing transfer chip —
   // never fall back to "N synced" prose (that looked like a transfer with no chip).
+  // Folder creates fold into upload/download chips; folder deletes stay visible on trash chips.
   if (parts.length === 0) return "up to date";
   return parts.map(formatActionSummaryPart).join(ACTION_SUMMARY_SEPARATOR);
 }

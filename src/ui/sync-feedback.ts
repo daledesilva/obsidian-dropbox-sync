@@ -149,8 +149,9 @@ export function buildSyncResultFeedback(
     };
   }
   if (result.succeeded.length > 0) {
-    // Succeeded recordBase/mkdir-only cycles have empty chips — treat as idle,
-    // not "78 synced" plain text with nothing to click.
+    // Succeeded recordBase/noop-only cycles have empty chips — treat as idle,
+    // not "78 synced" plain text with nothing to click. Folder creates fold into
+    // upload/download chips; folder deletes stay on trash chips.
     if (summaryParts.length === 0) {
       if (resurrectionDeferred && resurrectionDeferred > 0) {
         const summary =

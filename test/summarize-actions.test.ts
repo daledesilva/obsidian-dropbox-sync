@@ -118,6 +118,14 @@ describe("isSameParentRename / toActionSummaryType", () => {
   test("moveRemote without from/to defaults to move", () => {
     expect(toActionSummaryType("moveRemote")).toBe("move");
   });
+
+  test("createRemoteFolder → upload chip", () => {
+    expect(toActionSummaryType("createRemoteFolder")).toBe("upload");
+  });
+
+  test("createLocalFolder → download chip", () => {
+    expect(toActionSummaryType("createLocalFolder")).toBe("download");
+  });
 });
 
 describe("actionSummaryModalTitle", () => {
@@ -143,6 +151,23 @@ describe("summarizeActionParts rename/move grouping", () => {
     expect(parts).toEqual([
       { type: "rename", count: 2 },
       { type: "move", count: 1 },
+    ]);
+  });
+
+  test("createRemoteFolder folds into upload chip beside deleteRemoteFolder", () => {
+    const parts = summarizeActionParts([
+      make("moveRemote", "a/old.md", "a/new.md"),
+      make("createRemoteFolder"),
+      make("createRemoteFolder"),
+      make("createRemoteFolder"),
+      make("deleteRemoteFolder"),
+      make("deleteRemoteFolder"),
+      make("deleteRemoteFolder"),
+    ]);
+    expect(parts).toEqual([
+      { type: "upload", count: 3 },
+      { type: "rename", count: 1 },
+      { type: "deleteRemote", count: 3 },
     ]);
   });
 });

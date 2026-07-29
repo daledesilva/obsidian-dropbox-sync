@@ -38,8 +38,9 @@ For a full QA vault open with ingest already matched to this Debug session, pref
    - Tap **Send test log**
    - Prefer Connect over pasting Advanced fields
 
-5. **Clear only the session log** before reproduction:
-   - Truncate/delete **only** `.cursor/debug-<sessionId>.log` for this session (do not wipe unrelated debug logs).
+5. **Clear only the session Cursor Debug log** when preparing a **new** reproduction you are about to ask for (not when analyzing a sync the user already ran):
+   - Truncate/delete **only** `.cursor/debug-<sessionId>.log` for this session.
+   - Do **not** delete vault `sync-debug-*.log`, `sync-logs/`, or other sessions’ logs. See `.cursor/rules/preserve-sync-debug-logs.mdc`.
 
 6. **Deploy if instrumented / uncommitted**
    - Local `dist/` copy includes working-tree code; CI/release builds do not.

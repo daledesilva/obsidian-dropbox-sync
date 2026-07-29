@@ -68,7 +68,7 @@ flowchart TD
 
 ### Sync panel chips
 
-`toActionSummaryType` / `isSameParentRename` map `move*` / `move*Folder` onto rename vs move. Modal titles are file/folder-agnostic (`Renamed`, `Moved`, … — no trailing “Files”). Fallback create+delete cycles show upload/delete chips instead — expected when detection refuses.
+`toActionSummaryType` / `isSameParentRename` map `move*` / `move*Folder` onto rename vs move. Folder creates fold into the normal transfer chips (`createRemoteFolder` → upload ↑, `createLocalFolder` → download ↓) so one direction gets one count that includes both files and folders. Folder deletes map to trash chips (`delete*Folder` → deleteLocal / deleteRemote). Modal titles stay file/folder-agnostic (`Renamed`, `Moved`, `Uploaded`, `Downloaded`, `Cloud Deletions`, … — no trailing “Files”). Fallback create+delete cycles therefore show **upload/download + trash**, not a separate folder-plus chip.
 
 ## Technical details
 
@@ -89,5 +89,5 @@ flowchart TD
 - **Empty folders never use G8.** No content signal — always create+delete (guards false pairs like `empty-keep` → renamed parent).
 - **Sync root (`""` / `"/"`) is never a folder-rename endpoint.** Empty remnants must not pair with the vault root (Dropbox rejects `move_v2` to `/`).
 - **Base rewrite is prefix-wide.** Updating only the folder row leaves children keyed under the old path_lower.
-- **Manual QA:** runbook `06-renaming-and-moving` categories A–H mirror these contracts (confident moves vs accepted fallbacks).
+- **Manual QA:** runbook `06-renaming-and-moving` uses two Sync Now passes — Pass 1 (A–D intact moves) then Pass 2 (E–H sibling renames + compound/empty fallbacks) — with exact seed paths. Rate-limited `move_v2` failures (`too_many_write_operations`) are real executor failures; retry Sync Now is expected, not a detection bug.
 - **Memory FS `rename` must handle folders** the same way as `VaultAdapter` so executor tests exercise `moveLocalFolder`.

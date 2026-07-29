@@ -129,4 +129,5 @@ Reusable Cursor templates also live under `_reference_ide-setup/obsidian-plugin/
 - **Ingest is fire-and-forget** — verify with **Send test log**.
 - **Scripts cannot start Cursor’s listener** — only a Debug-mode agent session can.
 - **Offer file is gitignored** (`.cursor/debug-ingest-offer.json`) — session-specific.
+- **Do not delete sync/debug logs mid-investigation.** Clear `.cursor/debug-<sessionId>.log` only when preparing a *new* reproduction you are about to ask for — never when the user already synced and you need to analyze. Never wipe vault `sync-debug-*.log` / `sync-logs/` until the user is finished committing or documenting (see `.cursor/rules/preserve-sync-debug-logs.mdc`).
 - **Vault-root log path is product behavior** — see [Plugin persistence](plugin-persistence.md).
